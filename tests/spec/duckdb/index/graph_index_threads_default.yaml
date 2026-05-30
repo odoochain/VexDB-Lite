@@ -1,0 +1,33 @@
+name: graph_index_threads_default
+tags: [vex, regression]
+description: GRAPH_INDEX threads default should pick up TaskScheduler::NumberOfThreads() rather than 1. This spec verifies CREATE INDEX without explicit WITH (threads=...) succeeds and explicit threads=1 / threads=4 also succeed.
+engines: [duckdb]
+steps:
+  - statement: CREATE TABLE t_1079144 (id INTEGER, vec FLOAT[8]);
+  - statement: INSERT INTO t_1079144 SELECT i, [(i*0.1)::FLOAT, (i*0.2)::FLOAT, (i*0.3)::FLOAT, (i*0.4)::FLOAT, (i*0.5)::FLOAT, (i*0.6)::FLOAT, (i*0.7)::FLOAT, (i*0.8)::FLOAT]::FLOAT[8] FROM range(2000) t(i);
+
+  # No explicit threads -> picks up TaskScheduler::NumberOfThreads()
+  - statement: CREATE INDEX idx_1079144_auto ON t_1079144 USING GRAPH_INDEX (vec) WITH (m=8, metric='l2');
+  - query: SELECT count(*)::INTEGER FROM (SELECT id FROM t_1079144 ORDER BY l2_distance(vec, [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]::FLOAT[8]) LIMIT 10) s;
+    _field_types: I
+    expect:
+      - - 10
+  - statement: DROP INDEX idx_1079144_auto;
+
+  # Explicit threads=1 still works (user wants single-thread)
+  - statement: CREATE INDEX idx_1079144_t1 ON t_1079144 USING GRAPH_INDEX (vec) WITH (m=8, metric='l2', threads=1);
+  - query: SELECT count(*)::INTEGER FROM (SELECT id FROM t_1079144 ORDER BY l2_distance(vec, [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]::FLOAT[8]) LIMIT 10) s;
+    _field_types: I
+    expect:
+      - - 10
+  - statement: DROP INDEX idx_1079144_t1;
+
+  # Explicit threads=4 still works
+  - statement: CREATE INDEX idx_1079144_t4 ON t_1079144 USING GRAPH_INDEX (vec) WITH (m=8, metric='l2', threads=4);
+  - query: SELECT count(*)::INTEGER FROM (SELECT id FROM t_1079144 ORDER BY l2_distance(vec, [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]::FLOAT[8]) LIMIT 10) s;
+    _field_types: I
+    expect:
+      - - 10
+  - statement: DROP INDEX idx_1079144_t4;
+
+  - statement: DROP TABLE t_1079144;

@@ -1,0 +1,48 @@
+name: graph_index_parallel_build_finalize
+tags:
+- pg-only
+- parallel-build
+- regression
+description: |
+  Bug 4 regression (post-fix discovery): flush_graph SIGSEGV after
+  end_parallel destroys the DSM segment. The first parallel-build fix
+  attempt got Build Finished but crashed during the metapage flush
+  because MemPool.vec[0].buf and the shared_* pointers still pointed
+  into the now-destroyed DSM region.
+
+  Fix (commit aa3d903): finalize_parallel() at end of build copies
+  every pool's chunk out of DSM into a fresh palloc_aligned buffer
+  in build_ctx, then nulls every shared_* pointer so flush_graph
+  resolves via local mirror state.
+
+  Verification: the full CREATE INDEX → query → DROP TABLE sequence
+  must complete without "server closed the connection unexpectedly".
+  We do CREATE → SELECT → INSERT into a different table → DROP (to
+  exercise both the flush_graph path and post-build cleanup with no
+  dangling DSM reference).
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '2GB';
+- statement: DROP TABLE IF EXISTS pb_fin;
+- statement: CREATE TABLE pb_fin (id INTEGER, vec floatvector(4));
+- statement: INSERT INTO pb_fin SELECT i, ('[' || i || ',' || (i*2) || ',' || (i*3) || ',' || (i*4) || ']')::floatvector FROM generate_series(0, 1999) AS t(i);
+- statement: CREATE INDEX idx_pb_fin ON pb_fin USING vexdb_graph (vec floatvector_l2_ops) WITH (m=8, ef_construction=64, parallel_workers=4);
+# flush_graph runs as part of CREATE INDEX commit; if it dereferenced
+# dangling DSM pointers the connection would have dropped by now.
+- query: SELECT COUNT(*) FROM pb_fin;
+  expect:
+    - ["2000"]
+# Query path: hits the flushed metapage + base graph pages.
+- query: SELECT id FROM pb_fin ORDER BY vec <-> '[100,200,300,400]'::floatvector LIMIT 1;
+  expect:
+    - ["100"]
+# Insert a fresh row to exercise post-build inserts (they should hit
+# the disk-resident graph since the in-memory MemStore is gone after
+# finalize_parallel + flush_graph).
+- statement: INSERT INTO pb_fin VALUES (3000, '[1,2,3,4]'::floatvector);
+- query: SELECT id FROM pb_fin WHERE id = 3000;
+  expect:
+    - ["3000"]
+# DROP TABLE: another teardown that the pre-fix code crashed on.
+- statement: DROP TABLE pb_fin;

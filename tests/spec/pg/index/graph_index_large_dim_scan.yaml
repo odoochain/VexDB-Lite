@@ -1,0 +1,54 @@
+# Regression: large-dim ORDER BY scan must not crash.
+# DISKANN_MAX_DIM is aligned with FLOATVECTOR_MAX_DIM (16384); columns
+# with dim > 2000 must not cause an OOB read from pool[]. This spec
+# exercises the path with a 2048-dim column.
+name: graph_index_large_dim_scan
+tags:
+- pg-only
+- regression
+- must-not-crash
+description: |
+  vexdb_graph index on a floatvector column whose dim > old DISKANN_MAX_DIM
+  must build and answer ORDER BY <-> / <#> / <=> LIMIT k queries without
+  crashing or returning fewer rows than requested.
+engines:
+- pg
+- opengauss
+steps:
+- statement: |
+    CREATE OR REPLACE FUNCTION random_array_lit(dim int) RETURNS text AS $$
+        SELECT '[' || string_agg(round(random()::numeric, 3)::text, ',') || ']'
+        FROM generate_series(1, dim);
+    $$ LANGUAGE SQL VOLATILE;
+- statement: DROP TABLE IF EXISTS t_large_dim;
+- statement: CREATE TABLE t_large_dim (id BIGINT, v floatvector(2048));
+- statement: |
+    INSERT INTO t_large_dim
+    SELECT i, random_array_lit(2048)::floatvector(2048)
+    FROM generate_series(1, 200) AS i;
+- statement: CREATE INDEX idx_large_dim_l2 ON t_large_dim USING vexdb_graph (v floatvector_l2_ops);
+- statement: SET enable_seqscan = off;
+- query: |
+    WITH q AS (SELECT random_array_lit(2048)::floatvector(2048) AS vec)
+    SELECT count(*) FROM (
+        SELECT id FROM t_large_dim ORDER BY v <-> (SELECT vec FROM q) LIMIT 20
+    ) s;
+  expect:
+  - - 20
+- query: |
+    WITH q AS (SELECT random_array_lit(2048)::floatvector(2048) AS vec)
+    SELECT count(*) FROM (
+        SELECT id FROM t_large_dim ORDER BY v <#> (SELECT vec FROM q) LIMIT 20
+    ) s;
+  expect:
+  - - 20
+- query: |
+    WITH q AS (SELECT random_array_lit(2048)::floatvector(2048) AS vec)
+    SELECT count(*) FROM (
+        SELECT id FROM t_large_dim ORDER BY v <=> (SELECT vec FROM q) LIMIT 20
+    ) s;
+  expect:
+  - - 20
+- statement: RESET enable_seqscan;
+- statement: DROP TABLE t_large_dim;
+- statement: DROP FUNCTION random_array_lit(int);

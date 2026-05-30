@@ -1,0 +1,27 @@
+name: graph_index_pq_smoke
+tags:
+- pg-only
+- pq-v1
+description: |
+  PQ v1 ship smoke. Verifies build path encode-at-flush, set_enable on
+  metapage, ADC scan, and DML-blocked guard. Requires maintenance_work_mem
+  ≥ 1GB; otherwise CREATE INDEX falls back to plain HNSW with NOTICE.
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '2GB';
+- statement: DROP TABLE IF EXISTS pq_smoke;
+- statement: CREATE TABLE pq_smoke (id INTEGER, vec floatvector(8));
+- statement: "INSERT INTO pq_smoke SELECT i,\n    ('[' || i || ',' || i || ',' || i || ',' || i || ','\n         || i || ',' || i || ',' || i || ',' || i || ']')::floatvector\nFROM generate_series(0, 499) AS t(i);"
+- statement: CREATE INDEX idx_pq ON pq_smoke USING vexdb_graph (vec) WITH (quantizer='pq', pq_m=4);
+- query: SELECT use_pq FROM vex_index_info() WHERE indexname='idx_pq';
+  expect:
+    - "t"
+- query: SELECT id FROM pq_smoke ORDER BY vec <-> '[100,100,100,100,100,100,100,100]'::floatvector LIMIT 3;
+  expect:
+    - "100"
+    - "99"
+    - "101"
+- statement: INSERT INTO pq_smoke VALUES (1000, '[1,1,1,1,1,1,1,1]'::floatvector);
+  expect_error: "DML on a PQ-enabled vexdb_graph index"
+- statement: DROP TABLE pq_smoke;

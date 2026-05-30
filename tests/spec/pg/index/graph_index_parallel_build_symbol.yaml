@@ -1,0 +1,30 @@
+name: graph_index_parallel_build_symbol
+tags:
+- pg-only
+- parallel-build
+- regression
+description: |
+  Bug 1 regression: graph_index_parallel_build_main must be exported as
+  a GLOBAL symbol so PG's parallel-worker bgw_function_name dlsym can
+  resolve it. Before the fix (vexdb_vector 1.0) the function was declared
+  extern "C" but without PGDLLEXPORT; -fvisibility=hidden made it LOCAL
+  in vexdb_vector.so and CREATE INDEX with parallel_workers>0 errored with
+  "could not find function "graph_index_parallel_build_main" in file ...".
+
+  Smoke: a tiny parallel CREATE INDEX must complete; any "could not find
+  function" error indicates the regression has returned.
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '2GB';
+- statement: DROP TABLE IF EXISTS pb_sym;
+- statement: CREATE TABLE pb_sym (id INTEGER, vec floatvector(8));
+- statement: "INSERT INTO pb_sym SELECT i, ('[' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ']')::floatvector FROM generate_series(0, 999) AS t(i);"
+- statement: CREATE INDEX idx_pb_sym ON pb_sym USING vexdb_graph (vec floatvector_l2_ops) WITH (m=16, ef_construction=128, parallel_workers=4);
+- query: SELECT COUNT(*) FROM pb_sym;
+  expect:
+    - ["1000"]
+- query: SELECT id FROM pb_sym ORDER BY vec <-> '[500,500,500,500,500,500,500,500]'::floatvector LIMIT 1;
+  expect:
+    - ["500"]
+- statement: DROP TABLE pb_sym;

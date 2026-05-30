@@ -1,0 +1,15 @@
+name: index__graph_index_hybrid_disabled
+tags:
+- duckdb-only
+- regression
+description: Multi-column GRAPH_INDEX is disabled; CREATE INDEX with more than one expression must error at bind time.
+engines:
+- duckdb
+steps:
+- statement: CREATE TABLE t_hyb (id BIGINT, v ${VECTOR(4)});
+- statement: "INSERT INTO t_hyb VALUES (1, ${VEC_LITERAL([1.0, 2.0, 3.0, 4.0], 4)}), (2, ${VEC_LITERAL([5.0, 6.0, 7.0, 8.0], 4)});"
+- statement: CREATE INDEX idx_hyb_single ON t_hyb USING ${VEX_INDEX}(v);
+- statement: DROP INDEX idx_hyb_single;
+- statement: CREATE INDEX idx_hyb_multi ON t_hyb USING ${VEX_INDEX}(v, id);
+  expect_error: 'multi'
+- statement: DROP TABLE t_hyb;

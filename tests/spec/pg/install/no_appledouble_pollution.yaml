@@ -1,0 +1,32 @@
+name: no_appledouble_pollution
+tags: [pg-only, regression, packaging, install]
+description: |
+  v0.0.6 release tarball 在 macOS 上 tar 时未禁 AppleDouble,
+  vexdb_vector-linux-{x86_64,aarch64}-pg19.tar.gz 内含 `._vexdb_vector.so` /
+  `._vexdb_vector.control` / `._vexdb_vector--1.0.sql` (xattr 资源 fork)。
+  Linux GNU tar 解包后,这些 `._*` 文件落到 share/extension/ 与 lib/postgresql/
+  目录;PG `read_extension_control_dir` 扫 `*.control` glob 把
+  `._vexdb_vector.control` 一起读 → `\dx` 报:
+    "syntax error in file \".../._vexdb_vector.control\" line 1, near token \"\""
+
+  打包侧已修 (scripts/release.sh: COPYFILE_DISABLE=1 + --exclude='._*' +
+  GNU tar 重扫验证)。本 spec 作为 "安装态防回归哨兵": 任何接到 release-test
+  流程的环境只要扫描到 ._vexdb_vector 控件文件 → pg_available_extensions
+  视图查询本身就会抛同一个 syntax error,本 spec 直接 FAIL。
+
+  docker 测试环境走 `make install` 不会污染,本 spec 在 docker 里恒过;
+  真正价值是 release-test 流程跑安装后的容器/真机时 catch 被污染的 tarball。
+engines: [pg]
+steps:
+  # 触发底层 read_extension_control_dir 扫描 *.control。
+  # 若 ._vexdb_vector.control 存在, 此 SELECT 直接抛 syntax error;
+  # 若干净, 返回 vexdb_vector 这一行。
+  - query: |
+      SELECT name FROM pg_available_extensions WHERE name = 'vexdb_vector';
+    expect: [["vexdb_vector"]]
+
+  # 进一步: 显式扫所有可用 extension, 任何 ._* 控件文件都会让本查询 fail,
+  # 不管是不是 vexdb_vector 自己的。
+  - query: |
+      SELECT count(*) >= 1 FROM pg_available_extensions WHERE name = 'vexdb_vector';
+    expect: [["t"]]

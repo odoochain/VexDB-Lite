@@ -1,0 +1,20 @@
+name: graph_index_rabitq_low_param_alloc_fail
+tags: [pg-only, regression, rabitq]
+description: |
+  rabitq quantizer + 极小 m=2/ef_construction=4 + parallel + 含 NULL 行
+  不应产生内存申请失败。缩到 2000 行 × 8d, 保留 m=2 / efc=4 / rabitq / NULL 触发条件。
+engines: [pg]
+steps:
+  - statement: SET maintenance_work_mem = '256MB';
+  - statement: DROP TABLE IF EXISTS t_1078975;
+  - statement: CREATE TABLE t_1078975 (id bigint, v floatvector(8));
+  - statement: |
+      INSERT INTO t_1078975
+      SELECT i, ('[' || array_to_string(array(SELECT ((i+j) % 100)::float/10 FROM generate_series(0,7) j), ',') || ']')::floatvector(8)
+      FROM generate_series(1, 2000) AS i;
+  - statement: INSERT INTO t_1078975 VALUES (9999, NULL);
+
+  - statement: CREATE INDEX idx_1078975 ON t_1078975 USING vexdb_graph (v floatvector_l2_ops) WITH (m = 2, ef_construction = 4, quantizer = rabitq, parallel_workers = 4);
+  - query: SELECT count(*) FROM (SELECT id FROM t_1078975 ORDER BY v <-> '[1,2,3,4,5,6,7,8]'::floatvector LIMIT 5) s;
+    expect: [["5"]]
+  - statement: DROP INDEX idx_1078975;

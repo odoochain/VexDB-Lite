@@ -1,0 +1,29 @@
+name: graph_index_quantizer_invalid
+tags: [pg-only, migrated, regression, reloption]
+description: |
+  CREATE INDEX must reject malformed quantizer reloption values
+  (non-whitelisted strings, numeric literals) instead of silently falling
+  back to NONE, and must still accept the three legal spellings
+  ('none' / 'pq' / 'rabitq').
+engines: [pg]
+steps:
+  - statement: DROP TABLE IF EXISTS t_qz_invalid;
+  - statement: CREATE TABLE t_qz_invalid (id int, v floatvector(8));
+  - statement: |
+      INSERT INTO t_qz_invalid
+      SELECT i, ('[' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ']')::floatvector
+      FROM generate_series(1, 50) AS t(i);
+
+  # Illegal quantizer values must be rejected.
+  - statement: CREATE INDEX idx_qz_bad1 ON t_qz_invalid USING vexdb_graph (v floatvector_l2_ops) WITH (quantizer='aaa');
+    expect_error: 'Invalid "quantizer" value'
+  - statement: CREATE INDEX idx_qz_bad2 ON t_qz_invalid USING vexdb_graph (v floatvector_l2_ops) WITH (quantizer='pq1');
+    expect_error: 'Invalid "quantizer" value'
+  - statement: CREATE INDEX idx_qz_bad3 ON t_qz_invalid USING vexdb_graph (v floatvector_l2_ops) WITH (quantizer=1);
+    expect_error: 'Invalid "quantizer" value'
+
+  # Legal spellings still work.
+  - statement: CREATE INDEX idx_qz_none ON t_qz_invalid USING vexdb_graph (v floatvector_l2_ops) WITH (quantizer='none');
+  - statement: DROP INDEX idx_qz_none;
+  - statement: CREATE INDEX idx_qz_pq ON t_qz_invalid USING vexdb_graph (v floatvector_l2_ops) WITH (quantizer='pq', pq_m=4);
+  - statement: DROP INDEX idx_qz_pq;

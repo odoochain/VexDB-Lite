@@ -1,0 +1,25 @@
+name: graph_index_parallel_rabitq_id_cap
+tags: [pg-only, regression, parallel, rabitq]
+description: |
+  parallel_workers=32/64 + quantizer=rabitq + 含 NULL 行,
+  parallel build 不应超出 id_to_tid cap。
+  规模缩小到 2000 行 × 32d 但保留触发条件 (并行 + rabitq + NULL 行 + m/efc 参数)。
+engines: [pg]
+steps:
+  - statement: SET maintenance_work_mem = '512MB';
+  - statement: DROP TABLE IF EXISTS t_1078974;
+  - statement: CREATE TABLE t_1078974 (id bigint, v floatvector(32));
+  - statement: |
+      INSERT INTO t_1078974
+      SELECT i, ('[' || array_to_string(array(SELECT ((i+j*5) % 300)::float/15 FROM generate_series(0,31) j), ',') || ']')::floatvector(32)
+      FROM generate_series(1, 2000) AS i;
+  - statement: INSERT INTO t_1078974 VALUES (9999, NULL);
+
+  - statement: CREATE INDEX idx_1078974a ON t_1078974 USING vexdb_graph (v floatvector_l2_ops) WITH (m = 20, ef_construction = 100, quantizer = rabitq, parallel_workers = 4);
+  - statement: DROP INDEX idx_1078974a;
+
+  - statement: CREATE INDEX idx_1078974b ON t_1078974 USING vexdb_graph (v floatvector_cosine_ops) WITH (parallel_workers = 4);
+  - statement: DROP INDEX idx_1078974b;
+
+  - statement: CREATE INDEX idx_1078974c ON t_1078974 USING vexdb_graph (v floatvector_ip_ops) WITH (parallel_workers = 4);
+  - statement: DROP INDEX idx_1078974c;

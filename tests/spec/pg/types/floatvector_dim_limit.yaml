@@ -1,0 +1,29 @@
+name: floatvector_dim_limit
+tags: [pg-only, migrated, regression, types]
+description: |
+  floatvector typmod dim cap.
+  Verified against include/floatvector.h:11 FLOATVECTOR_MAX_DIM=16384 and
+  floatvector_typmod_in (src/floatvector.cpp:279): accepted range is
+  [1, 16384]; 16385+ must be rejected at DDL time.
+engines: [pg]
+steps:
+  - statement: DROP TABLE IF EXISTS t_dim_limit;
+
+  # 1..16384 must be accepted
+  - statement: CREATE TABLE t_dim_limit (id int, v floatvector(1));
+  - statement: DROP TABLE t_dim_limit;
+  - statement: CREATE TABLE t_dim_limit (id int, v floatvector(16384));
+  - statement: DROP TABLE t_dim_limit;
+
+  # >16384 must fail
+  - statement: CREATE TABLE t_dim_limit (id int, v floatvector(16385));
+    expect_error: ""
+  - statement: CREATE TABLE t_dim_limit (id int, v floatvector(20000));
+    expect_error: ""
+
+  # Untyped floatvector (no typmod) accepts arbitrary insert dim
+  - statement: CREATE TABLE t_dim_limit (id int, v floatvector);
+  - statement: INSERT INTO t_dim_limit VALUES (1, '[1,2,3]'::floatvector);
+  - query: SELECT count(*) FROM t_dim_limit;
+    expect: [[1]]
+  - statement: DROP TABLE t_dim_limit;

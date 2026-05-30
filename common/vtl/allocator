@@ -1,0 +1,196 @@
+#ifndef VTL_ALLOCATOR_H
+#define VTL_ALLOCATOR_H
+
+#include <type_traits>
+#include <utility>
+#include <cstddef>
+#include <cstdlib>
+#include <cstring>
+#include <new>
+
+#if defined(PG_VEXDB_TARGET_DUCK)
+using MemoryContext = void *;
+static constexpr MemoryContext CurrentMemoryContext = nullptr;
+inline MemoryContext MemoryContextSwitchTo(MemoryContext ctx) { return ctx; }
+inline void *palloc(size_t size) { return std::malloc(size); }
+inline void *palloc0(size_t size) {
+    void *ptr = std::calloc(1, size);
+    if (!ptr) {
+        throw std::bad_alloc();
+    }
+    return ptr;
+}
+inline void *repalloc(void *ptr, size_t size) {
+    void *new_ptr = std::realloc(ptr, size);
+    if (!new_ptr) {
+        throw std::bad_alloc();
+    }
+    return new_ptr;
+}
+inline void pfree(void *ptr) { std::free(ptr); }
+/* MemoryContextAlloc 由 vexdb-duck/include/duck_pg_shim.hpp:56 提供 (避免重定义).
+ * 这里补 MemoryContextAllocZero — b042c2c827 引入, duck_pg_shim.hpp 未提供, 否则
+ * 编 graph_index_algorithm.h:148 的 Vector<ItemPointerData> temp 时找不到. */
+inline void *MemoryContextAllocZero(MemoryContext /*ctx*/, size_t size) { return palloc0(size); }
+inline void *palloc_aligned(size_t size, size_t align, int /*flags*/) {
+    void *ptr = nullptr;
+    if (posix_memalign(&ptr, align, size) != 0 || !ptr) {
+        throw std::bad_alloc();
+    }
+    return ptr;
+}
+#else
+#include "utils/palloc.h"
+#include "utils/memutils.h"
+#endif
+
+namespace vtl {
+
+class CtxAllocatorBase {
+public:
+    MemoryContext _ctx;
+    CtxAllocatorBase() : _ctx(CurrentMemoryContext) {}
+    CtxAllocatorBase(MemoryContext ctx) : _ctx(ctx) {}
+    CtxAllocatorBase(const CtxAllocatorBase &other) : _ctx(other._ctx) {}
+    CtxAllocatorBase &operator=(const CtxAllocatorBase &other) { _ctx = other._ctx; return *this; }
+    void swap(CtxAllocatorBase &other) { std::swap(_ctx, other._ctx); }
+    MemoryContext get_context() const { return _ctx; }
+    constexpr static size_t max_size() { return SIZE_MAX; }
+};
+
+template <class T>
+class CtxAllocator : public CtxAllocatorBase {
+public:
+    using value_type = T;
+    using pointer = T*;
+    using const_pointer = const T*;
+    using size_type = size_t;
+    using difference_type = std::ptrdiff_t;
+    template <class U> struct rebind { using other = CtxAllocator<U>; };
+
+    using CtxAllocatorBase::CtxAllocatorBase;
+    CtxAllocator(const CtxAllocator &other) : CtxAllocatorBase(other) {}
+    template <typename U> CtxAllocator(const CtxAllocator<U> &other) : CtxAllocatorBase(other) {}
+
+    /* 直接指定 _ctx 分配, 不用 MemoryContextSwitchTo 改全局 CurrentMemoryContext。
+     * 并行 build 时多 worker thread 并发 allocate/reallocate 各自容器(MemStore::elems、
+     * MemPool::vec/locks 等), 若走 SwitchTo 全局 CurrentMemoryContext 会 race: 一个
+     * worker 的 palloc 可能落到另一 worker 刚 Switch 的 _ctx, chunk 串到错误 context →
+     * MemoryContextDelete 时 double-free（并行建索引堆损坏）。
+     * MemoryContextAlloc / repalloc 不依赖全局 CurrentMemoryContext。 */
+    pointer allocate(size_type num, const void* = 0) {
+        if (num == 0) return nullptr;
+        return (pointer)MemoryContextAlloc(_ctx, num * sizeof(T));
+    }
+
+    pointer allocate_zero(size_type num, const void* = 0) {
+        if (num == 0) return nullptr;
+        return (pointer)MemoryContextAllocZero(_ctx, num * sizeof(T));
+    }
+
+    pointer reallocate(pointer p, size_type num) {
+        if (num == 0) return nullptr;
+        return (pointer)repalloc(p, num * sizeof(T));
+    }
+
+    void deallocate(pointer p, size_type = 0) { if (p) pfree(p); }
+
+    template <class U, class... Args>
+    void construct(U* p, Args&&... args) { new ((void*)p) U(std::forward<Args>(args)...); }
+
+    template <class U> void destroy(U* p) { p->~U(); }
+};
+
+template <class T, class U>
+bool operator==(const CtxAllocator<T> &, const CtxAllocator<U> &) { return true; }
+template <class T, class U>
+bool operator!=(const CtxAllocator<T> &, const CtxAllocator<U> &) { return false; }
+
+template <class T> using CurCtxAllocator = CtxAllocator<T>;
+template <class T> using HugeCtxAllocator = CtxAllocator<T>;
+template <size_t, class T> using AlignCurCtxAllocator = CtxAllocator<T>;
+
+namespace internal {
+template <typename Allocator>
+typename Allocator::pointer alloc0(Allocator &allocator, size_t s) {
+    return allocator.allocate_zero(s);
+}
+template <typename Allocator>
+typename Allocator::pointer realloc(Allocator &allocator, typename Allocator::pointer p, size_t s) {
+    return allocator.reallocate(p, s);
+}
+}
+
+template <typename Allocator>
+typename Allocator::pointer alloc0(Allocator &allocator, size_t s) {
+    return internal::alloc0(allocator, s);
+}
+template <typename Allocator>
+typename Allocator::pointer realloc(Allocator &allocator, typename Allocator::pointer p, size_t s) {
+    return internal::realloc(allocator, p, s);
+}
+
+template <typename Allocator>
+MemoryContext get_context(Allocator &allocator) { return allocator.get_context(); }
+
+} /* namespace vtl */
+
+template <typename T> using DEFAULT_ALLOCATOR = vtl::CurCtxAllocator<T>;
+template <typename T> using HUGE_ALLOCATOR = vtl::HugeCtxAllocator<T>;
+template <typename T> using CONTEXT_ALLOCATOR = vtl::CtxAllocator<T>;
+
+/* Thread-safe malloc-based allocator for parallel builds */
+namespace vtl {
+
+template <typename T>
+struct MallocAlloc {
+    using value_type = T;
+    using pointer = T*;
+    using size_type = size_t;
+    template <class U> struct rebind { using other = MallocAlloc<U>; };
+    template <class U> MallocAlloc(const MallocAlloc<U>&) {}
+    MallocAlloc() = default;
+
+    pointer allocate(size_type n) { return (pointer)::malloc(n * sizeof(T)); }
+    pointer allocate_zero(size_type n) { pointer p = allocate(n); if (p) memset(p, 0, n * sizeof(T)); return p; }
+    pointer reallocate(pointer p, size_type n) { return (pointer)::realloc(p, n * sizeof(T)); }
+    void deallocate(pointer p, size_type) { ::free(p); }
+    template <class U, class... Args> void construct(U* p, Args&&... args) { ::new(p) U(std::forward<Args>(args)...); }
+    template <class U> void destroy(U* p) { p->~U(); }
+
+    static pointer aligned_allocate(size_t align, size_t n) { void *p; posix_memalign(&p, align, n); return (pointer)p; }
+    static void aligned_deallocate(pointer p, size_t) { ::free(p); }
+};
+template <class T, class U> bool operator==(const MallocAlloc<T>&, const MallocAlloc<U>&) { return true; }
+template <class T, class U> bool operator!=(const MallocAlloc<T>&, const MallocAlloc<U>&) { return false; }
+
+/* palloc-based allocator for PG backend (default) */
+template <typename T>
+struct PgAlloc {
+    using value_type = T;
+    using pointer = T*;
+    using size_type = size_t;
+    template <class U> struct rebind { using other = PgAlloc<U>; };
+    template <class U> PgAlloc(const PgAlloc<U>&) {}
+    PgAlloc() = default;
+
+    pointer allocate(size_type n) { return (pointer)palloc(n * sizeof(T)); }
+    pointer allocate_zero(size_type n) { return (pointer)palloc0(n * sizeof(T)); }
+    pointer reallocate(pointer p, size_type n) { return (pointer)repalloc(p, n * sizeof(T)); }
+    void deallocate(pointer p, size_type) { pfree(p); }
+    template <class U, class... Args> void construct(U* p, Args&&... args) { ::new(p) U(std::forward<Args>(args)...); }
+    template <class U> void destroy(U* p) { p->~U(); }
+
+    static pointer aligned_allocate(size_t align, size_t n) { return (pointer)palloc_aligned(n, align, 0); }
+    static void aligned_deallocate(pointer p, size_t) { pfree(p); }
+};
+template <class T, class U> bool operator==(const PgAlloc<T>&, const PgAlloc<U>&) { return true; }
+template <class T, class U> bool operator!=(const PgAlloc<T>&, const PgAlloc<U>&) { return false; }
+
+} /* namespace vtl */
+
+/* Global aliases for template-template parameter defaults */
+template <typename T> using PgAlloc = vtl::PgAlloc<T>;
+template <typename T> using MallocAlloc = vtl::MallocAlloc<T>;
+
+#endif

@@ -1,0 +1,16 @@
+name: graph_index_hybrid_disabled
+tags:
+- pg-only
+- regression
+description: Multi-column vexdb_graph indexes must be rejected at CREATE INDEX time; single-column form continues to work.
+engines:
+- pg
+steps:
+- statement: DROP TABLE IF EXISTS t_hyb CASCADE;
+- statement: CREATE TABLE t_hyb (c1 int, v floatvector(4));
+- statement: "INSERT INTO t_hyb SELECT i, ('[' || i || ',1,2,3]')::floatvector(4) FROM generate_series(1,50) i;"
+- statement: CREATE INDEX idx_hyb_single ON t_hyb USING vexdb_graph (v);
+- statement: DROP INDEX idx_hyb_single;
+- statement: CREATE INDEX idx_hyb_multi ON t_hyb USING vexdb_graph (v, c1);
+  expect_error: 'multi'
+- statement: DROP TABLE t_hyb;

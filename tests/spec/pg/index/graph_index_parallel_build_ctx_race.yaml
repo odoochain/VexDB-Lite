@@ -1,0 +1,37 @@
+name: graph_index_parallel_build_ctx_race
+tags:
+- pg-only
+- regression
+- parallel-build
+description: |
+  并行 memory build 时 leader 的 build_callback 在 build_ctx 上
+  detoast / alloc_vector palloc+pfree (read_vec/free_vec), 与 worker thread 的
+  MemStore 分配 (elems realloc / CtxAllocator) 不允许并发损坏 build_ctx 的 AllocSet
+  blocks 链表导致 MemoryContextDelete(build_ctx) 时 bad-free / double-free。
+
+  注意: 必须 >10000 行才会启 std::thread worker (<=10K 走单线程, 不触发本场景)。
+  N=12000 x 64d + 高 parallel_workers + ip_ops(leader detoast) 保留触发条件。
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '2GB';
+- statement: DROP TABLE IF EXISTS t_1078974;
+- statement: CREATE TABLE t_1078974 (id bigint, v floatvector(64));
+- statement: |
+    INSERT INTO t_1078974
+    SELECT i, ('[' || array_to_string(array(SELECT ((i*7+j) % 1000)::float/100 FROM generate_series(0,63) j), ',') || ']')::floatvector(64)
+    FROM generate_series(1, 12000) AS i;
+
+# Phase A: parallel_workers=16 -- leader build_callback detoast 与 worker MemStore 分配并发
+- statement: CREATE INDEX idx_1078974_a ON t_1078974 USING vexdb_graph (v floatvector_ip_ops) WITH (m=16, ef_construction=64, parallel_workers=16);
+- query: SELECT count(*) FROM (SELECT id FROM t_1078974 ORDER BY v <#> (SELECT v FROM t_1078974 WHERE id=1) LIMIT 10) s;
+  expect:
+    - ["10"]
+- statement: DROP INDEX idx_1078974_a;
+
+# Phase B: parallel_workers=32 -- 更高并发压力
+- statement: CREATE INDEX idx_1078974_b ON t_1078974 USING vexdb_graph (v floatvector_ip_ops) WITH (m=16, ef_construction=64, parallel_workers=32);
+- query: SELECT count(*) FROM (SELECT id FROM t_1078974 ORDER BY v <#> (SELECT v FROM t_1078974 WHERE id=1) LIMIT 10) s;
+  expect:
+    - ["10"]
+- statement: DROP TABLE t_1078974;

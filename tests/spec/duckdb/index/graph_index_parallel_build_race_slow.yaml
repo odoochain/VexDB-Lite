@@ -1,0 +1,36 @@
+name: index__graph_index_parallel_build_race_slow
+tags:
+- vex
+- slow
+engines:
+- duckdb
+description: >
+  Regression for the parallel multi-worker build concurrency race in DuckDB's MemStore
+  (vex_graph_index_depend_duck.hpp). BuildBulk runs N std::thread workers that concurrently
+  read/write MemStore *outside* graph_rwlock_; the lock-free get_data fast path (introduced
+  by 56ac149f4b "perf: 搜索免锁 + get_data 走内存快路径") then read an unpublished/realloc'd
+  std::vector chunk → SEGV at 0x0 in search_upper_layer/search_layer, and dedup routed
+  multiple workers to the same point's tids → heap-buffer-overflow in push_back. Fixed by
+  build-only locking (parallel_build_active_ gates elems_veclock SHARED in get_data) plus
+  tids/GetNodeCount locks. This case forces the race: many rows (multi-worker build) +
+  heavy duplicate vectors (i % 1500 → ~4 row_ids per node, exercising dedup/tids) +
+  threads>1 + repeated build/drop to surface the probabilistic crash.
+steps:
+- statement: SET threads = 4;
+- statement: CREATE TABLE t_par (id INTEGER, vec ${VECTOR(4)});
+# 6000 rows but only ~1500 distinct vectors → dedup creates multi-tid nodes (tids race)
+# while still building a graph large enough to exercise the search/get_data read race.
+- statement: INSERT INTO t_par SELECT i, ${VEC_LITERAL([((i % 1500) * 0.0006)::FLOAT, ((i % 1500) * 0.0007)::FLOAT, ((i % 1500) * 0.0008)::FLOAT, ((i % 1500) * 0.0009)::FLOAT], 4)} FROM ${RANGE2(1, 6001)} t(i);
+- raw_directive: loop iter 0 4
+  raw_body: ''
+- statement: CREATE INDEX idx_par ON t_par USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_OPTS_L2};
+# Nearest to the all-zeros query is the i%1500==0 cluster; top-10 must return 10 rows
+# and must not crash during the parallel build above.
+- query: SELECT count(*) FROM (SELECT id FROM t_par ORDER BY ${L2(vec, ${VEC_LITERAL([0.0, 0.0, 0.0, 0.0], 4)})} LIMIT 10);
+  _field_types: I
+  expect:
+  - - 10
+- statement: DROP INDEX idx_par;
+- raw_directive: endloop
+  raw_body: ''
+- statement: DROP TABLE t_par;

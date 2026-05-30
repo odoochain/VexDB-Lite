@@ -1,0 +1,40 @@
+name: graph_index_high_dim_seqscan_order
+tags: [pg-only, regression]
+description: |
+  高维向量全表扫描 (无索引或 seqscan_on) ORDER BY 距离 LIMIT k 结果必须正确。
+  维度缩到 8192d × 100 行保证可控但仍走"高维 seqscan"路径。
+  通过构造已知最近邻数据 (i=10 的向量是全 0.10) 验证 top-k 正确性。
+engines: [pg]
+steps:
+  - statement: DROP TABLE IF EXISTS t_1078976;
+  - statement: CREATE TABLE t_1078976 (id bigint, v floatvector(8192));
+  # 每行 v = [i/100, i/100, ..., i/100] (常量向量), i ∈ [1,100]
+  - statement: |
+      INSERT INTO t_1078976
+      SELECT i,
+             ('[' || repeat((i::float/100)::text || ',', 8191) || (i::float/100)::text || ']')::floatvector(8192)
+      FROM generate_series(1, 100) AS i;
+
+  # 强制 seqscan: 关索引扫描 + 无索引
+  - statement: SET enable_indexscan = off;
+  - statement: SET enable_bitmapscan = off;
+
+  # query = [0.10,...,0.10], i=10 距离 0; i=9 / i=11 距离 = sqrt(8192)*0.01 (相等, tie)。
+  # top-1 必定是 10。 top-3 包含 {10, 9, 11}, tie 顺序 implementation-defined 不强约束。
+  - query: |
+      SELECT id FROM t_1078976
+      ORDER BY v <-> ('[' || repeat('0.10,', 8191) || '0.10]')::floatvector(8192)
+      LIMIT 1;
+    expect: [["10"]]
+  - query: |
+      SELECT id FROM (
+        SELECT id FROM t_1078976
+        ORDER BY v <-> ('[' || repeat('0.10,', 8191) || '0.10]')::floatvector(8192)
+        LIMIT 3
+      ) s ORDER BY id;
+    expect:
+      - ["9"]
+      - ["10"]
+      - ["11"]
+  - statement: RESET enable_indexscan;
+  - statement: RESET enable_bitmapscan;

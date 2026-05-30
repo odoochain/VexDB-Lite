@@ -1,0 +1,60 @@
+name: graph_index_parallel_fallback_init
+tags:
+- pg-only
+- graph-index
+- regression
+- parallel-build
+description: |
+  Regression for: parallel build 走 fallback 路径时 mem_store 未 emplace,
+  build_single_thread → build_callback 调 `mem_store-> ...` 访问未初始化的
+  Holder union 内存,MemPool 内 LWLock 字段是 garbage,
+  `LWLockAcquire(garbage_ptr)` 触发 segv in PG core `LWLockAttemptLock`。
+
+  触发场景:`pg_class.reltuples = -1`(未 ANALYZE)+ 老 cast bug 把 -1 → uint64
+  max,begin_parallel 算出 DSM 442GB,超 /dev/shm 配额,fallback 到 serial。
+  reltuples bug 已 fix(commit c8cbb7e89f),但 fallback 路径自身漏 mem_store
+  init 还是潜在 hazard — 任何让 DSM 超 budget 的场景都会踩。
+
+  此 spec 用 `vexdb_vector.vector_buffers = 1kB`(强制 DSM 估算 < /dev/shm 容易过,
+  但实际 vec_buffer pool 极小 → 进 serial fallback)。fix 前会 segv,fix 后
+  serial build 完成且 index 可查。
+
+  Fix(src/graph_index_build.cpp): begin_parallel 失败回退时调
+  init_single_thread_memstore() 补 emplace mem_store。
+
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '2GB';
+- statement: SET max_parallel_maintenance_workers = 2;
+- statement: DROP TABLE IF EXISTS gi_fb_init;
+- statement: |
+    CREATE TABLE gi_fb_init AS
+    SELECT
+      i AS id,
+      (
+        '[' || array_to_string(
+          array(SELECT (i + j)::float4 / 1000.0 FROM generate_series(0, 127) AS s(j)),
+          ','
+        ) || ']'
+      )::floatvector(128) AS vec
+    FROM generate_series(0, 9999) AS t(i);
+- statement: ANALYZE gi_fb_init;
+# 强制 begin_parallel 失败:用极小 DSM(0 worker 触发 begin_parallel 早 return false)
+- statement: SET max_parallel_maintenance_workers = 0;
+- statement: |
+    CREATE INDEX gi_fb_init_idx ON gi_fb_init
+    USING vexdb_graph (vec floatvector_l2_ops)
+    WITH (m=16, ef_construction=64, parallel_workers=4);
+- query: |
+    SELECT id FROM gi_fb_init
+    ORDER BY vec <-> (
+      '[' || array_to_string(
+        array(SELECT j::float4 / 1000.0 FROM generate_series(0, 127) AS s(j)),
+        ','
+      ) || ']'
+    )::floatvector(128)
+    LIMIT 1;
+  expect:
+    - ["0"]
+- statement: DROP TABLE gi_fb_init;

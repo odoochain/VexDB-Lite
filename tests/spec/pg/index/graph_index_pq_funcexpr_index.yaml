@@ -1,0 +1,45 @@
+# function-expression vexdb_graph index + quantizer='pq' must not crash
+# during PQ codebook training. pq.cpp training sampler must handle attno=0
+# (function-expression index) correctly; slot_getattr(slot, 0, ...) is
+# malformed and this spec ensures the correct indexprs path is taken instead.
+name: graph_index_pq_funcexpr_index
+tags:
+- pg-only
+- regression
+- pq
+description: |
+  vexdb_graph index whose indexed expression is a cast/function call
+  (here `arr::floatvector(128)`) plus quantizer='pq' must train the PQ
+  codebook and answer ORDER BY queries without crashing.
+engines:
+- pg
+- opengauss
+steps:
+- statement: DROP TABLE IF EXISTS t_pq_funcexpr;
+- statement: CREATE TABLE t_pq_funcexpr (id BIGINT, arr real[]);
+- statement: |
+    INSERT INTO t_pq_funcexpr
+    SELECT i,
+      array(SELECT ((i + j)::float4 / 100.0) FROM generate_series(1, 128) AS s(j))
+    FROM generate_series(1, 2000) AS t(i);
+# Cast-in-index-expression form: PG treats this as a function expression
+# (attnum == 0, real column in rd_indexprs), which is the path the PQ
+# sampler used to mishandle.
+- statement: |
+    CREATE INDEX idx_pq_funcexpr ON t_pq_funcexpr
+    USING vexdb_graph ((arr::floatvector(128)) floatvector_l2_ops)
+    WITH (quantizer = 'pq');
+- statement: SET enable_seqscan = off;
+- query: |
+    SELECT count(*) FROM (
+      SELECT id FROM t_pq_funcexpr
+      ORDER BY arr::floatvector(128) <-> (
+        '[' || array_to_string(
+          array(SELECT (j::float4 / 100.0)::text FROM generate_series(1, 128) AS s(j)),
+          ',') || ']')::floatvector(128)
+      LIMIT 10
+    ) s;
+  expect:
+  - - 10
+- statement: RESET enable_seqscan;
+- statement: DROP TABLE t_pq_funcexpr;

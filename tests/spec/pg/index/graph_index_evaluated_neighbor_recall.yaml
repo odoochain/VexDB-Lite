@@ -1,0 +1,42 @@
+name: graph_index_evaluated_neighbor_recall
+tags:
+- pg-only
+- recall
+engines:
+- pg
+- opengauss
+description: |
+  Regression for search_layer: every distance-evaluated point must enter the
+  result set immediately, not only when popped from the candidate queue for
+  expansion. Pre-fix, evaluated-but-not-expanded near-neighbors were silently
+  dropped — recall capped at ~98.7% on SIFT1M regardless of ef_search.
+  Post-fix matches hnswlib / pgvector `HnswEvalNeighbors`.
+steps:
+- statement: DROP TABLE IF EXISTS t_eval_nbr;
+- statement: CREATE TABLE t_eval_nbr (id INTEGER, vec floatvector(8));
+- statement: |
+    INSERT INTO t_eval_nbr SELECT i,
+      ('[' || sin(i*0.11) || ',' || cos(i*0.13) || ',' || sin(i*0.17) || ',' || cos(i*0.19)
+           || ',' || sin(i*0.23) || ',' || cos(i*0.29) || ',' || sin(i*0.31) || ',' || cos(i*0.37) || ']')::floatvector
+    FROM generate_series(1, 500) AS i;
+- statement: CREATE INDEX idx_eval_nbr ON t_eval_nbr USING vexdb_graph (vec floatvector_l2_ops) WITH (m=4, ef_construction=20);
+- statement: SET vexdb_vector.ef_search = 50;
+- query: |
+    WITH ann AS (
+      SELECT id FROM t_eval_nbr
+      ORDER BY vec <-> '[0.5,0.2,-0.3,0.1,0.8,-0.4,0.6,-0.1]'::floatvector
+      LIMIT 10
+    ),
+    brute AS (
+      SELECT id FROM (
+        SELECT id, l2_distance(vec, '[0.5,0.2,-0.3,0.1,0.8,-0.4,0.6,-0.1]'::floatvector) AS d
+        FROM t_eval_nbr
+      ) s
+      ORDER BY s.d
+      LIMIT 10
+    )
+    SELECT COUNT(*) FROM ann a JOIN brute b ON a.id = b.id;
+  _field_types: I
+  expect:
+  - - 10
+- statement: DROP TABLE t_eval_nbr;

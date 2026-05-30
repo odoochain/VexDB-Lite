@@ -1,0 +1,36 @@
+name: graph_index_oom_trigger
+tags:
+- pg-only
+- graph-index
+- regression
+description: |
+  Regression for: out_of_memory() 之前用 `MemoryContextMemAllocated(build_ctx, true)`
+  测 palloc 总量,而 ctor 已经 `MemoryContextAllocHuge(build_ctx, maintenance_work_mem)`
+  预 palloc 整段 buffer 进 build_ctx — total_space 起手就 >= avail,**first
+  build_callback 立即触发 OOM 路径**,memory build 阶段实际跑 0 行,所有数据被
+  误切到 disk path。Cohere 1M × 768d cosine 触发后,disk path 又 SIGSEGV
+  (LWLockAttemptLock at 0x6) 把 PG 整个干掉。
+
+  Fix:测 `alloc_state->offset`(bump-allocator 实际用量)代替 palloc 总量。
+  小/中数据集 < maintenance_work_mem 时,memory build 全程跑;只有真正用满
+  才切 disk。
+
+  这个 spec 不直接测 segfault(那是 disk path 上独立的 Bug B),只验证
+  小数据集的 CREATE INDEX 仍能 build 出可查询的 graph index,且不会在
+  pg 日志里报 "graph no longer fits ... after 0 tuples"(那是 Bug A 标志)。
+
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '2GB';
+- statement: DROP TABLE IF EXISTS gi_oom;
+- statement: CREATE TABLE gi_oom (id INTEGER, vec floatvector(16));
+- statement: "INSERT INTO gi_oom SELECT i, ('[' || array_to_string(array(SELECT i + j FROM generate_series(0,15) AS s(j)), ',') || ']')::floatvector FROM generate_series(0, 9999) AS t(i);"
+# 10k × 16d × 4B = 640KB 数据,远小于 2GB maintenance_work_mem。
+# Bug A 修了之后,应该全程 memory build(快、不切 disk)。
+- statement: CREATE INDEX gi_oom_idx ON gi_oom USING vexdb_graph (vec floatvector_l2_ops) WITH (m=16, ef_construction=64, parallel_workers=0);
+# Build 完后能正常 ANN 查询。
+- query: SELECT id FROM gi_oom ORDER BY vec <-> '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]'::floatvector LIMIT 1;
+  expect:
+    - ["0"]
+- statement: DROP TABLE gi_oom;

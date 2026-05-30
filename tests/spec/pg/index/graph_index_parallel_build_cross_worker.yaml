@@ -1,0 +1,44 @@
+name: graph_index_parallel_build_cross_worker
+tags:
+- pg-only
+- parallel-build
+- regression
+description: |
+  Bug 3 regression: cross-worker MemPool chunk visibility. Before the
+  fix each parallel worker had its own MemPool.vec[Chunk] mapping —
+  worker A's inserted nodes were stored at DSM offset X via worker A's
+  local mapping, but worker B's lookup of the same id resolved through
+  worker B's separate mapping pointing at a different DSM region, so
+  cross-worker HNSW neighbor reads dereferenced uninitialised memory
+  and SIGSEGV'd.
+
+  After the fix all chunk offsets live in GraphIndexShared.chunk_offsets
+  and every participant attaches via MemPool::ParallelAttach to the
+  same physical region.
+
+  Verification: a parallel build large enough that workers must read
+  each other's inserted nodes during neighbor search (m=16 means each
+  insert touches ~16 existing nodes; with 100K rows and 4 workers we
+  cross at least hundreds of inter-worker reads). The build must
+  complete and the query must return correctly ordered neighbors.
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '2GB';
+- statement: DROP TABLE IF EXISTS pb_xw;
+- statement: CREATE TABLE pb_xw (id INTEGER, vec floatvector(8));
+# 10K rows: enough for inter-worker dependencies, small enough for CI.
+- statement: "INSERT INTO pb_xw SELECT i, ('[' || (i%97) || ',' || (i%89) || ',' || (i%83) || ',' || (i%79) || ',' || (i%73) || ',' || (i%71) || ',' || (i%67) || ',' || (i%61) || ']')::floatvector FROM generate_series(0, 9999) AS t(i);"
+- statement: CREATE INDEX idx_pb_xw ON pb_xw USING vexdb_graph (vec floatvector_l2_ops) WITH (m=16, ef_construction=128, parallel_workers=4);
+# Query a known vector — id 0 has vector all-zero on most dims, so its
+# nearest should be itself, then ids with same residue.
+- query: SELECT COUNT(*) FROM (SELECT id FROM pb_xw ORDER BY vec <-> '[0,0,0,0,0,0,0,0]'::floatvector LIMIT 20) sub;
+  expect:
+    - ["20"]
+# Symmetric: query an existing vector should hit itself first.
+# id=50 has vector [50%97, 50%89, 50%83, 50%79, 50%73, 50%71, 50%67, 50%61]
+# = [50, 50, 50, 50, 50, 50, 50, 50] — an exact match, distance 0.
+- query: SELECT id FROM pb_xw ORDER BY vec <-> '[50,50,50,50,50,50,50,50]'::floatvector LIMIT 1;
+  expect:
+    - ["50"]
+- statement: DROP TABLE pb_xw;
