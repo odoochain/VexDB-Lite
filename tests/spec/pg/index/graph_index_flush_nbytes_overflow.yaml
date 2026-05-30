@@ -1,0 +1,68 @@
+name: graph_index_flush_nbytes_overflow
+tags:
+- pg-only
+- graph-index
+- regression
+- parallel-build
+- slow
+description: |
+  Regression for: `int nbytes = actual_copy_num * vector_size;` 在
+  `flush_graph` Vector flush 段对 1M × 768d × 4B = 3.07GB 单 chunk
+  会 sign-overflow。`int nbytes` 隐式转 `size_t` (vec_write 参数) 后
+  变成 0xFFFFFFFFB7195000 ≈ 18 EB,vec_write `while (written < nbytes)`
+  写完合法 buffer 后继续往后扫,扫到已 detach 的 DSM 页 →
+  SIGSEGV at libc memmove。
+
+  基线症状:1M Cohere cosine parallel build,Graph Build 完成 ~20min,
+  4 个 Flushing 全部打印 ok,然后 backend SIGSEGV,dmesg:
+    segfault at <DSM_BASE> ip <libc_memmove> error 4 in libc
+
+  basepoint/upperpoint 不触发(单 batch ≤ 10MB),只 vector_pool 漏。
+  200k × 3072 = 614MB < INT_MAX 也不触发(早期 200k 复现未崩,印证)。
+
+  Fix: 改 `int nbytes` 为 `size_t nbytes` 两处(PQ + non-PQ 路径)。
+
+  此 spec 不直接重 1M(耗时太久),用一个能触发同样溢出条件的
+  设计:128d × 8 字节(int8 vector)× 2.1M ~= 2.15 GB,跨过 INT_MAX。
+  实际跑 1M 需要 ~20min,这里取 maintenance_work_mem 给少点 + 用 floatvector(769)
+  让单元素大小 3076 byte(尽量贴近真实场景),只要 1M 行就稳触发。
+
+  目标:只要 build 跑到 Flushing Vector 末段不崩,index 可查,就算回归通过。
+
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '2GB';
+- statement: SET max_parallel_maintenance_workers = 2;
+- statement: DROP TABLE IF EXISTS gi_nbytes;
+# 用一个最小可触发数据集:行数 × 单元素 > INT_MAX。
+# floatvector(768) × 4B = 3072B,800k × 3072 = 2.45GB,比 INT_MAX (2.15GB)
+# 多 310MB safety margin。CREATE TABLE AS + parallel build 实测 15-25min。
+- statement: |
+    CREATE TABLE gi_nbytes AS
+    SELECT
+      i AS id,
+      (
+        '[' || array_to_string(
+          array(SELECT (i + j)::float4 / 1000.0 FROM generate_series(0, 767) AS s(j)),
+          ','
+        ) || ']'
+      )::floatvector(768) AS vec
+    FROM generate_series(0, 799999) AS t(i);
+- statement: ANALYZE gi_nbytes;
+- statement: |
+    CREATE INDEX gi_nbytes_idx ON gi_nbytes
+    USING vexdb_graph (vec floatvector_l2_ops)
+    WITH (m=16, ef_construction=64, parallel_workers=2);
+- query: |
+    SELECT id FROM gi_nbytes
+    ORDER BY vec <-> (
+      '[' || array_to_string(
+        array(SELECT j::float4 / 1000.0 FROM generate_series(0, 767) AS s(j)),
+        ','
+      ) || ']'
+    )::floatvector(768)
+    LIMIT 1;
+  expect:
+    - ["0"]
+- statement: DROP TABLE gi_nbytes;

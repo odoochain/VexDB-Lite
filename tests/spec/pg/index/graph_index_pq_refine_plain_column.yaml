@@ -1,0 +1,70 @@
+# PQ-quantized vexdb_graph index on a plain column (attnum > 0) must not
+# crash inside fetch_vec_via_slot on the first ORDER BY scan. The refine
+# path (need_refine=true for PQDistancer) exercises fetch_vec_via_slot;
+# NO_QUANT never reaches this branch.
+name: graph_index_pq_refine_plain_column
+tags:
+- pg-only
+- regression
+- pq
+description: |
+  PQ-quantized vexdb_graph on a plain (non-expression) column must answer
+  ORDER BY LIMIT queries — exercising algorithm::refine → store.
+  fetch_vec_from_heap → fetch_vec_via_slot — without crashing.
+engines:
+- pg
+- opengauss
+steps:
+- statement: DROP TABLE IF EXISTS t_pq_refine;
+- statement: CREATE TABLE t_pq_refine (id BIGINT, v floatvector(128));
+- statement: |
+    INSERT INTO t_pq_refine
+    SELECT i,
+      ('[' || array_to_string(
+         array(SELECT ((i + j)::float4 / 100.0)::text
+               FROM generate_series(1, 128) AS s(j)),
+         ',') || ']')::floatvector(128)
+    FROM generate_series(1, 2000) AS i;
+# PQ needs enough training samples; 2k rows × 128d trains all 32 subquantizers.
+- statement: |
+    CREATE INDEX idx_pq_refine ON t_pq_refine
+    USING vexdb_graph (v floatvector_l2_ops)
+    WITH (quantizer = 'pq');
+- statement: SET enable_seqscan = off;
+# Each ORDER BY drives algorithm::search → refine on PQDistancer, which
+# fetches the original vectors from the heap. Before the fix this segv'd.
+- query: |
+    SELECT count(*) FROM (
+      SELECT id FROM t_pq_refine
+      ORDER BY v <-> ('[' || array_to_string(
+         array(SELECT (j::float4 / 100.0)::text
+               FROM generate_series(1, 128) AS s(j)),
+         ',') || ']')::floatvector(128)
+      LIMIT 10
+    ) s;
+  expect:
+  - - 10
+- query: |
+    SELECT count(*) FROM (
+      SELECT id FROM t_pq_refine
+      ORDER BY v <#> ('[' || array_to_string(
+         array(SELECT (j::float4 / 100.0)::text
+               FROM generate_series(1, 128) AS s(j)),
+         ',') || ']')::floatvector(128)
+      LIMIT 10
+    ) s;
+  expect:
+  - - 10
+- query: |
+    SELECT count(*) FROM (
+      SELECT id FROM t_pq_refine
+      ORDER BY v <=> ('[' || array_to_string(
+         array(SELECT (j::float4 / 100.0)::text
+               FROM generate_series(1, 128) AS s(j)),
+         ',') || ']')::floatvector(128)
+      LIMIT 10
+    ) s;
+  expect:
+  - - 10
+- statement: RESET enable_seqscan;
+- statement: DROP TABLE t_pq_refine;

@@ -1,0 +1,18 @@
+name: graph_index_parallel_workers_1_oom
+tags: [pg-only, regression, parallel]
+description: |
+  CREATE INDEX ... WITH (parallel_workers = 1) must succeed without
+  "Allocator out of memory". parallel_workers=1 is the single-worker
+  parallel path.
+engines: [pg]
+steps:
+  - statement: DROP TABLE IF EXISTS t_1078835;
+  - statement: CREATE TABLE t_1078835 (id bigint, v floatvector(16));
+  - statement: |
+      INSERT INTO t_1078835
+      SELECT i, ('[' || array_to_string(array(SELECT (i+j)::float/100 FROM generate_series(0,15) j), ',') || ']')::floatvector(16)
+      FROM generate_series(1, 500) AS i;
+  - statement: CREATE INDEX idx_pw1 ON t_1078835 USING vexdb_graph (v floatvector_l2_ops) WITH (parallel_workers = 1);
+  - query: SELECT count(*) FROM (SELECT id FROM t_1078835 ORDER BY v <-> '[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,1.1,1.2,1.3,1.4,1.5,1.6]'::floatvector LIMIT 10) s;
+    expect: [["10"]]
+  - statement: DROP INDEX idx_pw1;

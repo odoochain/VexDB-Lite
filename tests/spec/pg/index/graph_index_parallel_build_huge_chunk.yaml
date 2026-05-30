@@ -1,0 +1,27 @@
+name: graph_index_parallel_build_huge_chunk
+tags:
+- pg-only
+- parallel-build
+- regression
+description: |
+  Parallel CREATE INDEX must survive when the per-pool DSM chunk
+  legitimately exceeds the 1GB MaxAllocSize cap. Triggered by wide
+  vectors + large maintenance_work_mem + parallel workers: the leader
+  sizes one chunk per pool to hold all rows, and the over-estimated
+  row count (nblocks * 200 * 2) lifts wide-vector chunks past 1GB.
+
+  floatvector(256) × 10000 rows has the same per-row width as the
+  original halfvector(512) repro (256*4 = 512*2 = 1024B), reproducing
+  the chunk-size math after the halfvector type was removed.
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '4GB';
+- statement: DROP TABLE IF EXISTS pb_huge_chunk;
+- statement: CREATE TABLE pb_huge_chunk (id BIGINT, v floatvector(256));
+- statement: "INSERT INTO pb_huge_chunk SELECT i, ('[' || array_to_string(array(SELECT 1 FROM generate_series(1,256)), ',') || ']')::floatvector(256) FROM generate_series(1,10000) AS t(i);"
+- statement: CREATE INDEX idx_pb_huge_chunk ON pb_huge_chunk USING vexdb_graph (v floatvector_l2_ops) WITH (parallel_workers=8);
+- query: SELECT COUNT(*) FROM pb_huge_chunk;
+  expect:
+    - ["10000"]
+- statement: DROP TABLE pb_huge_chunk;

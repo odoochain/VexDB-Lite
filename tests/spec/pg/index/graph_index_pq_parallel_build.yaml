@@ -1,0 +1,37 @@
+name: graph_index_pq_parallel_build
+tags:
+- pg-only
+- pq-v1
+- parallel-build
+description: |
+  Regression for 87f11d5ff5 (PQ v1 restore) × 483b41e8c2 (PG parallel
+  HNSW build). PQ training runs leader-side from heap samples before
+  parallel workers launch; workers populate raw vectors into DSM; the
+  leader's flush_graph encodes raw → PQ codes after finalize_parallel
+  has copied DSM chunks back to local memory.
+
+  Catches: PQ stubbed out (init_quantizer returns false silently), or
+  flush_graph reading dangling DSM pointers when vec[1+] not copied,
+  or set_enable() ordering vs metapage flush in parallel path.
+
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '2GB';
+- statement: DROP TABLE IF EXISTS pq_par;
+- statement: CREATE TABLE pq_par (id INTEGER, vec floatvector(8));
+- statement: "INSERT INTO pq_par SELECT i, ('[' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ']')::floatvector FROM generate_series(0, 999) AS t(i);"
+
+# parallel_workers=2 + quantizer=pq: leader trains codebook, workers
+# fill DSM with raw vectors, finalize_parallel copies chunks out,
+# flush_graph encodes to PQ codes and flips set_enable.
+- statement: CREATE INDEX idx_pq_par ON pq_par USING vexdb_graph (vec) WITH (quantizer='pq', pq_m=4, parallel_workers=2);
+- query: SELECT use_pq FROM vex_index_info() WHERE indexname='idx_pq_par';
+  expect:
+    - "t"
+- query: SELECT id FROM pq_par ORDER BY vec <-> '[100,100,100,100,100,100,100,100]'::floatvector LIMIT 3;
+  expect:
+    - "100"
+    - "99"
+    - "101"
+- statement: DROP TABLE pq_par;

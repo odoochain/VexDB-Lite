@@ -1,0 +1,27 @@
+name: graph_index_rabitq_smoke
+tags: [pg-only, migrated, regression, rabitq]
+description: |
+  vexdb_graph WITH
+  (quantizer='rabitq') must build and KNN-search without errors. The
+  rabitq extract_qt path is exercised in src/quantizer_stubs.cpp; this is
+  a build+search smoke only (no recall guarantee), kept low-dim so it
+  runs in the standard PG test container.
+engines: [pg]
+steps:
+  - statement: SET maintenance_work_mem = '512MB';
+  - statement: DROP TABLE IF EXISTS t_rabitq_smoke;
+  - statement: CREATE TABLE t_rabitq_smoke (id int, v floatvector(8));
+  - statement: |
+      INSERT INTO t_rabitq_smoke
+      SELECT i, ('[' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ']')::floatvector
+      FROM generate_series(1, 256) AS t(i);
+
+  - statement: CREATE INDEX idx_rbq_l2 ON t_rabitq_smoke USING vexdb_graph (v floatvector_l2_ops) WITH (quantizer='rabitq');
+  - query: SELECT count(*) FROM (SELECT id FROM t_rabitq_smoke ORDER BY v <-> '[10,10,10,10,10,10,10,10]'::floatvector LIMIT 5) s;
+    expect: [["5"]]
+  - statement: DROP INDEX idx_rbq_l2;
+
+  - statement: CREATE INDEX idx_rbq_cos ON t_rabitq_smoke USING vexdb_graph (v floatvector_cosine_ops) WITH (quantizer='rabitq');
+  - query: SELECT count(*) FROM (SELECT id FROM t_rabitq_smoke ORDER BY v <=> '[10,10,10,10,10,10,10,10]'::floatvector LIMIT 5) s;
+    expect: [["5"]]
+  - statement: DROP INDEX idx_rbq_cos;

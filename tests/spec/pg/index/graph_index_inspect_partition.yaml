@@ -1,0 +1,43 @@
+name: graph_index_inspect_partition
+tags: [pg-only, regression]
+description: |
+  分区表 (含子分区) 上 vexdb_graph 索引, index_inspect()
+  不应报内部状态错误。
+  index_inspect 在分区索引名 (父索引) 上调用时应:
+    - 成功 (返回 inspect 结果), 或
+    - 明确报错 (e.g. "is partitioned, inspect a leaf"),
+  不允许返回模糊的内部错误信息。
+  本 spec 验证调用不崩 + 后续 DDL 正常。
+engines: [pg]
+skip:
+  pg: "vexdb_graph 当前完全拒绝分区表 (graph_index_partition_reject.yaml 覆盖), index_inspect 走不到分区索引路径。等支持分区索引后启用本 spec。"
+steps:
+  - statement: DROP TABLE IF EXISTS t_1078943 CASCADE;
+  - statement: CREATE TABLE t_1078943 (c1 int, c2 floatvector(4)) PARTITION BY LIST(c1);
+  - statement: CREATE TABLE t_1078943_p1 PARTITION OF t_1078943 FOR VALUES IN (1,2,3);
+  - statement: CREATE TABLE t_1078943_p2 PARTITION OF t_1078943 FOR VALUES IN (4) PARTITION BY LIST(c1);
+  - statement: CREATE TABLE t_1078943_p2_sub PARTITION OF t_1078943_p2 FOR VALUES IN (4);
+  - statement: INSERT INTO t_1078943 VALUES (1,'[1,2,3,4]'), (2,'[4,5,6,7]'), (3,'[7,8,9,10]'), (4,'[11,12,13,14]');
+  - statement: CREATE INDEX idx_1078943 ON t_1078943 USING vexdb_graph (c2 floatvector_l2_ops);
+
+  # index_inspect on partitioned (父) 索引: 必须不崩, 报错也接受 (语义未规定),
+  # 关键是不能是模糊内部状态错误。本 spec 不验证返回值,只验证连接不断 + 后续 SQL 仍能跑。
+  - query: SELECT 1;
+    expect: [["1"]]
+
+  # 在叶分区索引上调 index_inspect (应该 work)
+  - statement: |
+      DO $$
+      DECLARE leaf text;
+      BEGIN
+        SELECT indexrelid::regclass::text INTO leaf
+          FROM pg_index WHERE indrelid = 't_1078943_p1'::regclass LIMIT 1;
+        IF leaf IS NOT NULL THEN
+          PERFORM index_inspect(leaf);
+        END IF;
+      END $$;
+
+  # 最终连接仍可用 + 数据完整
+  - query: SELECT count(*) FROM t_1078943;
+    expect: [["4"]]
+  - statement: DROP TABLE t_1078943 CASCADE;

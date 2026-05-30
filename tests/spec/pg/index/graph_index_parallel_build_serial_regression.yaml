@@ -1,0 +1,39 @@
+name: graph_index_parallel_build_serial_regression
+tags:
+- pg-only
+- parallel-build
+- regression
+description: |
+  Serial-path regression: the parallel-build refactor must not break
+  the single-thread CREATE INDEX path (no parallel_workers reloption).
+  We exercise both the MEMORY (maintenance_work_mem >= 1GB) and DISK
+  (maintenance_work_mem < 1GB triggers WARNING + disk-build fallback)
+  build modes since both code paths were touched.
+
+  Phase A: MEMORY single-thread build
+  Phase B: DISK single-thread build (forced by small maint_work_mem)
+engines:
+- pg
+steps:
+# ── Phase A: MEMORY single-thread ────────────────────────────────
+- statement: SET maintenance_work_mem = '2GB';
+- statement: DROP TABLE IF EXISTS pb_serial_mem;
+- statement: CREATE TABLE pb_serial_mem (id INTEGER, vec floatvector(8));
+- statement: "INSERT INTO pb_serial_mem SELECT i, ('[' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ']')::floatvector FROM generate_series(0, 999) AS t(i);"
+- statement: CREATE INDEX idx_pb_serial_mem ON pb_serial_mem USING vexdb_graph (vec floatvector_l2_ops) WITH (m=16, ef_construction=128);
+- query: SELECT id FROM pb_serial_mem ORDER BY vec <-> '[500,500,500,500,500,500,500,500]'::floatvector LIMIT 1;
+  expect:
+    - ["500"]
+- statement: DROP TABLE pb_serial_mem;
+
+# ── Phase B: DISK single-thread (256MB < 1GB triggers DISK build) ──
+- statement: SET maintenance_work_mem = '256MB';
+- statement: DROP TABLE IF EXISTS pb_serial_disk;
+- statement: CREATE TABLE pb_serial_disk (id INTEGER, vec floatvector(8));
+- statement: "INSERT INTO pb_serial_disk SELECT i, ('[' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ']')::floatvector FROM generate_series(0, 999) AS t(i);"
+- statement: CREATE INDEX idx_pb_serial_disk ON pb_serial_disk USING vexdb_graph (vec floatvector_l2_ops) WITH (m=16, ef_construction=128);
+- query: SELECT id FROM pb_serial_disk ORDER BY vec <-> '[500,500,500,500,500,500,500,500]'::floatvector LIMIT 1;
+  expect:
+    - ["500"]
+- statement: DROP TABLE pb_serial_disk;
+- statement: SET maintenance_work_mem = '2GB';

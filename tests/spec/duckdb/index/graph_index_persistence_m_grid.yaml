@@ -1,0 +1,76 @@
+name: index__graph_index_persistence_m_grid
+tags:
+- vex
+- regression
+- persistence
+- duck-only
+engines:
+- duckdb
+description: GRAPH_INDEX persistence regression across m={4,8,12,32}. Default m=16 happened to round to a working FixedSizeAllocator segment_size; other m values hit SIGSEGV in DeserializeFromStorage during WAL replay (root cause in graph_index_disk.cpp::SerializeToWAL — InitSerializationToWAL must run before ExportStorageInfo, mirror ART::SerializeToWAL).
+skip:
+  duckdb: "pre-existing dev SIGSEGV in DeserializeFromStorage on m={4,8,12,32} WAL replay (2026-05-22). re-enable after the SerializeToWAL/InitSerializationToWAL ordering fix lands."
+
+steps:
+# ---- m=4 ----
+- raw_directive: load __TEST_DIR__/graph_index_m4.db
+- statement: CREATE TABLE t4 (id INTEGER, vec FLOAT[4]);
+- statement: |
+    INSERT INTO t4 SELECT i, [(i*0.1)::FLOAT, (i*0.2)::FLOAT, (i*0.3)::FLOAT, (i*0.4)::FLOAT]::FLOAT[4]
+    FROM range(100) t(i);
+- statement: CREATE INDEX idx4 ON t4 USING GRAPH_INDEX (vec) WITH (m=4, metric='l2');
+- statement: CHECKPOINT;
+- raw_directive: restart
+- query: SELECT id FROM t4 ORDER BY l2_distance(vec, [0.0,0.0,0.0,0.0]::FLOAT[4]) LIMIT 3;
+  _field_types: I
+  expect:
+  - - 0
+  - - 1
+  - - 2
+
+# ---- m=8 (the ann-benchmark "light" group; primary repro case) ----
+- raw_directive: load __TEST_DIR__/graph_index_m8.db
+- statement: CREATE TABLE t8 (id INTEGER, vec FLOAT[4]);
+- statement: |
+    INSERT INTO t8 SELECT i, [(i*0.1)::FLOAT, (i*0.2)::FLOAT, (i*0.3)::FLOAT, (i*0.4)::FLOAT]::FLOAT[4]
+    FROM range(100) t(i);
+- statement: CREATE INDEX idx8 ON t8 USING GRAPH_INDEX (vec) WITH (m=8, metric='l2');
+- statement: CHECKPOINT;
+- raw_directive: restart
+- query: SELECT id FROM t8 ORDER BY l2_distance(vec, [0.0,0.0,0.0,0.0]::FLOAT[4]) LIMIT 3;
+  _field_types: I
+  expect:
+  - - 0
+  - - 1
+  - - 2
+
+# ---- m=12 ----
+- raw_directive: load __TEST_DIR__/graph_index_m12.db
+- statement: CREATE TABLE t12 (id INTEGER, vec FLOAT[4]);
+- statement: |
+    INSERT INTO t12 SELECT i, [(i*0.1)::FLOAT, (i*0.2)::FLOAT, (i*0.3)::FLOAT, (i*0.4)::FLOAT]::FLOAT[4]
+    FROM range(100) t(i);
+- statement: CREATE INDEX idx12 ON t12 USING GRAPH_INDEX (vec) WITH (m=12, metric='l2');
+- statement: CHECKPOINT;
+- raw_directive: restart
+- query: SELECT id FROM t12 ORDER BY l2_distance(vec, [0.0,0.0,0.0,0.0]::FLOAT[4]) LIMIT 3;
+  _field_types: I
+  expect:
+  - - 0
+  - - 1
+  - - 2
+
+# ---- m=32 (the ann-benchmark "heavy" group) ----
+- raw_directive: load __TEST_DIR__/graph_index_m32.db
+- statement: CREATE TABLE t32 (id INTEGER, vec FLOAT[4]);
+- statement: |
+    INSERT INTO t32 SELECT i, [(i*0.1)::FLOAT, (i*0.2)::FLOAT, (i*0.3)::FLOAT, (i*0.4)::FLOAT]::FLOAT[4]
+    FROM range(100) t(i);
+- statement: CREATE INDEX idx32 ON t32 USING GRAPH_INDEX (vec) WITH (m=32, metric='l2');
+- statement: CHECKPOINT;
+- raw_directive: restart
+- query: SELECT id FROM t32 ORDER BY l2_distance(vec, [0.0,0.0,0.0,0.0]::FLOAT[4]) LIMIT 3;
+  _field_types: I
+  expect:
+  - - 0
+  - - 1
+  - - 2

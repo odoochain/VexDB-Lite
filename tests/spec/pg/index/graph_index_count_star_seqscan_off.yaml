@@ -1,0 +1,26 @@
+name: graph_index_count_star_seqscan_off
+tags:
+- pg-only
+- regression
+description: count(*) with enable_seqscan=off must succeed via IndexOnlyScan on a vexdb_graph index; both row count and DISTINCT TID count must match.
+engines:
+- pg
+steps:
+- statement: DROP TABLE IF EXISTS t_904 CASCADE;
+- statement: CREATE TABLE t_904 (c1 int, c2 floatvector(4));
+- statement: "INSERT INTO t_904 SELECT i, ('[' || i || ',1,2,3]')::floatvector(4) FROM generate_series(1,100) i;"
+- statement: CREATE INDEX idx_904 ON t_904 USING vexdb_graph (c2 floatvector_l2_ops);
+# ANALYZE + VACUUM together: ANALYZE refreshes reltuples so the planner
+# picks IOS; VACUUM sets the visibility map's all-visible bit so the
+# executor takes the xs_itup branch (where the cached IndexTuple fix lives).
+- statement: ANALYZE t_904;
+- statement: VACUUM t_904;
+- statement: SET enable_seqscan = off;
+- query: SELECT count(*) FROM t_904;
+  expect:
+    - ["100"]
+- query: SELECT count(DISTINCT c1) FROM t_904;
+  expect:
+    - ["100"]
+- statement: RESET enable_seqscan;
+- statement: DROP TABLE t_904;

@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>VexDB-Lite 仓库重构架构图</title>
+<style>
+  :root {
+    --c-common:    #3498db;
+    --c-pg:        #9b59b6;
+    --c-duck:      #e67e22;
+    --c-third:     #7f8c8d;
+    --c-top:       #27ae60;
+    --c-product:   #e74c3c;
+    --c-bg:        #fafafa;
+    --c-card-bg:   #ffffff;
+    --c-text:      #2c3e50;
+    --c-text-soft: #5d6d7e;
+    --c-border:    #d5dbdb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    margin: 0; padding: 32px;
+    background: var(--c-bg);
+    color: var(--c-text);
+    line-height: 1.55;
+  }
+  h1 {
+    margin: 0 0 8px;
+    font-size: 24px;
+    letter-spacing: 0.5px;
+  }
+  .subtitle {
+    color: var(--c-text-soft);
+    font-size: 13px;
+    margin-bottom: 28px;
+  }
+  section {
+    background: var(--c-card-bg);
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 24px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+    border: 1px solid var(--c-border);
+  }
+  h2 {
+    margin: 0 0 18px;
+    font-size: 18px;
+    border-left: 4px solid var(--c-common);
+    padding-left: 12px;
+  }
+  /* ============ 目录树 ============ */
+  .tree {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.7;
+    background: #1e272e;
+    color: #ecf0f1;
+    padding: 20px 24px;
+    border-radius: 8px;
+    overflow-x: auto;
+  }
+  .tree .lbl-common { color: #5dade2; font-weight: 600; }
+  .tree .lbl-pg     { color: #c39bd3; font-weight: 600; }
+  .tree .lbl-duck   { color: #f39c12; font-weight: 600; }
+  .tree .lbl-third  { color: #95a5a6; font-weight: 600; }
+  .tree .lbl-top    { color: #58d68d; font-weight: 600; }
+  .tree .lbl-product { color: #ec7063; }
+  .tree .comment    { color: #7f8c8d; font-style: italic; }
+  .tree .arrow      { color: #f39c12; }
+  .tree .path       { color: #ecf0f1; }
+  .tree .files      { color: #aebbc2; font-style: italic; }
+
+  /* ============ 依赖图 ============ */
+  .deps-wrap {
+    display: flex;
+    justify-content: center;
+    padding: 12px 0;
+  }
+  .deps-svg {
+    max-width: 100%;
+    height: auto;
+  }
+  .legend {
+    display: flex;
+    gap: 22px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 16px;
+    font-size: 13px;
+    color: var(--c-text-soft);
+  }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .sw {
+    width: 14px; height: 14px;
+    border-radius: 3px;
+    display: inline-block;
+  }
+
+  /* ============ 构建流向 ============ */
+  .build-flow {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 10px;
+  }
+  .build-card {
+    border: 1px solid var(--c-border);
+    border-radius: 8px;
+    padding: 16px;
+    background: #f8f9fa;
+  }
+  .build-card .entry {
+    font-family: "JetBrains Mono", "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    background: #2c3e50;
+    color: #ecf0f1;
+    padding: 6px 10px;
+    border-radius: 4px;
+    display: inline-block;
+    margin-bottom: 8px;
+  }
+  .build-card .arrow {
+    text-align: center;
+    color: var(--c-text-soft);
+    margin: 6px 0;
+    font-size: 16px;
+  }
+  .build-card .target {
+    text-align: center;
+    font-weight: 600;
+    color: var(--c-pg);
+    font-size: 13px;
+  }
+  .build-card .target.duck { color: var(--c-duck); }
+  .build-card .target.both { color: var(--c-product); }
+  .build-card .desc {
+    color: var(--c-text-soft);
+    font-size: 12px;
+    margin-top: 8px;
+  }
+
+  /* ============ 不变性 ============ */
+  .invariants {
+    list-style: none;
+    padding: 0; margin: 0;
+  }
+  .invariants li {
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    background: #f4f6f7;
+    border-left: 4px solid var(--c-top);
+    border-radius: 4px;
+    font-size: 14px;
+  }
+  .invariants code {
+    background: #1e272e;
+    color: #f39c12;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 12px;
+  }
+
+  /* ============ 决策点表 ============ */
+  table.decisions {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  table.decisions th,
+  table.decisions td {
+    padding: 10px 12px;
+    border: 1px solid var(--c-border);
+    text-align: left;
+    vertical-align: top;
+  }
+  table.decisions th {
+    background: #ecf0f1;
+    font-weight: 600;
+  }
+  table.decisions tr:nth-child(even) td { background: #fafbfc; }
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    color: #fff;
+    margin-right: 4px;
+  }
+  .tag.pg    { background: var(--c-pg); }
+  .tag.dk    { background: var(--c-duck); }
+  .tag.cm    { background: var(--c-common); }
+</style>
+</head>
+<body>
+
+<h1>VexDB-Lite 仓库重构架构图</h1>
+<div class="subtitle">2026-05-28 · 三层布局:common/ + vexdb-pg/ + vexdb-duck/</div>
+
+<!-- ===================== 1. 目录树 ===================== -->
+<section>
+  <h2>1. 目录层次</h2>
+  <pre class="tree">
+vexdb_lite/
+│
+├── <span class="lbl-common">common/</span>                     <span class="comment">— 公共层 · 两个后端共用</span>
+│   ├── include/                <span class="files">ann_utils.h, half.h, timering.h, vec_common.h, ...</span>
+│   │   └── graph_index/        <span class="files">graph_index_algorithm.h, _storage.h, visited_list_pool.h, ...</span>
+│   ├── distance/               <span class="comment">SIMD 距离算法</span>
+│   │   ├── core/               <span class="files">headers (.h/.templ)</span>
+│   │   └── src/                <span class="files">公共 dispatcher cpp (architecture, *_dispatcher)</span>
+│   ├── quantizer/              <span class="files">PQ (annkmeans, pq_alloc, product_quantizer)</span>
+│   ├── rabitq/                 <span class="files">RaBitQ</span>
+│   ├── vtl/                    <span class="files">C++ 模板库 (allocator, btree, bitlock, ...)</span>
+│   └── module/                 <span class="files">通用 perf 工具 (parallel_counter, leak_checker, ...)</span>
+│
+├── <span class="lbl-pg">vexdb-pg/</span>                   <span class="arrow">→</span> <span class="lbl-product">pg_vexdb.so</span>
+│   ├── src/                    <span class="files">24 个 PG-only cpp (graph_index_build/scan/insert/...)</span>
+│   │   └── distance/           <span class="files">PG SIMD (avx/sse/neon.cpp, distance.cpp)</span>
+│   ├── include/                <span class="files">PG-only header (pg_compat.h, vector_smgr.h, ...)</span>
+│   ├── distance/               <span class="files">PG distance header (cblas_interface, distance_guc)</span>
+│   ├── knl/                    <span class="files">openGauss knl 兼容 (knl_alloc.cpp/knl_*.h)</span>
+│   ├── sql/                    <span class="files">PG extension SQL</span>
+│   ├── pg_vexdb.control
+│   └── CMakeLists.txt          <span class="comment">(原根 CMakeLists.txt)</span>
+│
+├── <span class="lbl-duck">vexdb-duck/</span>                 <span class="arrow">→</span> <span class="lbl-product">vex.duckdb_extension</span>
+│   ├── src/distance/           <span class="files">DuckDB SIMD (从 src/distance/duck/ 收回)</span>
+│   ├── include/                <span class="files">DuckDB-only header</span>
+│   ├── functions/              <span class="files">DuckDB UDF</span>
+│   ├── index/                  <span class="files">DuckDB index ops</span>
+│   ├── optimizer/              <span class="files">DuckDB optimizer rewrite</span>
+│   ├── vex_extension.cpp
+│   └── CMakeLists.txt
+│
+├── <span class="lbl-third">thirdparties/</span>               <span class="files">vendored boost 1.91</span>
+│
+├── tests/                      <span class="comment">公共测试</span>
+├── scripts/                    <span class="comment">release.sh (路径更新到 vexdb-pg/vexdb-duck)</span>
+├── docs/                       <span class="comment">文档</span>
+├── <span class="lbl-top">build.sh</span>                    <span class="comment">顶层入口 (PG)</span>
+├── <span class="lbl-top">build_duck.sh</span>               <span class="comment">顶层入口 (DuckDB)</span>
+└── <span class="lbl-top">CMakeLists.txt</span>              <span class="comment">顶层 dispatch (可选)</span></pre>
+</section>
+
+<!-- ===================== 2. 依赖关系 ===================== -->
+<section>
+  <h2>2. 依赖关系图(单向 · 后端互不依赖)</h2>
+
+  <div class="deps-wrap">
+    <svg class="deps-svg" viewBox="0 0 760 460" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5"
+                markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#7f8c8d"/>
+        </marker>
+        <linearGradient id="gradCommon" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#5dade2"/>
+          <stop offset="100%" stop-color="#3498db"/>
+        </linearGradient>
+        <linearGradient id="gradPg" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#bb8fce"/>
+          <stop offset="100%" stop-color="#9b59b6"/>
+        </linearGradient>
+        <linearGradient id="gradDuck" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#f5b041"/>
+          <stop offset="100%" stop-color="#e67e22"/>
+        </linearGradient>
+      </defs>
+
+      <!-- thirdparties (顶) -->
+      <rect x="290" y="20" width="180" height="56" rx="8" fill="#7f8c8d" />
+      <text x="380" y="46" text-anchor="middle" fill="#fff" font-size="14" font-weight="600">thirdparties/</text>
+      <text x="380" y="64" text-anchor="middle" fill="#ecf0f1" font-size="11">vendored boost 1.91</text>
+
+      <!-- arrow thirdparties -> common -->
+      <line x1="380" y1="76" x2="380" y2="120" stroke="#7f8c8d" stroke-width="2" marker-end="url(#arr)"/>
+      <text x="395" y="102" fill="#7f8c8d" font-size="11">#include &lt;boost/...&gt;</text>
+
+      <!-- common (中) -->
+      <rect x="120" y="130" width="520" height="100" rx="10" fill="url(#gradCommon)"/>
+      <text x="380" y="158" text-anchor="middle" fill="#fff" font-size="16" font-weight="700">common/</text>
+      <text x="380" y="180" text-anchor="middle" fill="#fff" font-size="12">include/ · vtl/ · distance/ · quantizer/ · rabitq/ · module/</text>
+      <text x="380" y="200" text-anchor="middle" fill="#eaf2f8" font-size="11" font-style="italic">纯公共 · 无后端依赖 · header + 后端中性 SIMD/PQ cpp</text>
+      <text x="380" y="218" text-anchor="middle" fill="#eaf2f8" font-size="11" font-style="italic">不得 #include "postgres.h"</text>
+
+      <!-- arrows common -> backends -->
+      <line x1="270" y1="230" x2="200" y2="290" stroke="#7f8c8d" stroke-width="2" marker-end="url(#arr)"/>
+      <text x="200" y="270" text-anchor="middle" fill="#7f8c8d" font-size="11">#include "../common/..."</text>
+
+      <line x1="490" y1="230" x2="560" y2="290" stroke="#7f8c8d" stroke-width="2" marker-end="url(#arr)"/>
+      <text x="560" y="270" text-anchor="middle" fill="#7f8c8d" font-size="11">#include "../common/..."</text>
+
+      <!-- vexdb-pg -->
+      <rect x="60" y="300" width="280" height="130" rx="10" fill="url(#gradPg)"/>
+      <text x="200" y="328" text-anchor="middle" fill="#fff" font-size="15" font-weight="700">vexdb-pg/</text>
+      <text x="200" y="350" text-anchor="middle" fill="#fff" font-size="12">PG amroutine + 自己的 SIMD</text>
+      <text x="200" y="368" text-anchor="middle" fill="#fff" font-size="12">+ knl 兼容层</text>
+      <line x1="100" y1="386" x2="300" y2="386" stroke="#fff" stroke-opacity="0.4"/>
+      <text x="200" y="406" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">↓ pg_vexdb.so</text>
+      <text x="200" y="422" text-anchor="middle" fill="#fff" font-size="11">+ control + sql/</text>
+
+      <!-- vexdb-duck -->
+      <rect x="420" y="300" width="280" height="130" rx="10" fill="url(#gradDuck)"/>
+      <text x="560" y="328" text-anchor="middle" fill="#fff" font-size="15" font-weight="700">vexdb-duck/</text>
+      <text x="560" y="350" text-anchor="middle" fill="#fff" font-size="12">DuckDB ext + functions</text>
+      <text x="560" y="368" text-anchor="middle" fill="#fff" font-size="12">+ index + optimizer + 自己的 SIMD</text>
+      <line x1="460" y1="386" x2="660" y2="386" stroke="#fff" stroke-opacity="0.4"/>
+      <text x="560" y="406" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">↓ vex.duckdb_extension</text>
+      <text x="560" y="422" text-anchor="middle" fill="#fff" font-size="11">(static + loadable)</text>
+
+      <!-- 两后端互不依赖 标注 -->
+      <line x1="340" y1="365" x2="420" y2="365" stroke="#c0392b" stroke-width="2" stroke-dasharray="5,5"/>
+      <text x="380" y="358" text-anchor="middle" fill="#c0392b" font-size="11" font-weight="600">✗ 互不依赖</text>
+    </svg>
+  </div>
+
+  <div class="legend">
+    <div class="item"><span class="sw" style="background:#7f8c8d"></span> thirdparties (顶层共享)</div>
+    <div class="item"><span class="sw" style="background:#3498db"></span> common (公共,叶子)</div>
+    <div class="item"><span class="sw" style="background:#9b59b6"></span> vexdb-pg</div>
+    <div class="item"><span class="sw" style="background:#e67e22"></span> vexdb-duck</div>
+  </div>
+</section>
+
+<!-- ===================== 3. 构建入口 ===================== -->
+<section>
+  <h2>3. 构建入口</h2>
+  <div class="build-flow">
+    <div class="build-card">
+      <div class="entry">bash build.sh release</div>
+      <div class="arrow">↓</div>
+      <div class="desc">vexdb-pg/CMakeLists.txt<br>(链 common/* + boost)</div>
+      <div class="arrow">↓</div>
+      <div class="target">pg_vexdb.so</div>
+    </div>
+    <div class="build-card">
+      <div class="entry">bash build_duck.sh build</div>
+      <div class="arrow">↓</div>
+      <div class="desc">vexdb-duck/CMakeLists.txt<br>(链 common/* + duckdb + boost)</div>
+      <div class="arrow">↓</div>
+      <div class="target duck">vex.duckdb_extension</div>
+    </div>
+    <div class="build-card">
+      <div class="entry">bash scripts/release.sh build all</div>
+      <div class="arrow">↓</div>
+      <div class="desc">远程 build 两个后端 +<br>scp 回 dist/{x86_64,aarch64}-linux/</div>
+      <div class="arrow">↓</div>
+      <div class="target both">tarball + SHA256SUMS</div>
+    </div>
+  </div>
+</section>
+
+<!-- ===================== 4. 不变性 ===================== -->
+<section>
+  <h2>4. 关键不变性(重构后必须守住)</h2>
+  <ol class="invariants">
+    <li><strong>common/ 不依赖任一后端</strong>:它是叶子,只 include thirdparties/ 和自己。任何 <code>#include "../vexdb-pg/..."</code> 在 common/ 里都是违例</li>
+    <li><strong>vexdb-pg/ 不依赖 vexdb-duck/,反之亦然</strong>:两后端通过 common/ 间接共用代码,绝不互相 reach</li>
+    <li><strong>common/include/ 里的 header 不得 <code>#include "postgres.h"</code></strong>:否则 vexdb-duck 编译被污染</li>
+    <li><strong>vexdb-pg/CMakeLists.txt 自包含</strong>:不再有"根目录 CMakeLists 编 PG"的隐式结构,<code>cd vexdb-pg && cmake .</code> 可直接 build</li>
+    <li><strong>vexdb-duck/CMakeLists.txt 路径全部从 <code>../src/distance/...</code> 改成 <code>../common/distance/src/...</code></strong>:切断对根 src/ 的引用</li>
+    <li><strong>顶层 build.sh / scripts/release.sh 是薄壳</strong>:只 dispatch 到子项目,不再自带编译细节</li>
+  </ol>
+</section>
+
+<!-- ===================== 5. 决策点 ===================== -->
+<section>
+  <h2>5. 待确认决策点</h2>
+  <table class="decisions">
+    <thead>
+      <tr>
+        <th style="width:18%">目录/项</th>
+        <th style="width:22%">候选归属</th>
+        <th>说明</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>module/</code></td>
+        <td><span class="tag cm">common</span> 或 <span class="tag pg">vexdb-pg</span></td>
+        <td>含 <code>parallel_counter.h</code>(两边都可能用)+ <code>linux_perf.h</code>(像 PG profiling)。倾向先放 common/,实际只 PG 用再回退</td>
+      </tr>
+      <tr>
+        <td><code>knl/</code></td>
+        <td><span class="tag pg">vexdb-pg</span></td>
+        <td>openGauss 内核兼容层 (knl_alloc.cpp/knl_instance.h/knl_variable.h),明显 PG-only</td>
+      </tr>
+      <tr>
+        <td>顶层 <code>CMakeLists.txt</code></td>
+        <td>保留(dispatch) 或 删除</td>
+        <td>保留 = <code>add_subdirectory(vexdb-pg)</code> 空壳;删除 = PG 用户 <code>cd vexdb-pg && cmake .</code> 更明确</td>
+      </tr>
+      <tr>
+        <td><code>include/</code> 拆分粒度</td>
+        <td>按引用关系拆</td>
+        <td>9 个明显 PG-only (pg_compat/vector_smgr/vecbuf_shared/shared_alloc_set/...) → vexdb-pg/include/;15 个候选公共(graph_index/* + half.h + timering.h + ...) → common/include/。grep vexdb-duck 实际 include 列表是最终判定依据</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+</body>
+</html>

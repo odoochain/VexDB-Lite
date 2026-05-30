@@ -1,0 +1,19 @@
+name: graph_index_build_single_thread_smoke
+tags: [pg-only, regression, must-not-crash]
+description: |
+  build_single_thread 路径 must-not-crash smoke。
+  中等规模 + parallel_workers=0 强制走 build_single_thread。
+  如果服务端崩,本 spec 整个连接会断开,docker runner 会标 fail。
+engines: [pg]
+steps:
+  - statement: DROP TABLE IF EXISTS t_1078890;
+  - statement: CREATE TABLE t_1078890 (id bigint, v floatvector(32));
+  - statement: |
+      INSERT INTO t_1078890
+      SELECT i, ('[' || array_to_string(array(SELECT ((i+j*3) % 200)::float/10 FROM generate_series(0,31) j), ',') || ']')::floatvector(32)
+      FROM generate_series(1, 2000) AS i;
+  # parallel_workers=0 强制走 build_single_thread
+  - statement: CREATE INDEX idx_1078890 ON t_1078890 USING vexdb_graph (v floatvector_l2_ops) WITH (parallel_workers = 0);
+  - query: SELECT count(*) FROM (SELECT id FROM t_1078890 ORDER BY v <-> '[1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6]'::floatvector LIMIT 5) s;
+    expect: [["5"]]
+  - statement: DROP INDEX idx_1078890;

@@ -1,0 +1,27 @@
+name: graph_index_sift_query_smoke
+tags: [pg-only, regression]
+description: |
+  sift-128-euclidean 风格查询 smoke。128d × 2000 行, 跑 ANN top-K 查询验证:
+  返回行数正确 + 连接活跃。
+engines: [pg]
+steps:
+  - statement: SET maintenance_work_mem = '128MB';
+  - statement: DROP TABLE IF EXISTS t_1078912;
+  - statement: CREATE TABLE t_1078912 (id bigint, v floatvector(128));
+  - statement: |
+      INSERT INTO t_1078912
+      SELECT i, ('[' || array_to_string(array(SELECT ((i*11+j*3) % 256)::float/10 FROM generate_series(0,127) j), ',') || ']')::floatvector(128)
+      FROM generate_series(1, 2000) AS i;
+  # sift-128-euclidean -> l2_ops
+  - statement: CREATE INDEX idx_1078912 ON t_1078912 USING vexdb_graph (v floatvector_l2_ops) WITH (m = 16, ef_construction = 64);
+
+  # 多次 ann 查询 (≥3 次) 验证查询路径 alive + 返回行数正确
+  - query: SELECT count(*) FROM (SELECT id FROM t_1078912 ORDER BY v <-> '[1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8]'::floatvector LIMIT 100) s;
+    expect: [["100"]]
+  - query: SELECT count(*) FROM (SELECT id FROM t_1078912 ORDER BY v <-> '[10,20,30,40,50,60,70,80,90,100,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6,7,8]'::floatvector LIMIT 100) s;
+    expect: [["100"]]
+  - query: SELECT count(*) FROM (SELECT id FROM t_1078912 ORDER BY v <-> '[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]'::floatvector LIMIT 100) s;
+    expect: [["100"]]
+  - query: SELECT 1;
+    expect: [["1"]]
+  - statement: DROP INDEX idx_1078912;

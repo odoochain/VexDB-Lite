@@ -1,0 +1,20 @@
+name: graph_index_quantizer_invalid
+tags: [migrated, regression, pq]
+description: "CREATE INDEX 对 quantizer 选项的合法/非法取值校验. 合法 'none'/'pq'; 'aaa'/'pq1'/1 应拒绝或静默回退, 关键不能崩. DuckDB 镜像 PG 侧 graph_index_quantizer_invalid.yaml."
+engines: [duckdb]
+steps:
+  - statement: DROP TABLE IF EXISTS t_qz_invalid;
+  - statement: CREATE TABLE t_qz_invalid (id INTEGER, v ${VECTOR(8)});
+  - statement: INSERT INTO t_qz_invalid SELECT i, list_transform(${RANGE(8)}, x -> (x + i)::FLOAT)::${VECTOR(8)} FROM ${RANGE(1, 31)} t(i);
+  # 非法 quantizer 字符串
+  - statement: CREATE INDEX idx_qz_bad1 ON t_qz_invalid USING ${VEX_INDEX} (v${OPS_L2_COL})${IDX_WITH_L2(quantizer='aaa')};
+    expect_error: ""
+  - statement: CREATE INDEX idx_qz_bad2 ON t_qz_invalid USING ${VEX_INDEX} (v${OPS_L2_COL})${IDX_WITH_L2(quantizer='pq1')};
+    expect_error: ""
+  - statement: CREATE INDEX idx_qz_bad3 ON t_qz_invalid USING ${VEX_INDEX} (v${OPS_L2_COL})${IDX_WITH_L2(quantizer=1)};
+    expect_error: ""
+  # 合法
+  - statement: CREATE INDEX idx_qz_none ON t_qz_invalid USING ${VEX_INDEX} (v${OPS_L2_COL})${IDX_WITH_L2(quantizer='none')};
+  - statement: DROP INDEX idx_qz_none;
+  - statement: CREATE INDEX idx_qz_pq ON t_qz_invalid USING ${VEX_INDEX} (v${OPS_L2_COL})${IDX_WITH_L2(quantizer='pq')};
+  - statement: DROP INDEX idx_qz_pq;

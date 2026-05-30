@@ -1,0 +1,70 @@
+# l2 opclass + cosine 算子 + CTE InitPlan + 高维 + 并行构建的复合形态回归。
+# 覆盖默认 NO_QUANT 路径下 opclass / 查询算子 mismatch + CTE InitPlan,
+# 跟同目录 graph_index_pq_refine_plain_column / pq_funcexpr_index 互补 —
+# 那两个 spec 覆盖 PQ quantizer 路径的两个 attno 分叉 (fetch_vec_via_slot +
+# ann_sample_rows), 本 spec 覆盖默认 NO_QUANT 路径下 opclass / 查询算子
+# mismatch + CTE InitPlan 的复合形态。
+name: graph_index_l2_opclass_cosine_initplan
+tags: [pg-only, regression, reproducer]
+description: |
+  l2 opclass 上跑 cosine 算子查询 + CTE InitPlan + 高维 + 并行构建,
+  IndexNextWithReorder 路径不允许 crash, 必须按 LIMIT 返回行数。
+engines: [pg]
+steps:
+  - statement: DROP TABLE IF EXISTS t_1078921;
+  - statement: CREATE TABLE t_1078921 (id int, v floatvector(512));
+  - statement: |
+      INSERT INTO t_1078921
+      SELECT i,
+        ('[' || array_to_string(
+           array(SELECT ((i*0.001 + j*0.01)::float4)::text
+                 FROM generate_series(1, 512) AS s(j)),
+           ',') || ']')::floatvector(512)
+      FROM generate_series(1, 1000) AS t(i);
+
+  # l2 opclass + parallel build (走 worker 路径)
+  - statement: |
+      CREATE INDEX idx_1078921 ON t_1078921
+      USING vexdb_graph (v floatvector_l2_ops)
+      WITH (parallel_workers=4);
+
+  - statement: SET enable_seqscan = off;
+
+  # 场景 1: 匹配 opclass 的 l2 查询 (baseline, 应该走索引 + 返回 20 行)
+  - query: |
+      SELECT count(*) FROM (
+        SELECT id FROM t_1078921
+        ORDER BY v <-> ('[' || array_to_string(
+           array(SELECT (j::float4 * 0.01)::text FROM generate_series(1, 512) AS s(j)),
+           ',') || ']')::floatvector(512)
+        LIMIT 20
+      ) s;
+    expect: [["20"]]
+
+  # 场景 2: CTE + InitPlan + cosine 算子 + l2 opclass
+  - query: |
+      WITH tmp AS (
+        SELECT ('[' || array_to_string(
+           array(SELECT (j::float4 * 0.01)::text FROM generate_series(1, 512) AS s(j)),
+           ',') || ']')::floatvector(512) AS vec
+      )
+      SELECT count(*) FROM (
+        SELECT id FROM t_1078921
+        ORDER BY v <=> (SELECT vec FROM tmp)
+        LIMIT 20
+      ) s;
+    expect: [["20"]]
+
+  # 场景 3: 直接字面量 cosine (不走 InitPlan, 但走 opclass mismatch)
+  - query: |
+      SELECT count(*) FROM (
+        SELECT id FROM t_1078921
+        ORDER BY v <=> ('[' || array_to_string(
+           array(SELECT (j::float4 * 0.01)::text FROM generate_series(1, 512) AS s(j)),
+           ',') || ']')::floatvector(512)
+        LIMIT 20
+      ) s;
+    expect: [["20"]]
+
+  - statement: RESET enable_seqscan;
+  - statement: DROP TABLE t_1078921;

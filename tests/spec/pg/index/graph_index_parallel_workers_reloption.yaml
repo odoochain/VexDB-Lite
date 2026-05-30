@@ -1,0 +1,30 @@
+name: graph_index_parallel_workers_reloption
+tags: [pg-only, regression, reloption, parallel]
+description: |
+  CREATE INDEX ... WITH (parallel_workers=N) on vexdb_graph
+  must accept integer values (0/4/etc) and reject fractional ones (1.1).
+  Trimmed to 500 × 16d to fit the docker test container.
+engines: [pg]
+steps:
+  - statement: DROP TABLE IF EXISTS t_1078824;
+  - statement: CREATE TABLE t_1078824 (id bigint, v floatvector(16));
+  - statement: |
+      INSERT INTO t_1078824
+      SELECT i, ('[' || array_to_string(array(SELECT (i+j)::float/100 FROM generate_series(0,15) j), ',') || ']')::floatvector(16)
+      FROM generate_series(1, 500) AS i;
+
+  # 非法: 浮点 / 科学计数必须被拒绝
+  - statement: CREATE INDEX idx_bad_frac ON t_1078824 USING vexdb_graph (v floatvector_l2_ops) WITH (parallel_workers = 1.1);
+    expect_error: 'Invalid integer value for option'
+  - statement: CREATE INDEX idx_bad_exp ON t_1078824 USING vexdb_graph (v floatvector_l2_ops) WITH (parallel_workers = 1.5e2);
+    expect_error: 'Invalid integer value for option'
+  - statement: CREATE INDEX idx_bad_m_frac ON t_1078824 USING vexdb_graph (v floatvector_l2_ops) WITH (m = 16.5);
+    expect_error: 'Invalid integer value for option'
+
+  # 合法: 整数 (0=禁并行, 4, 6) 必须成功
+  - statement: CREATE INDEX idx_pw0 ON t_1078824 USING vexdb_graph (v floatvector_l2_ops) WITH (parallel_workers = 0);
+  - statement: DROP INDEX idx_pw0;
+  - statement: CREATE INDEX idx_pw4 ON t_1078824 USING vexdb_graph (v floatvector_cosine_ops) WITH (parallel_workers = 4);
+  - statement: DROP INDEX idx_pw4;
+  - statement: CREATE INDEX idx_pw6 ON t_1078824 USING vexdb_graph (v floatvector_ip_ops) WITH (parallel_workers = 6);
+  - statement: DROP INDEX idx_pw6;

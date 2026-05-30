@@ -1,0 +1,64 @@
+name: graph_index_parallel_no_analyze
+tags:
+- pg-only
+- graph-index
+- parallel-build
+- regression
+description: |
+  Regression for: parallel build `id_to_tid` cap estimation is TOAST-blind.
+
+  Wide vectors (e.g. floatvector(768) ≈ 3KB) exceed PG's TOAST_TUPLE_THRESHOLD
+  (~2KB) and get stored in the toast relation. The main heap row carries only
+  tuple header (24B) + varatt_external pointer (~18B) + a couple inline
+  columns ≈ 50–80B. Old `est_from_pages` used `vector_size + 64` for
+  avg row size, giving ~2 rows/page when the real density is ~150 rows/page,
+  under-shooting `estimated_rows` by ~75×.
+
+  On a freshly created table (no ANALYZE → `reltuples = 0`), `est_from_reltuples`
+  is also 0, so the floor of 16384 became a hard cap. CREATE INDEX then died
+  with: `ERROR: parallel build: id 16384 exceeds id_to_tid cap 16384`.
+
+  Fix: detect `vector_size > BLCKSZ/4` and switch to main-heap-only row size
+  (64B) for the page-density estimate.
+
+  This spec exercises the TOAST + no-ANALYZE path explicitly: insert 20k rows
+  of 768-dim vectors via CREATE TABLE AS without ANALYZE, then parallel
+  CREATE INDEX. Old code dies at id 16384; fixed code completes.
+
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '2GB';
+- statement: SET max_parallel_maintenance_workers = 2;
+- statement: DROP TABLE IF EXISTS gi_no_analyze;
+# 20k rows × 768-dim ≈ 60MB raw; safely above the 16384 floor so the
+# old broken cap is triggered. Vector values force TOAST.
+- statement: |
+    CREATE TABLE gi_no_analyze AS
+    SELECT
+      i AS id,
+      (
+        '[' || array_to_string(
+          array(SELECT (i + j)::float4 / 1000.0 FROM generate_series(0, 767) AS s(j)),
+          ','
+        ) || ']'
+      )::floatvector(768) AS vec
+    FROM generate_series(0, 19999) AS t(i);
+# Intentionally no ANALYZE — reltuples stays 0; cap must come from page-density estimate.
+- statement: |
+    CREATE INDEX gi_no_analyze_idx ON gi_no_analyze
+    USING vexdb_graph (vec floatvector_l2_ops)
+    WITH (m=16, ef_construction=64, parallel_workers=2);
+# Verify the index actually built and serves queries.
+- query: |
+    SELECT id FROM gi_no_analyze
+    ORDER BY vec <-> (
+      '[' || array_to_string(
+        array(SELECT j::float4 / 1000.0 FROM generate_series(0, 767) AS s(j)),
+        ','
+      ) || ']'
+    )::floatvector(768)
+    LIMIT 1;
+  expect:
+    - ["0"]
+- statement: DROP TABLE gi_no_analyze;

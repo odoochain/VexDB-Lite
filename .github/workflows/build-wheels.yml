@@ -1,0 +1,240 @@
+name: Build Python Wheels
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: 'Python version'
+        required: false
+        default: '3.12'
+        type: choice
+        options: ['3.10', '3.11', '3.12', '3.13']
+  push:
+    tags:
+      - 'v*'
+
+env:
+  PYTHON_VERSION: ${{ inputs.python_version || '3.12' }}
+  DUCKDB_VERSION: '1.5.0'
+
+jobs:
+  # ── Step 1: Download sdist once, inject VEX, share as artifact ──
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Cache DuckDB sdist
+        uses: actions/cache@v4
+        with:
+          path: /tmp/duckdb-sdist.tar.gz
+          key: duckdb-sdist-${{ env.DUCKDB_VERSION }}
+
+      - name: Download sdist (if not cached)
+        run: |
+          if [ ! -f /tmp/duckdb-sdist.tar.gz ]; then
+            pip download "duckdb==${{ env.DUCKDB_VERSION }}" --no-binary :all: -d /tmp/dl
+            cp /tmp/dl/duckdb-${{ env.DUCKDB_VERSION }}.tar.gz /tmp/duckdb-sdist.tar.gz
+          fi
+
+      - name: Inject VEX into sdist
+        run: |
+          mkdir -p /tmp/out && cd /tmp
+          tar xzf duckdb-sdist.tar.gz
+          BD="/tmp/duckdb-${{ env.DUCKDB_VERSION }}"
+
+          # Copy VEX extension
+          cp -r ${{ github.workspace }}/extension/vex "$BD/external/duckdb/extension/vex"
+
+          # Copy physical_create_graph_index
+          cp ${{ github.workspace }}/src/execution/operator/schema/physical_create_graph_index.cpp \
+             "$BD/external/duckdb/src/execution/operator/schema/"
+          cp ${{ github.workspace }}/src/include/duckdb/execution/operator/schema/physical_create_graph_index.hpp \
+             "$BD/external/duckdb/src/include/duckdb/execution/operator/schema/"
+
+          # Patch CMakeLists
+          sed -i 's/physical_create_index\.cpp/physical_create_index.cpp\n  physical_create_graph_index.cpp/' \
+            "$BD/external/duckdb/src/execution/operator/schema/CMakeLists.txt"
+
+          # Add VEX to extension config
+          echo 'duckdb_extension_load(vex)' >> "$BD/external/duckdb/extension/extension_config.cmake"
+
+          # OEM: rename package to vexdb-lite
+          sed -i 's/^name = "duckdb"/name = "vexdb-lite"/' "$BD/pyproject.toml"
+          sed -i "s/^description = .*/description = \"VexDB-Lite: DuckDB with HNSW vector search\"/" "$BD/pyproject.toml"
+
+          # Patch versioning code to use vexdb-lite env var name
+          VERFILE="$BD/duckdb_packaging/setuptools_scm_version.py"
+          if [ -f "$VERFILE" ]; then
+            sed -i 's/SETUPTOOLS_SCM_PRETEND_VERSION_FOR_DUCKDB/SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VEXDB_LITE/' "$VERFILE"
+          fi
+
+          # Add vexdb_lite wrapper package (auto-loads VEX on connect)
+          cp -r ${{ github.workspace }}/packaging/vexdb_lite "$BD/vexdb_lite"
+          sed -i '/^packages\.adbc_driver_duckdb/a packages.vexdb_lite = "vexdb_lite"' "$BD/pyproject.toml"
+
+          # Repack
+          tar czf /tmp/out/duckdb-vex-${{ env.DUCKDB_VERSION }}.tar.gz -C /tmp duckdb-${{ env.DUCKDB_VERSION }}
+
+      - name: Upload prepared source
+        uses: actions/upload-artifact@v4
+        with:
+          name: vex-sdist
+          path: /tmp/out/duckdb-vex-${{ env.DUCKDB_VERSION }}.tar.gz
+          retention-days: 1
+          compression-level: 0  # already compressed tar.gz
+
+      - name: Upload smoke test
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test
+          path: packaging/smoke_test.py
+          retention-days: 1
+
+  # ── Step 2: Build wheels in parallel ──
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS disabled: build locally to save CI minutes (10x multiplier)
+          # - os: macos-latest
+          #   name: macOS-arm64
+          - os: ubuntu-latest
+            name: Linux-x86_64
+          - os: ubuntu-24.04-arm
+            name: Linux-aarch64
+          - os: windows-latest
+            name: Windows-AMD64
+
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+
+    steps:
+      - name: Download prepared source
+        uses: actions/download-artifact@v4
+        with:
+          name: vex-sdist
+
+      - name: Download smoke test
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-test
+
+      - name: Extract source
+        shell: bash
+        run: tar xzf duckdb-vex-${{ env.DUCKDB_VERSION }}.tar.gz
+
+      # ccache: max-size 500M, save on hit to maximize reuse
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: wheel-${{ matrix.name }}
+          max-size: 500M
+          save: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install build dependencies
+        run: pip install scikit-build-core pybind11 setuptools_scm ninja wheel
+
+      # Cache pip wheels to skip re-downloading build deps
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ matrix.name }}-${{ env.PYTHON_VERSION }}
+
+      - name: Build wheel
+        shell: bash
+        run: |
+          cd duckdb-${{ env.DUCKDB_VERSION }}
+
+          # Version from tag
+          VEXDB_VERSION="${GITHUB_REF_NAME#v}"
+          if [[ ! "$VEXDB_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            VEXDB_VERSION="0.0.1"
+          fi
+          export OVERRIDE_GIT_DESCRIBE="v${VEXDB_VERSION}"
+          export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VEXDB_LITE="${VEXDB_VERSION}"
+          export SETUPTOOLS_SCM_PRETEND_VERSION="${VEXDB_VERSION}"
+
+          CMAKE_EXTRA=""
+          if [[ "$(uname)" == "Darwin" ]]; then
+            ARCH=$(python3 -c "import platform; print(platform.machine())")
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+            CMAKE_EXTRA="-DCMAKE_OSX_ARCHITECTURES=$ARCH -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0"
+          fi
+
+          # Key optimizations:
+          # - ccache: skip recompiling unchanged files
+          # - DISABLE_UNITY=OFF (default): unity builds merge .cpp files → fewer compile units
+          # - ninja: faster than make for parallel builds
+          export CMAKE_ARGS="${CMAKE_EXTRA} -DBUILD_EXTENSIONS='core_functions;parquet;icu;json;vex' -DSKIP_EXTENSIONS='jemalloc' -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+          export CMAKE_BUILD_PARALLEL_LEVEL=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo "${NUMBER_OF_PROCESSORS:-4}")
+
+          echo ">>> Build with $CMAKE_BUILD_PARALLEL_LEVEL parallel jobs, ccache enabled"
+          ccache -z  # reset stats
+          pip wheel . --no-build-isolation --no-deps -w ../dist
+          echo ">>> ccache stats:"
+          ccache -s
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          pip install dist/*.whl --force-reinstall --no-deps
+          python smoke_test.py
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}-py${{ env.PYTHON_VERSION }}
+          path: dist/*.whl
+
+  # ── Step 3: Collect ──
+  collect:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          path: all-wheels
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -lh all-wheels/
+
+      - name: Upload combined
+        uses: actions/upload-artifact@v4
+        with:
+          name: vexdb-lite-wheels
+          path: all-wheels/*.whl
+
+  # ── Step 4: Release (tag only) ──
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: collect
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: vexdb-lite-wheels
+          path: wheels
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: wheels/*.whl
+          generate_release_notes: true

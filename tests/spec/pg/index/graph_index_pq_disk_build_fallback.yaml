@@ -1,0 +1,35 @@
+name: graph_index_pq_disk_build_fallback
+tags:
+- pg-only
+- pq-v1
+description: |
+  PQ encode-at-flush requires the in-memory mem_store path so flush
+  can walk raw vectors once. When maintenance_work_mem is too low
+  build_state falls back to DISK (streaming raw floats directly to
+  vec storage); init_quantizer detects this and NOTICE-fallbacks to
+  plain HNSW with an errhint about maintenance_work_mem.
+
+  Catches: PQ enabled on disk-build path (which would write raw 32-bit
+  floats into 8-byte code slots → silent corruption), or hard ERROR
+  instead of NOTICE+fallback.
+
+engines:
+- pg
+steps:
+# Tight maintenance_work_mem forces disk-build path with the row count
+# below. 64MB is well under the disk-fallback threshold for 100k rows
+# × 128-d FloatVector (520 B/tuple × 100k = 52MB raw vec alone, plus
+# graph + basepoint + upperpoint pools).
+- statement: SET maintenance_work_mem = '64MB';
+- statement: DROP TABLE IF EXISTS pq_disk;
+- statement: CREATE TABLE pq_disk (id INTEGER, vec floatvector(128));
+- statement: "INSERT INTO pq_disk SELECT i, ('[' || array_to_string(array(SELECT (i + j) % 256 FROM generate_series(0,127) AS s(j)), ',') || ']')::floatvector FROM generate_series(0, 99999) AS t(i);"
+- statement: CREATE INDEX idx_pq_disk ON pq_disk USING vexdb_graph (vec) WITH (quantizer='pq', pq_m=8);
+# Either: build_state became DISK and PQ NOTICE-fell back (use_pq=f),
+# or there was enough mem after all and PQ succeeded (use_pq=t).
+# Both are acceptable; what we catch is corruption — the scan must
+# return sensible results either way.
+- query: SELECT COUNT(*) FROM (SELECT id FROM pq_disk ORDER BY vec <-> (SELECT vec FROM pq_disk WHERE id = 0) LIMIT 5) sub;
+  expect:
+    - "5"
+- statement: DROP TABLE pq_disk;

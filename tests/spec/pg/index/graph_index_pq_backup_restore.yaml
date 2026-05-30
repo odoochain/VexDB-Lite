@@ -1,0 +1,41 @@
+name: graph_index_pq_backup_restore
+tags: [pg-only, regression, must-not-crash, pq, backup]
+description: |
+  CREATE INDEX vexdb_graph quantizer=pq + pg_dump (text + custom) + pg_restore
+  后查询不应报 PQ centroids unavailable。
+  本 spec 做 regression 哨兵,验证 CREATE INDEX quantizer=pq × 3 metric
+  + pg_dump + pg_restore + query 返回 top-k 不报 PQ centroids unavailable。
+engines: [pg]
+steps:
+  - statement: DROP TABLE IF EXISTS tb_1079430 CASCADE;
+  - statement: CREATE TABLE tb_1079430(id int, v floatvector(64));
+  - statement: |
+      INSERT INTO tb_1079430
+      SELECT i, ('[' || array_to_string(array(SELECT ((i+j*3) % 100)::float/10 FROM generate_series(0,63) j), ',') || ']')::floatvector(64)
+      FROM generate_series(1, 1000) i;
+
+  - statement: SET maintenance_work_mem='256MB';
+  - statement: CREATE INDEX idx_1079430a ON tb_1079430 USING vexdb_graph(v floatvector_cosine_ops) WITH (quantizer=pq);
+  - statement: CREATE INDEX idx_1079430b ON tb_1079430 USING vexdb_graph(v floatvector_l2_ops) WITH (quantizer=pq);
+  - statement: CREATE INDEX idx_1079430c ON tb_1079430 USING vexdb_graph(v floatvector_ip_ops) WITH (quantizer=pq);
+
+  # 第一次 query 验证 PQ centroids 可读 (在原 db 上, 不走 backup/restore)
+  - statement: SET enable_seqscan=off;
+  - query: |
+      WITH q AS (SELECT ('[' || array_to_string(array(SELECT (j::float/10) FROM generate_series(0,63) j), ',') || ']')::floatvector(64) AS vec)
+      SELECT count(*) FROM (SELECT id FROM tb_1079430, q ORDER BY v <=> q.vec LIMIT 10) s;
+    expect: [["10"]]
+  - query: |
+      WITH q AS (SELECT ('[' || array_to_string(array(SELECT (j::float/10) FROM generate_series(0,63) j), ',') || ']')::floatvector(64) AS vec)
+      SELECT count(*) FROM (SELECT id FROM tb_1079430, q ORDER BY v <-> q.vec LIMIT 10) s;
+    expect: [["10"]]
+  - query: |
+      WITH q AS (SELECT ('[' || array_to_string(array(SELECT (j::float/10) FROM generate_series(0,63) j), ',') || ']')::floatvector(64) AS vec)
+      SELECT count(*) FROM (SELECT id FROM tb_1079430, q ORDER BY v <#> q.vec LIMIT 10) s;
+    expect: [["10"]]
+
+  # inspect 校验 quantizer 字段正确读出 (metap struct layout sanity)
+  - query: SELECT content::text FROM index_inspect('idx_1079430b') WHERE attribute = 'Setting Quantizer';
+    expect: [["PQ"]]
+
+  - statement: DROP TABLE tb_1079430 CASCADE;

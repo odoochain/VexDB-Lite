@@ -1,0 +1,777 @@
+#!/usr/bin/env bash
+# release.sh — 远程跨架构打包 + GitHub Release 发布
+#
+# 用法:
+#   bash scripts/release.sh build [target] [arch]    # 远程 build + 拉回 dist/ (默认动作)
+#   bash scripts/release.sh package                  # 把 dist/<arch>/ 打成 tarball + SHA256SUMS
+#   bash scripts/release.sh upload <tag>             # 上传 tarballs 到 GitHub Release
+#
+#   build target: duck | pg | all (default: all)
+#   build arch:   x86 | arm | all (default: all)
+#
+#   示例:
+#     bash scripts/release.sh                          # build 全量 (4 个产物)
+#     bash scripts/release.sh build duck arm           # 只 build ARM DuckDB
+#     bash scripts/release.sh package                  # 4 个 tarball 进 dist/release/
+#     bash scripts/release.sh upload v0.1.0            # 推送到 GitHub Release
+#
+# 凭证: 通过 SERVERS_FILE 环境变量指定凭证文件，或直接覆盖以下 *_HOST/*_USER/*_PASS。
+
+set -euo pipefail
+trap 'echo "[release] FAILED at line $LINENO" >&2' ERR
+
+# ============================================================
+# 配置
+# ============================================================
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# PG source lives inside this repo. Separate PG_VEXDB checkout retired 2026-05-13;
+# nested duckdb/ wrapper retired 2026-05-13 — repo root is now flat.
+PG_VEXDB_ROOT="${PG_VEXDB_ROOT:-$REPO_ROOT}"
+DIST_DIR="$REPO_ROOT/dist"
+
+# 远程 GitHub 不可达，cmake / DuckDB src 必须本地下载后 scp
+CMAKE_VER="3.28.6"
+CMAKE_LINUX_X86="cmake-${CMAKE_VER}-linux-x86_64.tar.gz"
+CMAKE_TARBALL="/tmp/${CMAKE_LINUX_X86}"
+CMAKE_URL="https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/${CMAKE_LINUX_X86}"
+DUCKDB_SRC_LOCAL="${DUCKDB_SRC_LOCAL:-$REPO_ROOT/build/duck/duckdb_src}"
+REMOTE_DIR="pkgbuild"
+
+# 远程机器配置（Mac bash 3.2 无 assoc 数组，用 prefix 变量）
+# x86：CentOS 8 + gcc 8.5（太老）→ 借同事的 gcc 10.3
+X86_HOST="${X86_HOST:-}"
+X86_USER="${X86_USER:-}"
+X86_PASS="${X86_PASS:-}"
+X86_PG_CONFIG="${X86_PG_CONFIG:-/opt/pgsql/bin/pg_config}"
+X86_BOOST="${X86_BOOST:-/opt/boost_1_90_0}"
+X86_GCC_DIR="${X86_GCC_DIR:-/opt/gcc-toolchain/gcc}"
+
+# ARM：Kylin V10 SP1 + gcc 9.3 + cmake 3.16（系统自带够用）
+ARM_HOST="${ARM_HOST:-}"
+ARM_USER="${ARM_USER:-}"
+ARM_PASS="${ARM_PASS:-}"
+ARM_PG_CONFIG="${ARM_PG_CONFIG:-/path/to/pg_config}"
+ARM_BOOST="${ARM_BOOST:-/path/to/boost}"
+
+# 第一个参数兼容旧用法（直接传 target 隐式为 build）
+CMD="${1:-build}"
+case "$CMD" in
+    build|package|upload|test) shift ;;
+    duck|pg|all)               CMD="build" ;;
+    *)                         CMD="build" ;;
+esac
+TARGET="${1:-all}"
+ARCH="${2:-all}"
+RELEASE_DIR="$DIST_DIR/release"
+PG_VERSION="${PG_VERSION:-pg19}"
+
+# ============================================================
+# Util
+# ============================================================
+
+YEL=$'\033[1;33m'; GRN=$'\033[0;32m'; RED=$'\033[0;31m'; BLU=$'\033[0;34m'; NC=$'\033[0m'
+info()  { printf '%s[release]%s %s\n' "$YEL" "$NC" "$*"; }
+ok()    { printf '%s[release]%s %s\n' "$GRN" "$NC" "$*"; }
+fail()  { printf '%s[release]%s %s\n' "$RED" "$NC" "$*" >&2; exit 1; }
+section() { printf '\n%s━━━ %s ━━━%s\n' "$BLU" "$*" "$NC"; }
+
+load_credentials() {
+    local arch="${1:-all}"   # 只加载用到的架构凭证
+    local f="${SERVERS_FILE:-}"
+    if [[ -n "$f" && -f "$f" ]]; then
+        [[ -z "$X86_PASS" ]] && X86_PASS="$(awk "/$X86_HOST/,/^---/{if(\$1==\"|\"&&\$2==\"Password\"){print \$4; exit}}" "$f" 2>/dev/null || true)"
+        [[ -z "$ARM_PASS" ]] && ARM_PASS="$(awk "/$ARM_HOST/,/^---/{if(\$1==\"|\"&&\$2==\"Password\"){print \$4; exit}}" "$f" 2>/dev/null || true)"
+    fi
+    [[ "$arch" == "arm" ]] && { [[ -n "$ARM_PASS" ]] || fail "ARM_PASS 未设置；请通过环境变量或 SERVERS_FILE 提供"; }
+    [[ "$arch" == "x86" ]] && { [[ -n "$X86_PASS" ]] || fail "X86_PASS 未设置；请通过环境变量或 SERVERS_FILE 提供"; }
+    if [[ "$arch" == "all" ]]; then
+        [[ -n "$X86_PASS" ]] || fail "X86_PASS 未设置；请通过环境变量或 SERVERS_FILE 提供"
+        [[ -n "$ARM_PASS" ]] || fail "ARM_PASS 未设置；请通过环境变量或 SERVERS_FILE 提供"
+    fi
+}
+
+# 通用 SSH/SCP helper — 第一个参数 x86/arm，复用 ControlMaster 大幅减少建连开销
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new
+          -o ControlMaster=auto
+          -o ControlPersist=600
+          -o ControlPath=/tmp/ssh-vexdb-release-%r@%h:%p)
+
+# 给一个 arch 取对应的 host/user/pass（mac bash 3.2 兼容，eval 间接展开）
+_host() { eval "echo \$$(echo "$1" | tr a-z A-Z)_HOST"; }
+_user() { eval "echo \$$(echo "$1" | tr a-z A-Z)_USER"; }
+_pass() { eval "echo \$$(echo "$1" | tr a-z A-Z)_PASS"; }
+
+rssh() {
+    local arch=$1; shift
+    sshpass -p "$(_pass "$arch")" ssh "${SSH_OPTS[@]}" \
+        "$(_user "$arch")@$(_host "$arch")" "$@"
+}
+rscp_up() {
+    local arch=$1; shift
+    sshpass -p "$(_pass "$arch")" scp -q "${SSH_OPTS[@]}" "$@" \
+        "$(_user "$arch")@$(_host "$arch"):~/"
+}
+rscp_down() {
+    local arch=$1 src=$2 dst=$3
+    sshpass -p "$(_pass "$arch")" scp -q "${SSH_OPTS[@]}" \
+        "$(_user "$arch")@$(_host "$arch"):$src" "$dst"
+}
+# rrsync_up: 增量同步本地目录到远程目录,跳过未变文件。SSH_OPTS 拼成
+# rsync 的 -e 参数。--delete 让远程严格镜像本地(避免上一轮残留)。
+# 用法: rrsync_up <arch> <src> <dst> [extra rsync args, e.g. --exclude=...]
+rrsync_up() {
+    local arch=$1 src=$2 dst=$3
+    shift 3
+    local ssh_cmd
+    printf -v ssh_cmd "sshpass -p %q ssh" "$(_pass "$arch")"
+    for opt in "${SSH_OPTS[@]}"; do ssh_cmd+=" $opt"; done
+    rsync -az --delete -e "$ssh_cmd" "$@" "$src/" \
+        "$(_user "$arch")@$(_host "$arch"):$dst/"
+}
+
+# ============================================================
+# Stage
+# ============================================================
+
+prepare_local() {
+    section "本地准备"
+    for cmd in sshpass scp curl tar; do
+        command -v "$cmd" >/dev/null || fail "缺少命令: $cmd（brew install $cmd）"
+    done
+
+    [[ -d "$REPO_ROOT" ]] || fail "找不到 vexdb_lite 仓库: $REPO_ROOT"
+
+    load_credentials
+    mkdir -p "$DIST_DIR/x86_64-linux" "$DIST_DIR/aarch64-linux"
+
+    [[ -f "$CMAKE_TARBALL" ]] || {
+        info "下载 cmake $CMAKE_VER → $CMAKE_TARBALL"
+        curl -sSL --max-time 120 "$CMAKE_URL" -o "$CMAKE_TARBALL" || fail "cmake 下载失败"
+    }
+
+    # rsync 增量上传源码:本地 → 远程,跳过未变文件。不再 tar+scp(每次重传几十/几百 MB)。
+    command -v rsync >/dev/null || fail "缺少 rsync(brew install rsync)"
+
+    [[ -d "$DUCKDB_SRC_LOCAL" ]] || fail "本地 DuckDB src 不存在: $DUCKDB_SRC_LOCAL；先跑 build_duck.sh setup"
+
+    ok "本地准备完成"
+}
+
+# 这些 rsync exclude 与之前的 tar exclude 等价。--delete 让远程跟本地严格一致。
+VEXDB_RSYNC_EXCLUDES=(
+    --exclude='build/'      --exclude='.git/'        --exclude='dist/'
+    --exclude='.claude/'    --exclude='.specstory/'  --exclude='.local/'
+    --exclude='.env'        --exclude='.env.*'       --exclude='credentials.json'
+    --exclude='*.duckdb_extension'  --exclude='*.unstripped'
+    --exclude='__pycache__' --exclude='*.o' --exclude='*.so' --exclude='*.so.debug'
+    # spec test 在 docker 容器以 root 跑, 生成的 .db 文件 root-owned, host UID
+    # rsync --delete 删不掉 → 整个 stage 失败. 这些是测试临时文件, 不需同步.
+    --exclude='duckdb_unittest_tempdir/'
+)
+DUCKDB_RSYNC_EXCLUDES=(
+    --exclude='.git/' --exclude='.github/'
+)
+
+# arch 参数化：替代之前的 stage_x86 + stage_arm 两个几乎一样的函数
+# 走 rsync 增量同步,首次约 5min,后续 commit 改几行只传 diff(秒级)。
+stage() {
+    local arch=$1
+    section "$arch 同步源码(rsync 增量)"
+    rssh "$arch" "mkdir -p ~/$REMOTE_DIR/vexdb_lite"
+    rrsync_up "$arch" "$REPO_ROOT" "~/$REMOTE_DIR/vexdb_lite" "${VEXDB_RSYNC_EXCLUDES[@]}"
+
+    if [[ "$arch" == "x86" ]] && ! rssh x86 "[ -x ~/opt/cmake-${CMAKE_VER}-linux-x86_64/bin/cmake ]"; then
+        info "x86 部署 portable cmake $CMAKE_VER"
+        rscp_up x86 "$CMAKE_TARBALL"
+        rssh x86 "mkdir -p ~/opt && cd ~/opt && tar xzf ~/$CMAKE_LINUX_X86 && rm ~/$CMAKE_LINUX_X86"
+    fi
+
+    if [[ "$TARGET" == "all" || "$TARGET" == "duck" ]]; then
+        info "$arch 同步 DuckDB src(rsync 增量)"
+        rssh "$arch" "mkdir -p ~/$REMOTE_DIR/vexdb_lite/build/duck/duckdb_src/.git"
+        rrsync_up "$arch" "$DUCKDB_SRC_LOCAL" "~/$REMOTE_DIR/vexdb_lite/build/duck/duckdb_src" \
+            "${DUCKDB_RSYNC_EXCLUDES[@]}"
+        # build_duck.sh 用 [[ ! -d "$DUCK_SRC/.git" ]] 决定要不要 clone;补一个空 .git 防误触发
+        rssh "$arch" "mkdir -p ~/$REMOTE_DIR/vexdb_lite/build/duck/duckdb_src/.git"
+    fi
+    ok "$arch stage 完成"
+}
+
+# ============================================================
+# Build
+# ============================================================
+
+# manylinux_2_28 ABI 标准:产物 libstdc++ GLIBCXX 符号引用 <= GLIBCXX_3.4.22。
+# 超过即对外发版不兼容(客户机器旧 GLIBC 跑不起,"libc 版本不支持"报错)。
+GLIBCXX_MAX="3.4.22"
+
+# 远程校验 .duckdb_extension 的 GLIBCXX 上限——在 validate_duck 用,产物已在远程。
+# 用法: _assert_glibcxx_remote <arch> <remote_ext_path>
+_assert_glibcxx_remote() {
+    local arch=$1 ext=$2
+    info "  $arch GLIBCXX 校验(对外发版兼容性,manylinux_2_28 上限 GLIBCXX_$GLIBCXX_MAX)"
+    rssh "$arch" "
+        found=\$(strings '$ext' 2>/dev/null | grep -oE 'GLIBCXX_[0-9.]+' | sort -t. -k1n -k2n -k3n | tail -1)
+        if [ -z \"\$found\" ]; then
+            echo '    无 GLIBCXX_ 符号引用,通过'
+            exit 0
+        fi
+        found_ver=\${found#GLIBCXX_}
+        highest=\$(printf '%s\\n%s\\n' '$GLIBCXX_MAX' \"\$found_ver\" | sort -t. -k1n -k2n -k3n | tail -1)
+        if [ \"\$highest\" = '$GLIBCXX_MAX' ]; then
+            echo \"    产物 \$found <= GLIBCXX_$GLIBCXX_MAX,通过\"
+        else
+            echo \"    产物 \$found > GLIBCXX_$GLIBCXX_MAX,manylinux_2_28 不兼容\" >&2
+            exit 1
+        fi
+    " || fail "$arch GLIBCXX 校验失败:产物 GLIBCXX 上限超 manylinux_2_28(检查 MANYLINUX=1 是否生效;host gcc 10.3 路径会带 GLIBCXX_3.4.26)"
+    ok "  $arch GLIBCXX 校验通过"
+}
+
+# 本地校验 .duckdb_extension 的 GLIBCXX 上限——在 cmd_package 用,扫 dist。
+# 返回:0 通过,1 不兼容。打印 OK/FAIL 行供调用方汇总。
+_assert_glibcxx_local() {
+    local f=$1
+    local found
+    found=$(strings "$f" 2>/dev/null | grep -oE 'GLIBCXX_[0-9.]+' | sort -t. -k1n -k2n -k3n | tail -1)
+    if [[ -z "$found" ]]; then
+        info "  $(basename "$f"):无 GLIBCXX_ 符号,通过"
+        return 0
+    fi
+    local found_ver="${found#GLIBCXX_}"
+    local highest
+    highest=$(printf '%s\n%s\n' "$GLIBCXX_MAX" "$found_ver" | sort -t. -k1n -k2n -k3n | tail -1)
+    if [[ "$highest" == "$GLIBCXX_MAX" ]]; then
+        ok "  $(basename "$f"):$found <= GLIBCXX_$GLIBCXX_MAX"
+        return 0
+    fi
+    echo "[FAIL] $(basename "$f"):$found > GLIBCXX_$GLIBCXX_MAX,manylinux_2_28 不兼容" >&2
+    return 1
+}
+
+build_duck() {
+    local arch=$1 outdir
+    [[ "$arch" == "x86" ]] && outdir="$DIST_DIR/x86_64-linux" || outdir="$DIST_DIR/aarch64-linux"
+
+    if [[ "${MANYLINUX:-1}" == "1" ]]; then
+        section "$arch build DuckDB ext (manylinux container)"
+        _build_duck_manylinux "$arch" || fail "$arch DuckDB manylinux build 失败"
+    else
+        section "$arch build DuckDB ext (host gcc)"
+        _build_duck_host "$arch" || fail "$arch DuckDB host build 失败"
+    fi
+
+    validate_duck "$arch" || fail "$arch DuckDB smoke 失败"
+
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vex/vex.duckdb_extension" "$outdir/"
+    # Pull the unstripped copy too — kept in dist/<arch>/ for our gdb work,
+    # excluded from packaging by .gitignore + cmd_package's explicit allowlist.
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vex/vex.duckdb_extension.unstripped" "$outdir/" \
+        2>/dev/null || info "  (unstripped 未拉到本地，本机调试时再 scp)"
+    ok "$arch DuckDB ext: $(ls -lh "$outdir/vex.duckdb_extension" | awk '{print $5}')"
+}
+
+# host gcc 10.3 路径——快但产物有 GLIBCXX_3.4.26 依赖，仅 dev / 内部测试用。
+# 对外发版必须用 _build_duck_manylinux（MANYLINUX=1 触发）。
+_build_duck_host() {
+    local arch=$1 env_setup=""
+    if [[ "$arch" == "x86" ]]; then
+        env_setup="GCC=$X86_GCC_DIR && \
+            export PATH=\$GCC/bin:\$HOME/opt/cmake-${CMAKE_VER}-linux-x86_64/bin:\$PATH && \
+            export LD_LIBRARY_PATH=\$GCC/lib64:\${LD_LIBRARY_PATH:-} && \
+            export CC=\$GCC/bin/gcc CXX=\$GCC/bin/g++ &&"
+    else
+        env_setup="export BOOST_INCLUDEDIR=$ARM_BOOST BOOST_ROOT=$ARM_BOOST &&"
+    fi
+
+    # TMPDIR redirect: x86 .51 / 卷 40G 不够编 AVX-512 模板 + 链 DuckDB 静态库
+    # 的中间产物,挂 "No space left on device"。统一切 /home。详见 build_pg() 注释。
+    #
+    # 增量 build (CLEAN_DUCK_BUILD 默认 0): 保留 build/duck/build, CMake 自动检测
+    # 改了的 .cpp 只重编那些, vex extension 改源码后 ~30s 重 link 即可, 不用全量
+    # 重编 DuckDB 本体 (~5-8min). 切 toolchain (host gcc <-> manylinux 容器) 时
+    # ABI 不兼容会 build fail, 需 CLEAN_DUCK_BUILD=1 强制清.
+    local clean_step=""
+    [[ "${CLEAN_DUCK_BUILD:-0}" == "1" ]] && clean_step="rm -rf build/duck/build && \\"$'\n        '
+    rssh "$arch" "mkdir -p \$HOME/tmpdir && \
+        $env_setup \
+        cd ~/$REMOTE_DIR/vexdb_lite && \
+        ${clean_step}TMPDIR=\$HOME/tmpdir bash build_duck.sh build" || return 1
+
+    info "$arch strip + reseal footer"
+    rssh "$arch" "$env_setup \
+        cd ~/$REMOTE_DIR/vexdb_lite && \
+        TMPDIR=\$HOME/tmpdir UNSTRIPPED_OUT=build/duck/build/extension/vex/vex.duckdb_extension.unstripped \
+        bash build_duck.sh strip" || return 1
+}
+
+# manylinux_2_28 容器路径——产物 GLIBCXX≤3.4.22，对外发版必走。
+#
+# Docker rootful on both ends; x86 vmuser 不在 docker 组，命令前缀套
+# `echo PASS | sudo -S`。镜像必须在远程预先 docker load 过；ARM 端有
+# x86_64 + aarch64 两份，x86 端通常需从 ARM save → mac 中转 → x86 load
+# （详见 [[reference_pkg_build]] 镜像就位状态段）。
+#
+# 容器内步骤（跟历史 ad-hoc 命令对齐 + 合入 build_duck.sh strip）:
+#   1. pip 装 cmake==3.29.6（镜像内 cmake 4.x 不兼容 DuckDB v1.5.2
+#      link_threads 检查；aliyun 镜像 pypi 拉得快）
+#   2. sed 给 build_duck.sh 的 cmake 命令注入 BOOST_ROOT
+#   3. rm -rf build/duck/build（host gcc 编出的 .o 跟容器 ABI 不兼容）
+#   4. build_duck.sh build → 出含 footer 的 .duckdb_extension
+#   5. build_duck.sh strip → strip + 重写 footer（commit f5d62cd31c 后必须
+#      走这个，裸 strip 会吃掉 footer）
+_build_duck_manylinux() {
+    local arch=$1 image boost_src docker_pfx
+    if [[ "$arch" == "x86" ]]; then
+        image="quay.io/pypa/manylinux_2_28_x86_64"
+        boost_src="$X86_BOOST"
+        # x86 docker rootful + vmuser 不在 docker 组 → sudo 喂密码
+        docker_pfx="echo '$X86_PASS' | sudo -S docker"
+    else
+        image="quay.io/pypa/manylinux_2_28_aarch64"
+        boost_src="$ARM_BOOST"
+        # ARM vexdb 在 docker 组，免 sudo
+        docker_pfx="docker"
+    fi
+
+    # 镜像存在性预检——避免后面 docker run 失败时 build_duck.sh 报错不清晰
+    rssh "$arch" "$docker_pfx image inspect $image >/dev/null 2>&1" \
+        || fail "$arch manylinux 镜像 $image 不在；先 docker load 一份"
+
+    # 增量 build (CLEAN_DUCK_BUILD 默认 0): 容器内 manylinux toolchain ABI 稳定,
+    # 可复用 build/duck/build/ 的 .o + libduckdb_static.a, 改 vex 源码后 ~30s
+    # 重 link 即可. 强制 clean: CLEAN_DUCK_BUILD=1 release.sh build.
+    local clean_step_in_container=""
+    [[ "${CLEAN_DUCK_BUILD:-0}" == "1" ]] && clean_step_in_container="rm -rf build/duck/build"
+
+    # 容器以 root 跑（manylinux 镜像里 pip 走默认 PATH 需要 root；--user 改成
+    # host UID 会让 pip 在 $PATH 里失踪）。产物会是 root-owned，容器内最后用
+    # chown 改回 host UID/GID，省得 host 上 sshd 用户后续 rscp_down 拿不到。
+    local host_uid host_gid
+    host_uid=$(rssh "$arch" 'id -u')
+    host_gid=$(rssh "$arch" 'id -g')
+
+    rssh "$arch" "$docker_pfx run --rm \
+        -v \$HOME/$REMOTE_DIR/vexdb_lite:/work \
+        -v $boost_src:/opt/boost:ro \
+        -w /work \
+        $image \
+        bash -c 'set -e
+            # manylinux_2_28 镜像把每个 Python ABI 装在 /opt/python/cp*-cp*/bin/
+            # (独立解释器,跟 /usr/bin/python3 没共享 site-packages),pip 也在那里。
+            # /usr/bin/python3 没装 pip 模块,默认 PATH 也不含 /opt/python/...,
+            # 直接 \`pip\` 或 \`python3 -m pip\` 都找不到。把 cp310 加进 PATH 即可。
+            export PATH=/opt/python/cp310-cp310/bin:\$PATH
+            pip install --quiet -i https://mirrors.aliyun.com/pypi/simple cmake==3.29.6 2>/dev/null || \
+              pip install --quiet cmake==3.29.6
+            sed -i \"s|-DDUCKDB_EXTENSION_CONFIGS=|-DBOOST_ROOT=/opt/boost -DBoost_NO_BOOST_CMAKE=ON -DDUCKDB_EXTENSION_CONFIGS=|\" build_duck.sh
+            # regenerate extension_config_local.cmake with container paths (/work/...)
+            # — host (macOS) 上 build_duck.sh setup 生成的版本写死了本地绝对路径
+            # (/Users/Four/...), rsync 同步到容器后 cmake add_subdirectory 找不到.
+            cat > build/duck/duckdb_src/extension/extension_config_local.cmake <<CFGEOF
+duckdb_extension_load(vex
+    SOURCE_DIR /work/vexdb_duckdb
+    INCLUDE_DIR /work/vexdb_duckdb/include
+    LOAD_TESTS
+)
+CFGEOF
+            ${clean_step_in_container}
+            bash build_duck.sh build
+            UNSTRIPPED_OUT=build/duck/build/extension/vex/vex.duckdb_extension.unstripped \
+              bash build_duck.sh strip
+            chown -R $host_uid:$host_gid build/duck/build build_duck.sh
+        '" || return 1
+}
+
+# DuckDB ext smoke：ELF + 入口符号 + footer 存在 + 真 LOAD 自检。
+#
+# Footer 检查是 v0.0.3 翻车后加的硬关卡：当时 strip 把 append_metadata.cmake
+# 写入的 footer 一起截掉了，结果发出去的 .duckdb_extension 在客户机上 LOAD
+# 报 "metadata at the end of the file is invalid"。validate_duck 旧版只看
+# ELF + 大小，放过了缺 footer 的产物。现在直接 grep "duckdb_signature"
+# magic（append_metadata.cmake 写入的 custom-section 名字），并跑一次真 LOAD。
+validate_duck() {
+    local arch=$1
+    info "$arch DuckDB smoke 验证（ELF + 入口符号 + footer + LOAD）"
+    local ext_path="~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vex/vex.duckdb_extension"
+    rssh "$arch" "set -e
+        test -f $ext_path
+        file $ext_path | grep -q ELF
+        nm -D $ext_path 2>/dev/null | grep -qE 'vex_duckdb.*init|vex_init|duckdb_init'
+        test \$(stat -c %s $ext_path) -gt 1048576
+        # footer canary — append_metadata.cmake 写入的 custom-section 名字
+        grep -aq duckdb_signature $ext_path || { echo 'missing footer'; exit 1; }" \
+        || { echo "smoke 失败"; return 1; }
+    info "  ELF + 入口符号 + footer 通过"
+
+    # 真 LOAD：按优先级尝试三个 CLI 路径
+    #   1. build/duck/build/duckdb     ─ BUILD_SHELL=ON 时由 build_duck.sh 自己编的，最贴合
+    #   2. ~/duckdb_cli_1_5_2 (x86)    ─ 官方 v1.5.2 amd64，[[reference_test_machines]] 备
+    #      /tmp/duckdb (ARM)            ─ 官方 v1.5.2 aarch64
+    #   3. 都没有 → soft skip（footer canary 已是 hard gate，LOAD 只是 defense-in-depth）
+    #
+    # LD_LIBRARY_PATH 只在 host gcc 路径下需要（产物链 GLIBCXX_3.4.26，要 GCC 10.3 的
+    # libstdc++）；manylinux 路径产物本身只要 GLIBCXX≤3.4.22，系统 libstdc++ 就够。
+    local ld_setup=""
+    if [[ "${MANYLINUX:-1}" != "1" && "$arch" == "x86" ]]; then
+        ld_setup="export LD_LIBRARY_PATH=$X86_GCC_DIR/lib64:\${LD_LIBRARY_PATH:-};"
+    fi
+    rssh "$arch" "set -e
+        $ld_setup
+        EXT=\$HOME/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vex/vex.duckdb_extension
+        CLI=
+        for cand in \$HOME/$REMOTE_DIR/vexdb_lite/build/duck/build/duckdb \$HOME/duckdb_cli_1_5_2 /tmp/duckdb; do
+            [ -x \"\$cand\" ] && { CLI=\$cand; break; }
+        done
+        if [ -n \"\$CLI\" ]; then
+            echo \"  using CLI: \$CLI\"
+            \"\$CLI\" -unsigned -c \"LOAD '\$EXT'; SELECT vex_version();\" 2>&1 | tail -3
+        else
+            echo '  (skip LOAD smoke: 找不到任何 duckdb CLI)'
+        fi" \
+        || { echo "LOAD smoke 失败"; return 1; }
+    info "  LOAD smoke 通过"
+
+    # GLIBCXX 上限校验:对外发版必须 <= manylinux_2_28 标准(GLIBCXX_3.4.22)。
+    # 即使 MANYLINUX=1 走 manylinux 容器,这里再校验一道,挡住未来配置漂移
+    # (容器镜像换 / build_duck.sh 路径变化等)。host gcc 10.3 路径产物 GLIBCXX_3.4.26
+    # 在这一步会被直接拦截。
+    _assert_glibcxx_remote "$arch" "$ext_path" || return 1
+}
+
+build_pg() {
+    local arch=$1 outdir pg_config boost env_setup=""
+    [[ "$arch" == "x86" ]] && { outdir="$DIST_DIR/x86_64-linux"; pg_config="$X86_PG_CONFIG"; boost="$X86_BOOST"; } \
+                          || { outdir="$DIST_DIR/aarch64-linux"; pg_config="$ARM_PG_CONFIG"; boost="$ARM_BOOST"; }
+    # x86 用 portable cmake + 指定 gcc10.3(同 build_duck);ARM 用 Kylin 系统 cmake(3.16+ 够)。
+    if [[ "$arch" == "x86" ]]; then
+        env_setup="GCC=$X86_GCC_DIR && \
+            export PATH=\$GCC/bin:\$HOME/opt/cmake-${CMAKE_VER}-linux-x86_64/bin:\$PATH && \
+            export LD_LIBRARY_PATH=\$GCC/lib64:\${LD_LIBRARY_PATH:-} && \
+            export CC=\$GCC/bin/gcc CXX=\$GCC/bin/g++ &&"
+    fi
+    section "$arch build vexdb_vector (PG 19, cmake)"
+
+    # CMake out-of-tree build(build/pg)。TMPDIR 切 /home(同 build_duck:x86 /tmp 40G
+    # 不够中间产物)。boost:CMakeLists 的 thirdparties(vendored, getpid patch)优先 +
+    # -DBOOST_FALLBACK_INC=完整 boost 兜底 vendored trim 掉的 preprocessor 等(系统无
+    # boost 的 Kylin build 机必需)。CMake 输出 vexdb_vector.so cp 回仓库根供 split-debug/下载。
+    rssh "$arch" "mkdir -p \$HOME/tmpdir && \
+        $env_setup \
+        cd ~/$REMOTE_DIR/vexdb_lite && \
+        rm -rf build/pg && mkdir -p build/pg && cd build/pg && \
+        TMPDIR=\$HOME/tmpdir PG_CONFIG=$pg_config cmake ../../vexdb_pg -DCMAKE_BUILD_TYPE=Release -DBOOST_FALLBACK_INC=$boost && \
+        TMPDIR=\$HOME/tmpdir cmake --build . -j8 && \
+        cp vexdb_vector.so ../../vexdb_vector.so" \
+        || fail "$arch PG build 失败"
+
+    # Split debug: standard GNU binutils workflow (Fedora/Debian also use this
+    # for their PG -dbgsym packages). Produces vexdb_vector.so (stripped, light) and
+    # vexdb_vector.so.debug (heavy companion). The .debug carries .debug_info etc.
+    # and is linked back via .gnu_debuglink so gdb auto-loads it whenever both
+    # files sit next to each other (or .debug is placed under
+    # /usr/lib/debug/.build-id/ matching the .so's .note.gnu.build-id).
+    # 旧 Makefile 的 split-debug target 随 Makefile 删除,这里直接走 binutils 流程。
+    info "$arch split-debug"
+    rssh "$arch" "cd ~/$REMOTE_DIR/vexdb_lite && \
+        objcopy --only-keep-debug vexdb_vector.so vexdb_vector.so.debug && \
+        strip --strip-unneeded vexdb_vector.so && \
+        objcopy --add-gnu-debuglink=vexdb_vector.so.debug vexdb_vector.so && \
+        chmod -x vexdb_vector.so.debug" \
+        || fail "$arch split-debug 失败"
+
+    validate_pg "$arch" || fail "$arch PG smoke 失败"
+
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_vector.so" "$outdir/"
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_vector.so.debug" "$outdir/"
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_pg/vexdb_vector.control" "$outdir/"
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_pg/sql/vexdb_vector--1.0.sql" "$outdir/"
+}
+
+# PG smoke：替换远程现成 PG 的 .so + CREATE EXTENSION + 最小 ANN 查询。
+# 远程 PG 已部署 vexdb_vector，备份原 .so 后用新 .so 覆盖，跑完恢复（避免污染共用环境）。
+validate_pg() {
+    local arch=$1 pg_config
+    [[ "$arch" == "x86" ]] && pg_config="$X86_PG_CONFIG" || pg_config="$ARM_PG_CONFIG"
+    info "$arch PG smoke 验证（CREATE EXTENSION + 简单 ANN + build-id + debuglink）"
+
+    rssh "$arch" "set -e
+        PG_LIB=\$($pg_config --pkglibdir)
+        PG_SHARE=\$($pg_config --sharedir)/extension
+        SO=~/$REMOTE_DIR/vexdb_lite/vexdb_vector.so
+        SO_DBG=~/$REMOTE_DIR/vexdb_lite/vexdb_vector.so.debug
+        # 1. 符号检查：PG 扩展必须有 Pg_magic_func
+        nm -D \$SO 2>/dev/null | grep -q Pg_magic_func || { echo 'no Pg_magic_func symbol'; exit 1; }
+        # 2. split-debug 卫生检查：build-id + debuglink section + .debug 文件
+        readelf -n \$SO 2>/dev/null | grep -q 'Build ID:' || { echo 'no build-id (split-debug 无法定位 .debug)'; exit 1; }
+        readelf -S \$SO 2>/dev/null | grep -q '.gnu_debuglink' || { echo 'no .gnu_debuglink section'; exit 1; }
+        test -f \$SO_DBG || { echo 'companion .debug missing'; exit 1; }
+        readelf -n \$SO_DBG 2>/dev/null | grep -q 'Build ID:' || { echo '.debug missing build-id'; exit 1; }
+        # 2. 覆盖部署 + 跑 smoke + 恢复（如果有权限）
+        if [ -w \"\$PG_LIB/vexdb_vector.so\" ]; then
+            cp \"\$PG_LIB/vexdb_vector.so\" \"\$PG_LIB/vexdb_vector.so.bak\"
+            cp \$SO \"\$PG_LIB/vexdb_vector.so\"
+            trap 'cp \"\$PG_LIB/vexdb_vector.so.bak\" \"\$PG_LIB/vexdb_vector.so\" && rm \"\$PG_LIB/vexdb_vector.so.bak\"' EXIT
+            psql -p 5532 -d spec_test -At -c \"DROP TABLE IF EXISTS vex_smoke;
+                CREATE TABLE vex_smoke(id INT, v floatvector(3));
+                INSERT INTO vex_smoke VALUES (1,'[1,0,0]'),(2,'[0,1,0]'),(3,'[0,0,1]');
+                CREATE INDEX ON vex_smoke USING vexdb_graph (v floatvector_l2_ops);
+                SELECT id FROM vex_smoke ORDER BY v <-> '[1,0,0]'::floatvector LIMIT 1;
+                DROP TABLE vex_smoke;\" 2>&1 | tail -5
+        else
+            echo '(skip in-PG smoke: no write perm to \$PG_LIB; ABI 符号检查通过)'
+        fi"
+    ok "$arch vexdb_vector.so: $(ls -lh "$outdir/vexdb_vector.so" | awk '{print $5}')"
+}
+
+# ============================================================
+# Main
+# ============================================================
+
+ARCHES=()
+[[ "$ARCH" == "x86" || "$ARCH" == "all" ]] && ARCHES+=(x86)
+[[ "$ARCH" == "arm" || "$ARCH" == "all" ]] && ARCHES+=(arm)
+
+cmd_build() {
+    info "build 目标=$TARGET 架构=${ARCHES[*]}"
+    [[ "$TARGET" =~ ^(duck|pg|all)$ ]] || fail "target 必须为 duck/pg/all"
+    [[ "$ARCH"   =~ ^(x86|arm|all)$ ]] || fail "arch 必须为 x86/arm/all"
+
+    prepare_local
+
+    for arch in "${ARCHES[@]}"; do stage "$arch"; done
+
+    for arch in "${ARCHES[@]}"; do
+        [[ "$TARGET" == "duck" || "$TARGET" == "all" ]] && build_duck "$arch"
+        [[ "$TARGET" == "pg"   || "$TARGET" == "all" ]] && build_pg   "$arch"
+    done
+
+    section "build 完成"
+    find "$DIST_DIR" -maxdepth 2 -type f \( -name "*.duckdb_extension" -o -name "vexdb_vector.so" \
+        -o -name "*.control" -o -name "*.sql" \) -exec ls -lh {} \;
+}
+
+# ============================================================
+# Package — 打 tarball + SHA256
+# ============================================================
+
+cmd_package() {
+    section "Package"
+
+    # Pre-flight: 扫 dist 下所有 .duckdb_extension,校验 GLIBCXX 上限。
+    # 即使上游 build 漏了 MANYLINUX=1 / 产物从别处拉来 / validate 被跳过,
+    # 这里也挡住——绝不让高 GLIBCXX 产物进 tarball。manylinux_2_28 上限 GLIBCXX_3.4.22。
+    info "Package 前置:扫 dist 下 .duckdb_extension 校验 GLIBCXX 上限"
+    local pkg_fail=0
+    while IFS= read -r ext_file; do
+        _assert_glibcxx_local "$ext_file" || pkg_fail=$((pkg_fail+1))
+    done < <(find "$DIST_DIR" -maxdepth 3 -name "*.duckdb_extension" -type f 2>/dev/null | grep -v unstripped)
+    [[ $pkg_fail -gt 0 ]] && fail "Package 终止:$pkg_fail 个 .duckdb_extension 产物 GLIBCXX 上限 > GLIBCXX_$GLIBCXX_MAX(对外不兼容,用 MANYLINUX=1 重 build)"
+    ok "Package 前置:.duckdb_extension 产物 GLIBCXX <= GLIBCXX_$GLIBCXX_MAX"
+
+    mkdir -p "$RELEASE_DIR"
+    rm -f "$RELEASE_DIR"/*.tar.gz "$RELEASE_DIR/SHA256SUMS.txt"
+
+    # v0.0.6 踩过坑: macOS 上 BSD tar 默认把扩展属性 (xattr / quarantine /
+    # provenance) 落成 `._<filename>` AppleDouble 文件混进 tarball,在
+    # macOS 上 `tar -tzf` 又故意把 `._*` 当 xattr 隐藏不显示 → 发版前看
+    # 不见,Linux 用户解包后 PG 扫 `*.control` glob 把 `._vexdb_vector.control`
+    # 一起读 → "syntax error in file ... near token \"\""。
+    # 修法:
+    #   1. COPYFILE_DISABLE=1 关掉 macOS 写 AppleDouble 的源头
+    #   2. --no-xattrs 强制 tar 不把 xattr 写进归档
+    #   3. --exclude='._*' --exclude='.DS_Store' 双保险,挡住目录里残留
+    # 防回归: 打完包后用 GNU tar (或 macOS 12+ 的 `tar --strict`)
+    # `gtar -tzf` 显式扫一遍,看到 `._*` 直接 fail。
+    local TAR_FLAGS=(-czf)
+    if tar --no-xattrs --help >/dev/null 2>&1; then
+        TAR_FLAGS=(--no-xattrs --exclude='._*' --exclude='.DS_Store' -czf)
+    else
+        # BSD tar (macOS 默认): 没有 --no-xattrs,靠 COPYFILE_DISABLE + --exclude
+        TAR_FLAGS=(--exclude='._*' --exclude='.DS_Store' -czf)
+    fi
+    export COPYFILE_DISABLE=1
+
+    pkg_tar() {
+        local out=$1 archdir=$2; shift 2
+        info "打包 $(basename "$out")"
+        tar "${TAR_FLAGS[@]}" "$out" -C "$archdir" "$@"
+    }
+
+    for arch in x86_64 aarch64; do
+        local archdir="$DIST_DIR/${arch}-linux"
+        [[ -d "$archdir" ]] || { info "跳过 $arch: $archdir 不存在"; continue; }
+
+        # 打包前清掉源目录里残留的 AppleDouble (防御性,正常情况下不该有)
+        find "$archdir" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null
+
+        if [[ -f "$archdir/vex.duckdb_extension" ]]; then
+            pkg_tar "$RELEASE_DIR/vex-duckdb-linux-${arch}.tar.gz" "$archdir" \
+                vex.duckdb_extension
+        fi
+
+        # Duck debug symbols 单独 ship,跟 PG 对齐(参 line 483 注释)。Duck 走
+        # unstripped 全量(没做 objcopy split-debug),比 PG 的 .so.debug 大但
+        # 客户没出 crash 用不到;命名跟 PG 对齐用 -debugsymbols- 后缀。
+        if [[ -f "$archdir/vex.duckdb_extension.unstripped" ]]; then
+            pkg_tar "$RELEASE_DIR/vex-duckdb-debugsymbols-linux-${arch}.tar.gz" "$archdir" \
+                vex.duckdb_extension.unstripped
+        fi
+
+        if [[ -f "$archdir/vexdb_vector.so" ]]; then
+            pkg_tar "$RELEASE_DIR/vexdb_vector-linux-${arch}-${PG_VERSION}.tar.gz" "$archdir" \
+                vexdb_vector.so vexdb_vector.control vexdb_vector--1.0.sql
+        fi
+
+        # PG debug symbols ship as a separate asset (Fedora/Debian convention).
+        # Customers download main tarball only; if they hit a crash worth a
+        # gdb session, ask them to download the matching debugsymbols asset
+        # and drop the .debug file next to .so. gdb auto-loads it via
+        # .gnu_debuglink CRC + .note.gnu.build-id match.
+        if [[ -f "$archdir/vexdb_vector.so.debug" ]]; then
+            pkg_tar "$RELEASE_DIR/vexdb_vector-debugsymbols-linux-${arch}-${PG_VERSION}.tar.gz" "$archdir" \
+                vexdb_vector.so.debug
+        fi
+    done
+
+    # 防回归: 每个 tarball 都扫一遍,有 AppleDouble 直接 fail。
+    # macOS BSD tar `tar -tzf` 会隐藏 `._*` (作为 xattr resource fork),
+    # 必须用 GNU tar (gtar / Linux tar) 才能看见。优先 gtar,fallback
+    # python tarfile (能稳定列出所有 entry,不解释 xattr)。
+    info "验证 tarball 不含 AppleDouble (._* / .DS_Store)"
+    local verify_cmd=""
+    if command -v gtar >/dev/null 2>&1; then
+        verify_cmd="gtar -tzf"
+    elif tar --version 2>/dev/null | grep -qi "gnu tar"; then
+        verify_cmd="tar -tzf"
+    fi
+    for tb in "$RELEASE_DIR"/*.tar.gz; do
+        local bad=""
+        if [[ -n "$verify_cmd" ]]; then
+            bad=$($verify_cmd "$tb" | grep -E '(^|/)\._|(^|/)\.DS_Store$' || true)
+        else
+            # Pure-python fallback (macOS 没装 gtar 时)
+            bad=$(python3 -c "import tarfile,sys
+with tarfile.open(sys.argv[1]) as t:
+  for n in t.getnames():
+    if '/._' in '/'+n or n.endswith('.DS_Store'):
+      print(n)" "$tb")
+        fi
+        if [[ -n "$bad" ]]; then
+            fail "AppleDouble 污染检出 in $(basename "$tb"):"
+            printf '  %s\n' $bad >&2
+            fail "发版中断: 检查打包目录 / TAR_FLAGS / COPYFILE_DISABLE"
+            return 1
+        fi
+    done
+
+    info "生成 SHA256SUMS"
+    (cd "$RELEASE_DIR" && shasum -a 256 *.tar.gz > SHA256SUMS.txt)
+    ok "Release assets (AppleDouble check passed):"
+    ls -lh "$RELEASE_DIR"
+}
+
+# ============================================================
+# Test — manylinux 容器内编 unittest + 跑 [spec_run]
+# ============================================================
+# 必须在 cmd_build(MANYLINUX=1)之后跑:容器内 vex 已编、libduckdb_static.a
+# 已有,只需增量编 catch2 + test driver,然后跑 spec_run group。release.sh
+# build 阶段的 LOAD smoke 只检 ELF 完整性,不验功能 — 跑完 spec 才能确认发版二
+# 进制可用。
+
+cmd_test() {
+    local arch_arg="${1:-all}"
+    [[ "$arch_arg" =~ ^(x86|arm|all)$ ]] || fail "test arch 必须为 x86/arm/all"
+
+    load_credentials "$arch_arg"
+
+    local arches=()
+    [[ "$arch_arg" == "all" || "$arch_arg" == "x86" ]] && arches+=("x86")
+    [[ "$arch_arg" == "all" || "$arch_arg" == "arm" ]] && arches+=("arm")
+
+    for arch in "${arches[@]}"; do
+        section "$arch spec test (manylinux container)"
+        _spec_test_manylinux "$arch" || fail "$arch spec test 失败"
+    done
+    ok "spec test 全过"
+}
+
+_spec_test_manylinux() {
+    local arch=$1 image boost_src docker_pfx
+    if [[ "$arch" == "x86" ]]; then
+        image="quay.io/pypa/manylinux_2_28_x86_64"
+        boost_src="$X86_BOOST"
+        docker_pfx="echo '$X86_PASS' | sudo -S docker"
+    else
+        image="quay.io/pypa/manylinux_2_28_aarch64"
+        boost_src="$ARM_BOOST"
+        docker_pfx="docker"
+    fi
+
+    rssh "$arch" "$docker_pfx image inspect $image >/dev/null 2>&1" \
+        || fail "$arch manylinux 镜像 $image 不在；先 docker load 一份"
+
+    # cmake 必须每次容器重装(临时层 pip,Makefile 记的绝对路径会失效)。
+    # 清 macOS `._*` xattr shadow 文件,否则 catch2 会注册它们为 test。
+    rssh "$arch" "$docker_pfx run --rm \
+        -v \$HOME/$REMOTE_DIR/vexdb_lite:/work \
+        -v $boost_src:/opt/boost:ro \
+        -w /work \
+        $image \
+        bash -c 'set -e
+            PY=\$(ls /opt/python/cp3*/bin/python | head -1)
+            \$PY -m pip install --quiet -i https://mirrors.aliyun.com/pypi/simple cmake==3.29.6 2>/dev/null || \
+              \$PY -m pip install --quiet cmake==3.29.6
+            export PATH=\$(dirname \$PY):\$PATH
+            find vexdb_duckdb/test -name \"._*\" -delete 2>/dev/null || true
+            cmake --build build/duck/build --target unittest -j 8 2>&1 | tail -5
+            ./build/duck/build/test/unittest \"[spec_run]\"
+        '" || return 1
+}
+
+# ============================================================
+# Upload — gh release create / upload
+# ============================================================
+
+cmd_upload() {
+    local tag="${1:-}"
+    [[ -n "$tag" ]] || fail "upload 必须提供 tag: bash scripts/release.sh upload v0.0.1"
+    command -v gh >/dev/null || fail "缺少 gh CLI (brew install gh)"
+    [[ -d "$RELEASE_DIR" ]] || fail "$RELEASE_DIR 不存在；先跑 package"
+    local assets=("$RELEASE_DIR"/*.tar.gz "$RELEASE_DIR/SHA256SUMS.txt")
+    [[ -f "${assets[0]}" ]] || fail "$RELEASE_DIR 里没找到 tarball"
+
+    section "Upload to GitHub Release $tag"
+    if gh release view "$tag" >/dev/null 2>&1; then
+        # 若设 CLEAN_OLD_ASSETS=1，先删 release 上所有现有 asset 再上传新的
+        if [[ "${CLEAN_OLD_ASSETS:-0}" == "1" ]]; then
+            info "CLEAN_OLD_ASSETS=1：删 $tag 现有所有 assets"
+            local existing
+            existing=$(gh release view "$tag" --json assets --jq '.assets[].name')
+            if [[ -n "$existing" ]]; then
+                while IFS= read -r name; do
+                    info "  删 $name"
+                    gh release delete-asset "$tag" "$name" -y || true
+                done <<< "$existing"
+            fi
+        else
+            info "release $tag 已存在，追加 assets (--clobber 覆盖同名；设 CLEAN_OLD_ASSETS=1 清旧)"
+        fi
+        gh release upload "$tag" "${assets[@]}" --clobber
+    else
+        info "新建 release $tag"
+        gh release create "$tag" "${assets[@]}" \
+            --title "$tag" \
+            --notes "Auto-generated release. See README for usage."
+    fi
+    ok "已上传 $tag"
+}
+
+case "$CMD" in
+    build)   cmd_build ;;
+    package) cmd_package ;;
+    upload)  cmd_upload "$@" ;;
+    test)    cmd_test "$@" ;;
+    *)       fail "unknown command: $CMD（build|package|upload|test）" ;;
+esac

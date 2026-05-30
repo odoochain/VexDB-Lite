@@ -1,0 +1,23 @@
+name: index__graph_index_max_level
+tags:
+- vex
+description: vex_index_info().max_level must return real HNSW entry level (not hardcoded 0). ~2000 nodes index entry_level >= 1; empty index returns -1.
+engines:
+- duckdb
+steps:
+- statement: CREATE TABLE vecs (id INTEGER, vec ${VECTOR(4)});
+- statement: "INSERT INTO vecs SELECT i,\n    ${VEC_LITERAL([(i*0.1)::FLOAT, (i*0.2)::FLOAT, (i*0.3)::FLOAT, (i*0.4)::FLOAT], 4)}\nFROM ${RANGE(2000)} t(i);"
+- statement: CREATE INDEX idx_lvl ON vecs USING ${VEX_INDEX}(vec${OPS_L2_COL})${IDX_OPTS_L2};
+- query: SELECT (max_level >= 1)::INTEGER FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_lvl';
+  _field_types: I
+  expect:
+  - - 1
+- statement: DROP INDEX idx_lvl;
+- statement: DELETE FROM vecs;
+- statement: CREATE INDEX idx_empty ON vecs USING ${VEX_INDEX}(vec${OPS_L2_COL})${IDX_OPTS_L2};
+- query: SELECT max_level FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_empty';
+  _field_types: I
+  expect:
+  - - -1
+- statement: DROP INDEX idx_empty;
+- statement: DROP TABLE vecs;

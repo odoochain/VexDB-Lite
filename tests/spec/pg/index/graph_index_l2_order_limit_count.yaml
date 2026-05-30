@@ -1,0 +1,17 @@
+name: graph_index_l2_order_limit_count
+tags: [pg-only, regression]
+description: |
+  表上同时存在 btree (PK 隐式) 和 vexdb_graph 索引,
+  ORDER BY v <-> q LIMIT 20 应返回 20 条 (走索引扫描 + LIMIT topK)。
+engines: [pg]
+steps:
+  - statement: DROP TABLE IF EXISTS t_1078849;
+  - statement: CREATE TABLE t_1078849 (id bigint PRIMARY KEY, v floatvector(16));
+  - statement: |
+      INSERT INTO t_1078849
+      SELECT i, ('[' || array_to_string(array(SELECT ((i*7+j) % 100)::float/10 FROM generate_series(0,15) j), ',') || ']')::floatvector(16)
+      FROM generate_series(1, 500) AS i;
+  - statement: CREATE INDEX idx_1078849 ON t_1078849 USING vexdb_graph (v floatvector_l2_ops);
+  - query: SELECT count(*) FROM (SELECT id FROM t_1078849 ORDER BY v <-> '[1,2,3,4,5,6,7,8,9,10,1,2,3,4,5,6]'::floatvector LIMIT 20) s;
+    expect: [["20"]]
+  - statement: DROP INDEX idx_1078849;

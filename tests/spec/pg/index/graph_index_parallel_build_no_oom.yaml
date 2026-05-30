@@ -1,0 +1,47 @@
+name: graph_index_parallel_build_no_oom
+tags:
+- pg-only
+- parallel-build
+- regression
+description: |
+  Bug 2 regression: per-participant MemPool pre-allocation must NOT each
+  bump_alloc the full mempool_initsize. Before the fix every parallel
+  worker called MemStore ctor which bump_alloc'd a chunk sized for the
+  full maintenance_work_mem, so N participants × full size > DSM total
+  triggered "Allocator out of memory" on the first worker init even at
+  1000 rows.
+
+  After the fix, leader pre-allocates a single chunk per pool sized to
+  fit all rows; workers attach via PoolSharedState chunk_offsets[0]
+  without further bump_alloc.
+
+  Test scales worker count up while maintenance_work_mem stays modest;
+  the pre-fix code would fail at parallel_workers=2 already.
+engines:
+- pg
+steps:
+- statement: SET maintenance_work_mem = '2GB';
+- statement: DROP TABLE IF EXISTS pb_oom;
+- statement: CREATE TABLE pb_oom (id INTEGER, vec floatvector(8));
+- statement: "INSERT INTO pb_oom SELECT i, ('[' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ']')::floatvector FROM generate_series(0, 4999) AS t(i);"
+
+# Phase A: 2 workers
+- statement: CREATE INDEX idx_pb_oom_2 ON pb_oom USING vexdb_graph (vec floatvector_l2_ops) WITH (m=16, ef_construction=128, parallel_workers=2);
+- query: SELECT COUNT(*) FROM (SELECT id FROM pb_oom ORDER BY vec <-> '[0,0,0,0,0,0,0,0]'::floatvector LIMIT 10) sub;
+  expect:
+    - ["10"]
+- statement: DROP INDEX idx_pb_oom_2;
+
+# Phase B: 4 workers
+- statement: CREATE INDEX idx_pb_oom_4 ON pb_oom USING vexdb_graph (vec floatvector_l2_ops) WITH (m=16, ef_construction=128, parallel_workers=4);
+- query: SELECT COUNT(*) FROM (SELECT id FROM pb_oom ORDER BY vec <-> '[0,0,0,0,0,0,0,0]'::floatvector LIMIT 10) sub;
+  expect:
+    - ["10"]
+- statement: DROP INDEX idx_pb_oom_4;
+
+# Phase C: 8 workers (oversubscribe; PG may cap at max_parallel_maintenance_workers)
+- statement: CREATE INDEX idx_pb_oom_8 ON pb_oom USING vexdb_graph (vec floatvector_l2_ops) WITH (m=16, ef_construction=128, parallel_workers=8);
+- query: SELECT COUNT(*) FROM (SELECT id FROM pb_oom ORDER BY vec <-> '[0,0,0,0,0,0,0,0]'::floatvector LIMIT 10) sub;
+  expect:
+    - ["10"]
+- statement: DROP TABLE pb_oom;

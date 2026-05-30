@@ -1,0 +1,27 @@
+name: functions__vector_arith_values
+tags: [migrated, functions]
+description: "vector_add / vector_sub 结果值断言, 补 vector_ops.yaml 只验证维度的不足."
+engines: [duckdb]
+steps:
+  # 加法
+  - query: SELECT vector_add(${VEC_LITERAL([1.0, 2.0, 3.0], 3)}, ${VEC_LITERAL([4.0, 5.0, 6.0], 3)})::VARCHAR;
+    _field_types: T
+    expect: [["[5.0, 7.0, 9.0]"]]
+  - query: SELECT vector_add(${VEC_LITERAL([-1.0, -2.0], 2)}, ${VEC_LITERAL([1.0, 2.0], 2)})::VARCHAR;
+    _field_types: T
+    expect: [["[0.0, 0.0]"]]
+  # 减法
+  - query: SELECT vector_sub(${VEC_LITERAL([4.0, 5.0, 6.0], 3)}, ${VEC_LITERAL([1.0, 2.0, 3.0], 3)})::VARCHAR;
+    _field_types: T
+    expect: [["[3.0, 3.0, 3.0]"]]
+  - query: SELECT vector_sub(${VEC_LITERAL([0.0, 0.0], 2)}, ${VEC_LITERAL([1.0, -1.0], 2)})::VARCHAR;
+    _field_types: T
+    expect: [["[-1.0, 1.0]"]]
+  # 加法后取范数: |[3,4]| = 5
+  - query: SELECT vector_norm(vector_add(${VEC_LITERAL([1.0, 1.0], 2)}, ${VEC_LITERAL([2.0, 3.0], 2)}));
+    _field_types: R
+    expect: [[5.0]]
+  # 减法后取范数
+  - query: SELECT vector_norm(vector_sub(${VEC_LITERAL([3.0, 4.0], 2)}, ${VEC_LITERAL([0.0, 0.0], 2)}));
+    _field_types: R
+    expect: [[5.0]]

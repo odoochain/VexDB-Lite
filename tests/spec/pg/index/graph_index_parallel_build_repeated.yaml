@@ -1,0 +1,37 @@
+name: graph_index_parallel_build_repeated
+tags: [pg-only, regression, must-not-crash, parallel]
+description: |
+  多次并行构建 vexdb_graph + DROP cycle 不应导致数据库宕机。
+  multi-thread workers 不允许撞 PG buffer manager 的 backend-local state
+  (PrivateRefCount + PGProc->sem) 导致死锁或 cluster crash。
+  本 spec 跑多次 CREATE INDEX + DROP cycle,触发 dedup → insert_tid → ps.put 路径,
+  验证不 hang。
+engines: [pg]
+steps:
+  - statement: DROP TABLE IF EXISTS t_1079425;
+  - statement: CREATE TABLE t_1079425 (id bigint, v floatvector(8));
+  # 数据故意制造 (i+j) % 50 cycle 让 sift-like 重复出现,触发 dedup path
+  - statement: |
+      INSERT INTO t_1079425
+      SELECT i, ('[' || array_to_string(array(SELECT ((i+j) % 50)::float/10 FROM generate_series(0,7) j), ',') || ']')::floatvector(8)
+      FROM generate_series(1, 1000) i;
+
+  # round 1: parallel_workers=4
+  - statement: CREATE INDEX idx_1079425a ON t_1079425 USING vexdb_graph (v floatvector_l2_ops) WITH (m = 16, ef_construction = 128, parallel_workers = 4);
+  - query: SELECT count(*) FROM (SELECT id FROM t_1079425 ORDER BY v <-> '[1,2,3,4,5,6,7,8]'::floatvector LIMIT 3) s;
+    expect: [["3"]]
+  - statement: DROP INDEX idx_1079425a;
+
+  # round 2: same params (反复 build/drop)
+  - statement: CREATE INDEX idx_1079425b ON t_1079425 USING vexdb_graph (v floatvector_l2_ops) WITH (m = 16, ef_construction = 128, parallel_workers = 4);
+  - query: SELECT count(*) FROM (SELECT id FROM t_1079425 ORDER BY v <-> '[1,2,3,4,5,6,7,8]'::floatvector LIMIT 3) s;
+    expect: [["3"]]
+  - statement: DROP INDEX idx_1079425b;
+
+  # round 3: 高一点的 parallel_workers
+  - statement: CREATE INDEX idx_1079425c ON t_1079425 USING vexdb_graph (v floatvector_cosine_ops) WITH (m = 16, ef_construction = 128, parallel_workers = 8);
+  - query: SELECT count(*) FROM (SELECT id FROM t_1079425 ORDER BY v <=> '[1,2,3,4,5,6,7,8]'::floatvector LIMIT 3) s;
+    expect: [["3"]]
+  - statement: DROP INDEX idx_1079425c;
+
+  - statement: DROP TABLE t_1079425;

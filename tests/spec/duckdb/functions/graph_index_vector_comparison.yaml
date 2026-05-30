@@ -1,0 +1,36 @@
+name: graph_index_vector_comparison
+tags: [migrated, regression, types]
+description: "FLOAT[N] 向量支持 =, !=, <, >, BETWEEN, IS NULL / IS NOT NULL 等比较操作符."
+engines: [duckdb]
+steps:
+  - statement: DROP TABLE IF EXISTS t_cmp;
+  - statement: CREATE TABLE t_cmp (id INTEGER, v ${VECTOR(3)});
+  - statement: |
+      INSERT INTO t_cmp VALUES
+        (1, ${VEC_LITERAL([1.0, 2.0, 3.0], 3)}),
+        (2, ${VEC_LITERAL([1.0, 2.0, 3.0], 3)}),
+        (3, ${VEC_LITERAL([4.0, 5.0, 6.0], 3)}),
+        (4, NULL);
+  # 等值
+  - query: SELECT id FROM t_cmp WHERE v = ${VEC_LITERAL([1.0, 2.0, 3.0], 3)} ORDER BY id;
+    _field_types: I
+    expect: [[1], [2]]
+  # 不等
+  - query: SELECT id FROM t_cmp WHERE v != ${VEC_LITERAL([1.0, 2.0, 3.0], 3)} ORDER BY id;
+    _field_types: I
+    expect: [[3]]
+  # IS NULL / IS NOT NULL
+  - query: SELECT id FROM t_cmp WHERE v IS NULL;
+    _field_types: I
+    expect: [[4]]
+  - query: SELECT count(*) FROM t_cmp WHERE v IS NOT NULL;
+    _field_types: I
+    expect: [[3]]
+  # 字典序比较 (DuckDB list 字典序)
+  - query: SELECT id FROM t_cmp WHERE v < ${VEC_LITERAL([2.0, 0.0, 0.0], 3)} ORDER BY id;
+    _field_types: I
+    expect: [[1], [2]]
+  - query: SELECT id FROM t_cmp WHERE v > ${VEC_LITERAL([2.0, 0.0, 0.0], 3)} ORDER BY id;
+    _field_types: I
+    expect: [[3]]
+  - statement: DROP TABLE t_cmp;

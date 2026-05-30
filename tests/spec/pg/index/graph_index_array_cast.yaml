@@ -1,0 +1,47 @@
+# array → floatvector assignment cast. array_to_floatvector supports
+# INT4 / FLOAT4 / FLOAT8 / NUMERIC element OIDs; the SQL layer registers
+# cast overloads for double precision[], integer[], numeric[] that all
+# dispatch into the same C symbol.
+name: graph_index_array_cast
+tags:
+- pg-only
+- regression
+- types
+description: |
+  array literals with INT4 / FLOAT4 / FLOAT8 / NUMERIC element types
+  must assignment-cast into floatvector columns without requiring an
+  explicit `::real[]` cast at the call site.
+engines:
+- pg
+- opengauss
+steps:
+- statement: DROP TABLE IF EXISTS t_array_cast;
+- statement: CREATE TABLE t_array_cast (c1 floatvector(3));
+
+# numeric[] — default for `array[1.2, 2.2, 3.3]`
+- statement: INSERT INTO t_array_cast VALUES (array[1.2, 2.2, 3.3]);
+- statement: INSERT INTO t_array_cast VALUES (array[1.1::numeric, 2.2::numeric, 3.3::numeric]);
+- statement: INSERT INTO t_array_cast VALUES (array[1.1::decimal, 2.2::decimal, 3.3::decimal]);
+
+# integer[]
+- statement: INSERT INTO t_array_cast VALUES (array[1, 2, 3]);
+- statement: INSERT INTO t_array_cast VALUES (array[1::int, 2::int, 3::int]);
+- statement: INSERT INTO t_array_cast VALUES (array[1::integer, 2::integer, 3::integer]);
+
+# float4 / float8
+- statement: INSERT INTO t_array_cast VALUES (array[1.1::float4, 2.2::float4, 3.3::float4]);
+- statement: INSERT INTO t_array_cast VALUES (array[1.1::real, 2.2::real, 3.3::real]);
+- statement: INSERT INTO t_array_cast VALUES (array[1.1::float8, 2.2::float8, 3.3::float8]);
+- statement: INSERT INTO t_array_cast VALUES (array[1.1::float, 2.2::float, 3.3::float]);
+- statement: INSERT INTO t_array_cast VALUES (array[1::double precision, 2::double precision, 3::double precision]);
+
+- query: SELECT count(*) FROM t_array_cast;
+  expect:
+  - - 11
+
+# Sanity: a few canonical values made it through round-trip
+# (3 INSERTs use integer arrays [1,2,3] + 1 double-precision [1,2,3] = 4)
+- query: SELECT count(*) FROM t_array_cast WHERE c1 = '[1,2,3]'::floatvector;
+  expect:
+  - - 4
+- statement: DROP TABLE t_array_cast;
