@@ -10,11 +10,8 @@
 
 | 数据库 | 支持版本 | 说明 |
 |--------|----------|------|
-| PostgreSQL | **19**（devel） | 当前唯一支持版本 |
-| PostgreSQL | 其他版本 | 暂无适配计划 |
+| PostgreSQL | **16 / 17 / 18 / 19** | 已适配，主验证平台为 PG 19 |
 | openGauss | — | 参见 VexDB 主库 |
-
-> PG 19 是当前唯一支持的版本。代码中有少量 `PG_VERSION_NUM >= 190000` 的条件编译依赖 PG 19 API，低版本无法直接编译。
 
 ### DuckDB 扩展（`vex.duckdb_extension`）
 
@@ -97,7 +94,7 @@ conda install -c conda-forge libstdcxx-ng
 | 场景 | 状态 | 原因 |
 |------|------|------|
 | DuckDB ≠ v1.5.2 | ❌ 不支持 | 扩展 API 与 metadata footer 格式随版本变化 |
-| PostgreSQL ≠ 19 | ❌ 不支持 | 存在 `PG_VERSION_NUM >= 190000` 的 API 依赖 |
+| PostgreSQL < 16 或 > 19 | ❌ 不支持 | 仅适配 PG 16-19 |
 | ARMv8.0 及更早（如 Cortex-A53/A57） | ❌ 不支持 | 构建使用 `+lse` 扩展指令，旧核触发 SIGILL |
 | Windows | ❌ 暂不支持 | 未适配 Windows 构建系统 |
 | CentOS 7 默认环境 | ⚠️ 需手动升级 libstdc++ | GLIBCXX 版本低 |
