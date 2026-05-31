@@ -424,6 +424,17 @@ bash tests/spec/_lib/docker/run_pg.sh test      # 运行 PG spec 测试（需 Do
 
 ---
 
+## 社区
+
+| 渠道 | 说明 |
+|---|---|
+| [GitHub Issues](https://github.com/VexDB-THU/VexDB-Lite/issues) | Bug 反馈与功能建议 |
+| [GitHub Discussions](https://github.com/VexDB-THU/VexDB-Lite/discussions) | 提问、提案与功能讨论 |
+| [Discord](https://discord.gg/vexdb) | 实时交流、答疑解惑 |
+| 官方微信社群 | 扫码加入，见 [vexdb.com/community](https://vexdb.com/community)，中文社区互助 |
+
+---
+
 ## License
 
 MIT License. 详见 [LICENSE](LICENSE)。
