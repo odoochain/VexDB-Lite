@@ -59,7 +59,7 @@ Duck runtime settings:
 
 | Category | Feature | Description | vexdb_vector (open-source) | VexDB (commercial) |
 |---|---|---|:---:|:---:|
-| Vector Index | HNSW graph index | In-house high-performance graph index, universal | ✅ | ✅ |
+| Graph Index | GRAPH_INDEX | In-house high-performance graph index, universal | ✅ | ✅ |
 | Distance | Distance function dispatch | Inlined distance functions, compile-time optimized | ✅ | ✅ |
 | Cache | Vector buffer | General vector cache, all scenarios | ✅ | ✅ |
 | Cache | Bulk buffer | Full in-memory cache for max throughput | ❌ | ✅ |
