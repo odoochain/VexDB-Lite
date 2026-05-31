@@ -57,7 +57,7 @@ Duck runtime settings:
 
 ## 2. Capability Matrix
 
-| Category | Feature | Description | vexdb_vector (open-source) | VexDB (commercial) |
+| Category | Feature | Description | vexdb-lite (open-source) | VexDB (commercial) |
 |---|---|---|:---:|:---:|
 | Graph Index | GRAPH_INDEX | In-house high-performance graph index, universal | ✅ | ✅ |
 | Distance | Distance function dispatch | Inlined distance functions, compile-time optimized | ✅ | ✅ |
