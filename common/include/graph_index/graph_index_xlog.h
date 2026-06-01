@@ -36,6 +36,42 @@ public:
         GenericXLogFinish(state);
     }
 
+    /* PQ async retrain — step 1: bump code_version so the metapage enters the
+     * "updating" state (centroids_version != code_version); concurrent
+     * get_type() callers then spin-wait until the retrain finishes. */
+    void enter_quantizer_update(uint8 code_version)
+    {
+        GenericXLogState *state = GenericXLogStart(index);
+        Page page = GenericXLogRegisterBuffer(state, metabuf, 0);
+        GraphIndexMetaPage metap = GRAPH_INDEX_PAGE_GET_META(page);
+        metap->quantizer_metainfo.code_version = code_version;
+        GenericXLogFinish(state);
+    }
+
+    /* PQ async retrain — final step: bump centroids_version to match
+     * code_version (leaves "updating"), reset num_new_data, and (re)enable PQ.
+     * Must run only after the re-encoded vec data and new codebook are durable. */
+    void finish_quantizer_update(uint8 centroids_version, uint32 num_new_data)
+    {
+        GenericXLogState *state = GenericXLogStart(index);
+        Page page = GenericXLogRegisterBuffer(state, metabuf, 0);
+        GraphIndexMetaPage metap = GRAPH_INDEX_PAGE_GET_META(page);
+        metap->quantizer_metainfo.centroids_version = centroids_version;
+        metap->quantizer_metainfo.num_new_data = num_new_data;
+        metap->quantizer_metainfo.set_enable();
+        GenericXLogFinish(state);
+    }
+
+    /* Phase B: persist the running new-row counter (incremented per insert). */
+    void update_num_new_data(uint32 num_new_data)
+    {
+        GenericXLogState *state = GenericXLogStart(index);
+        Page page = GenericXLogRegisterBuffer(state, metabuf, 0);
+        GraphIndexMetaPage metap = GRAPH_INDEX_PAGE_GET_META(page);
+        metap->quantizer_metainfo.num_new_data = num_new_data;
+        GenericXLogFinish(state);
+    }
+
     void update_entry(GraphIndexEntryInfo entry)
     {
         GenericXLogState *state = GenericXLogStart(index);

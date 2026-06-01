@@ -146,8 +146,8 @@ struct PQDistancer {
     // OID so PQDistancer instances created later (in scan/insert paths) can
     // reload them without re-training. Persistence to qtcode_block is a
     // follow-up; for now PQ state is per-process and lost on restart.
-    void stash_to_cache(Relation index);
-    bool load_from_cache(Relation index, Metric metric);
+    void stash_to_cache(Relation index, uint8 code_version = 0);
+    bool load_from_cache(Relation index, Metric metric, uint8 code_version = 0);
 private:
     void configure_for_metric(size_t d, size_t M, size_t nbits, Metric metric);
     mutable ProductQuantizer pq;

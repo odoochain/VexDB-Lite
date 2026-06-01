@@ -266,6 +266,12 @@ CREATE FUNCTION index_inspect(regclass)
 COMMENT ON FUNCTION index_inspect(regclass) IS
     'Returns statistics about a vexdb_graph index';
 
+CREATE FUNCTION index_qtupdate(regclass) RETURNS bool
+    AS 'MODULE_PATHNAME' LANGUAGE C;
+
+COMMENT ON FUNCTION index_qtupdate(regclass) IS
+    'Retrain the PQ codebook of a vexdb_graph index and re-encode all vectors (synchronous, holds AccessExclusiveLock)';
+
 CREATE FUNCTION vectorbuffer_inspect()
     RETURNS TABLE(used_space text, elem_size text, elem_nums int8,
                   hit int8, miss int8, eviction_rate float8)

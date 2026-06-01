@@ -247,7 +247,8 @@ void PQDistancer::prepare(Relation index, void *metap)
     // PQDistancer can be constructed via Variant / placement new that
     // bypasses our ctor's memset(&pq), so cache-load is the only safe way
     // to reach a known-good (M, ksub, centroids) state.
-    if (!load_from_cache(index, m)) {
+    uint8 cv = mp ? mp->quantizer_metainfo.code_version : 0;
+    if (!load_from_cache(index, m, cv)) {
         const PQMetaInfo &pqi = mp ? mp->quantizer_metainfo.get_pq_metainfo()
                                    : PQMetaInfo{};
         if (mp == nullptr || !BlockNumberIsValid(mp->qtcode_block) ||
@@ -260,7 +261,7 @@ void PQDistancer::prepare(Relation index, void *metap)
         }
         configure_for_metric(mp->dimension, pqi.m, pqi.nbits(), m);
         hnsw_read_pq_center(index, pq, mp->qtcode_block);
-        stash_to_cache(index);
+        stash_to_cache(index, cv);
     }
     dist_table = (float *)palloc(pq.M * pq.ksub * sizeof(float));
     prepared = true;
@@ -343,12 +344,13 @@ namespace {
 struct PQCachedCodebook {
     size_t d, M, nbits, dsub, ksub;
     Metric metric;
+    uint8 code_version;           // metapage code_version this codebook matches
     std::vector<float> centroids; // d * ksub floats
 };
 static std::unordered_map<Oid, PQCachedCodebook> g_pq_cache;
 } // namespace
 
-void PQDistancer::stash_to_cache(Relation index)
+void PQDistancer::stash_to_cache(Relation index, uint8 code_version)
 {
     if (index == NULL) return;
     PQCachedCodebook entry;
@@ -358,17 +360,23 @@ void PQDistancer::stash_to_cache(Relation index)
     entry.dsub   = pq.dsub;
     entry.ksub   = pq.ksub;
     entry.metric = (flag < 0) ? Metric::INNER_PRODUCT : Metric::L2;
+    entry.code_version = code_version;
     entry.centroids.assign(pq.centroids,
                            pq.centroids + pq.get_centroids_size());
     g_pq_cache[RelationGetRelid(index)] = std::move(entry);
 }
 
-bool PQDistancer::load_from_cache(Relation index, Metric metric)
+bool PQDistancer::load_from_cache(Relation index, Metric metric, uint8 code_version)
 {
     if (index == NULL) return false;
     auto it = g_pq_cache.find(RelationGetRelid(index));
     if (it == g_pq_cache.end()) return false;
     const auto &entry = it->second;
+    // Cross-backend correctness: an async retrain bumps the metapage
+    // code_version. A backend holding an older cached codebook must NOT use it
+    // (it would compute distances against a stale codebook → wrong results);
+    // treat a version mismatch as a miss so the caller re-reads from disk.
+    if (entry.code_version != code_version) return false;
     configure_for_metric(entry.d, entry.M, entry.nbits, metric);
     std::memcpy(pq.centroids, entry.centroids.data(),
                 entry.centroids.size() * sizeof(float));
