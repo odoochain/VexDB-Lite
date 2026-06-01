@@ -378,7 +378,7 @@ See [docs/known-limitations/](docs/known-limitations/) for the full list.
 |---|---|
 | [GitHub Issues](https://github.com/VexDB-THU/VexDB-Lite/issues) | Bug reports and feature requests |
 | [GitHub Discussions](https://github.com/VexDB-THU/VexDB-Lite/discussions) | Questions, proposals and general discussion |
-| [Discord](https://discord.gg/vexdb) | Real-time chat and Q&A |
+| [Discord](https://discord.gg/Ge4kaFak) | Real-time chat and Q&A |
 | WeChat Group | Scan QR code at [vexdb.com/community](https://vexdb.com/community) · Chinese community |
 
 ---
