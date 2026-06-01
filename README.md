@@ -57,23 +57,23 @@ Duck runtime settings:
 
 ## 2. Capability Matrix
 
-| Category | Feature | Description | vexdb-lite (open-source) | VexDB (commercial) |
-|---|---|---|:---:|:---:|
-| Graph Index | GRAPH_INDEX | In-house high-performance graph index, universal | ✅ | ✅ |
-| Distance | Distance function dispatch | Inlined distance functions, compile-time optimized | ✅ | ✅ |
-| Cache | Vector buffer | General vector cache, all scenarios | ✅ | ✅ |
-| Cache | Bulk buffer | Full in-memory cache for max throughput | ❌ | ✅ |
-| Cache | Async I/O cache | Accelerated disk-to-cache reads under memory pressure | ❌ | ✅ |
-| Data types | floatvector | Standard float32 vector type | ✅ | ✅ |
-| Data types | halfvector | Float16 vector type | 🟡 | ✅ |
-| Data types | int8vector | Int8 vector type | 🟡 | ✅ |
-| Quantization | PQ quantization | Maximum compression, QPS close to raw vectors | ✅ | ✅ |
-| Quantization | RaBitQ quantization | Moderate compression, QPS better than raw vectors | 🟡 | ✅ |
-| Quantization | Auto quantization | Background auto-enable, supports empty-table index build | ❌ | ✅ |
-| Index | Async insert | Fast ingestion for write-heavy workloads | ❌ | ✅ |
-| Index | Graph sharding | Large-scale vectors on small-memory machines | ❌ | ✅ |
-| HA | Primary-replica HA | Synchronous replication and backup restore | ❌ | ✅ |
-| Maintenance | Parallel vacuum | Parallel index cleanup and reclaim | ❌ | ✅ |
+| Category | Feature | Description | pgvector | vexdb-lite (open-source) | VexDB (commercial) |
+|---|---|---|:---:|:---:|:---:|
+| Graph Index | graph_index | In-house high-performance graph index, universal | ❌ | ✅ | ✅ |
+| Distance | Distance function dispatch | Inlined distance functions, compile-time optimized | ❌ | ✅ | ✅ |
+| Cache | vector buffer | General vector cache, all scenarios | ❌ | ✅ | ✅ |
+| Cache | bulk buffer | Full in-memory vector cache for max throughput | ❌ | ❌ | ✅ |
+| Cache | Async I/O cache | Accelerated disk-to-cache reads under memory pressure | ❌ | ❌ | ✅ |
+| Data types | floatvector | Standard float32 vector type | ✅ | ✅ | ✅ |
+| Data types | halfvector | Float16 vector type | ✅ | 🟡 | ✅ |
+| Data types | int8vector | Int8 vector type | ❌ | 🟡 | ✅ |
+| Quantization | PQ quantization | Maximum compression, QPS close to raw vectors | ❌ | ✅ | ✅ |
+| Quantization | RaBitQ quantization | Moderate compression, QPS better than raw vectors | ❌ | 🟡 | ✅ |
+| Quantization | Auto quantization | Background auto-enable, supports empty-table index build | ❌ | ❌ | ✅ |
+| Graph index enhancement | Async insert | Fast ingestion for write-heavy workloads | ❌ | ❌ | ✅ |
+| Graph index enhancement | Graph sharding | Large-scale vectors on small-memory machines | ❌ | ❌ | ✅ |
+| HA | Primary-replica HA | Synchronous replication and backup restore | ✅ | ❌ | ✅ |
+| Maintenance | Parallel vacuum | Parallel index cleanup and reclaim | ❌ | ❌ | ✅ |
 
 ✅ Supported · 🟡 Coming soon · ❌ Not included in open-source edition
 
