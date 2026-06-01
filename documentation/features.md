@@ -142,16 +142,16 @@ DuckDB 扩展使用原生 `FLOAT[N]` 固定长度数组作为向量：
 CREATE TABLE items (vec FLOAT[128]);
 ```
 
-### 距离函数
+### 距离函数与运算符
 
-DuckDB 侧仅支持**函数形式**（不支持 `<->` / `<=>` / `<#>` 运算符语法，这是 PG 特有语法）：
+DuckDB 侧支持**函数形式**，同时 `<->`、`<=>`、`<~>` 运算符可在中缀形式中使用（注：`<#>` 因 DuckDB parser 的 `#` 注释符冲突不可用）：
 
-| 函数 | 说明 | ANN 方向 |
-|------|------|----------|
-| `l2_distance(a, b)` | L2（欧氏）距离 | 越小越相似 |
-| `inner_product(a, b)` | 内积 | 越大越相似 |
-| `cosine_distance(a, b)` | 余弦距离（1 - cos） | 越小越相似 |
-| `list_negative_inner_product(a, b)` | 负内积 | 越小越相似 |
+| 函数 | 运算符 | 说明 | ANN 方向 |
+|------|--------|------|----------|
+| `l2_distance(a, b)` | `a <-> b` | L2（欧氏）距离 | 越小越相似 |
+| `inner_product(a, b)` | — | 内积 | 越大越相似 |
+| `cosine_distance(a, b)` | `a <=> b` | 余弦距离（1 - cos） | 越小越相似 |
+| `list_negative_inner_product(a, b)` | `a <~> b` | 负内积 | 越小越相似 |
 
 ### 建索引参数
 

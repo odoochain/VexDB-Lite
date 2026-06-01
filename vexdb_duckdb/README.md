@@ -96,17 +96,19 @@ DuckDB extension API 暂未暴露稳定的自定义类型接口；`FLOAT[N]` 已
 
 ---
 
-## 距离函数
+## 距离函数与运算符
 
-| 函数 | 等价数学 | 备注 |
-|---|---|---|
-| `l2_distance(a, b)` | √Σ(aᵢ-bᵢ)² | 欧氏距离 |
-| `inner_product(a, b)` | Σaᵢ·bᵢ | 内积；越大越相似 |
-| `cosine_distance(a, b)` | 1 - cos(a,b) | 余弦距离；0 = 同向 |
-| `list_negative_inner_product(a, b)` | -Σaᵢ·bᵢ | 负内积；ANN-friendly（越小越相似） |
-| `array_distance(a, b)` / `list_distance(a, b)` | 同 `l2_distance` | DuckDB 内置别名 |
+函数形式和运算符形式均可使用，两者等价并都能触发 VEX 索引优化：
 
-**注意**：DuckDB 不支持 pgvector 风格的 `<->` `<=>` `<#>` `<~>` 操作符语法。请使用函数形式。如果跨引擎 spec，使用 dialect 宏（参考 `tests/spec/_lib/dialects.yaml`）让 DuckDB 渲染为函数、PG 渲染为操作符。
+| 函数 | 运算符 | 等价数学 | 备注 |
+|---|---|---|---|
+| `l2_distance(a, b)` | `a <-> b` | √Σ(aᵢ-bᵢ)² | 欧氏距离 |
+| `inner_product(a, b)` | — | Σaᵢ·bᵢ | 内积；越大越相似 |
+| `cosine_distance(a, b)` | `a <=> b` | 1 - cos(a,b) | 余弦距离；0 = 同向 |
+| `list_negative_inner_product(a, b)` | `a <~> b` | -Σaᵢ·bᵢ | 负内积；越小越相似 |
+| `array_distance(a, b)` / `list_distance(a, b)` | — | 同 `l2_distance` | DuckDB 内置别名 |
+
+> **注意**：`<#>` 操作符因 DuckDB parser 将 `#` 解析为注释符而不可用，请改用 `<~>` 或 `list_negative_inner_product()`。
 
 **示例**
 
@@ -409,16 +411,18 @@ SET vex_ef_search = 200;  -- 默认 40，提到 200 召回大幅提升
 SET vex_brute_force_threshold = 99999999;
 ```
 
-### `Parser Error: syntax error at or near "->"`
+### `Parser Error: syntax error at or near "#>"`
 
-DuckDB parser 不支持 pgvector 操作符 `<->` `<=>` `<#>` `<~>`。改用函数：
+`<#>` 操作符在 DuckDB 中无法解析（`#` 被视为注释符）。改用 `<~>` 或函数形式：
 
 ```sql
 -- 错
-SELECT id FROM items ORDER BY vec <-> [...]::FLOAT[3] LIMIT 10;
+SELECT id FROM items ORDER BY vec <#> [...]::FLOAT[3] LIMIT 10;
 
 -- 对
-SELECT id FROM items ORDER BY l2_distance(vec, [...]::FLOAT[3]) LIMIT 10;
+SELECT id FROM items ORDER BY vec <~> [...]::FLOAT[3] LIMIT 10;
+-- 或
+SELECT id FROM items ORDER BY list_negative_inner_product(vec, [...]::FLOAT[3]) LIMIT 10;
 ```
 
 ### Index build OOM
