@@ -311,6 +311,19 @@ retry:
         ep.emplace_back(id, id, 0);
         auto vecbuf = store.read_data(id);
         const char *query = vecbuf.get_vecbuf();
+        char *query_raw = nullptr;
+        CONSTEXPR_IF (need_refine) {
+            /* PQ: read_data returns a code (code_size bytes), but get_neighbors_data's
+             * precise raw rescoring reads vec_size bytes from `query` — feeding a code
+             * here overruns the buffer and crashes. Fetch the raw vector from the heap
+             * into an independent buffer (raw_val_pool is reset inside
+             * get_neighbors_data). Descent keeps using the prepared ADC table; the
+             * candidates are re-scored raw afterwards. */
+            query_raw = alloc_vector(store.get_vecsize());
+            if (store.fetch_vec_from_heap(ctx, id, query_raw)) {
+                query = query_raw;
+            }
+        }
         ep = search_layer<true>(query, std::move(ep), ef_construction, [&](T check_id) -> bool {
             return id != check_id && !deleted.contains(check_id);
         });
@@ -324,6 +337,9 @@ retry:
         set_base_neighbors(id, new_neighbors_id.data());
         update_reverse_edges<true>(ctx, std::move(new_neighbors), query, id, id);
         vecbuf.release();
+        if (query_raw != nullptr) {
+            free_vector(query_raw);
+        }
         dist_cache->clear();
     }
 
@@ -343,6 +359,13 @@ retry:
         ep.emplace_back(id, cur_layer_idx, 0);
         auto vecbuf = store.read_data(id);
         const char *query = vecbuf.get_vecbuf();
+        char *query_raw = nullptr;
+        CONSTEXPR_IF (need_refine) {
+            query_raw = alloc_vector(store.get_vecsize());
+            if (store.fetch_vec_from_heap(ctx, id, query_raw)) {
+                query = query_raw;
+            }
+        }
         ep = search_layer<false>(query, std::move(ep), ef_construction, [&](T check_id) -> bool {
             return id != check_id && !deleted.contains(check_id);
         });
@@ -360,6 +383,9 @@ retry:
         store.set_upper_neighbors(cur_layer_idx, new_neighbors_info.data());
         update_reverse_edges<false>(ctx, std::move(new_neighbors), query, id, cur_layer_idx);
         vecbuf.release();
+        if (query_raw != nullptr) {
+            free_vector(query_raw);
+        }
         dist_cache->clear();
     }
 
@@ -972,11 +998,23 @@ private:
     {
         CONSTEXPR_IF (need_refine) {
             store.reset_raw_val_pool();
-            for (Cand &point : c) {
-                point.val = store.get_data_refine(ctx, point.id);
-                point.dist = (point.val != nullptr)
-                                 ? get_distance_precise(query, point.val)
-                                 : INVALID_DIST;
+            size_t w = 0;
+            for (size_t r = 0; r < c.size(); ++r) {
+                char *v = store.get_data_refine(ctx, c[r].id);
+                if (v == nullptr) {
+                    /* Heap tuple gone (e.g. just deleted, seen during vacuum repair):
+                     * drop the candidate so pruning never dereferences a null val. */
+                    continue;
+                }
+                if (w != r) {
+                    c[w] = c[r];
+                }
+                c[w].val = v;
+                c[w].dist = get_distance_precise(query, v);
+                ++w;
+            }
+            if (w != c.size()) {
+                c.resize(w);
             }
         } else {
             (void)ctx;
