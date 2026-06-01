@@ -198,11 +198,17 @@ public:
 
     BlockNumber build_index(Relation heap, Relation index, IndexInfo *index_info)
     {
-        create_metapage(index);
-        bool quant_trained = init_quantizer(heap, index);
-        if (!quant_trained) {
-            qt_type = QuantizerType::NONE;
+        if (qt_type == QuantizerType::PQ) {
+            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                errmsg("PQ quantizer is not yet supported"),
+                errhint("Remove 'quantizer=pq' from the index options.")));
         }
+        if (qt_type == QuantizerType::RABITQ) {
+            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                errmsg("RaBitQ quantizer is not yet supported"),
+                errhint("Remove 'quantizer=rabitq' from the index options.")));
+        }
+        create_metapage(index);
         build_graph(heap, index, index_info);
         if (RelationNeedsWAL(index) || fork_num == INIT_FORKNUM) {
             log_index(index);
