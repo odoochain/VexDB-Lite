@@ -11,7 +11,12 @@ description: |
   code_size and the scan reads garbage.
 
   Catches: silent fallback that flips set_enable() anyway (corrupt
-  reopen), or hard ERROR instead of graceful fallback.
+  reopen), hard ERROR instead of graceful fallback, or the
+  use-after-free where init_quantizer calls FloatVectorArrayFree(samples)
+  before reading samples->length in the NOTICE (prints a garbage row
+  count, e.g. 248630512; trips heap-use-after-free under ASAN). Run this
+  spec under an ASAN build to guard the UAF; the row count must read as
+  the real sample count (200 here).
 
 engines:
 - pg

@@ -492,9 +492,13 @@ private:
         ann_sample_rows(samples, heap, index, dimension, target,
                         false, DistPrecisionType::FLOAT);
         if (samples->length < ksub) {
+            int n_samples = samples->length;
             FloatVectorArrayFree(samples);
-            ereport(NOTICE, (errmsg("vex PQ: only %d sample rows < ksub=%d, "
-                                    "skipping PQ training", samples->length, ksub)));
+            ereport(NOTICE,
+                (errmsg("vex PQ: only %d sample rows < ksub=%d, skipping PQ training",
+                        n_samples, ksub),
+                 errhint("Index falls back to a plain (non-PQ) graph. Provide at "
+                         "least %d rows before building with quantizer='pq'.", ksub)));
             return false;
         }
         {
