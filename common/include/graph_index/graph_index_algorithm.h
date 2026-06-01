@@ -213,7 +213,7 @@ retry:
         };
 
         /* find duplicate in base layer */
-        get_neighbors_data(ep);
+        get_neighbors_data(ctx.ctx, ep, ctx.query);
         auto strat = apply_arrangement(ctx, ep, bottom_only);
         bool new_point_inserted = false;
         switch (strat) {
@@ -299,7 +299,7 @@ retry:
                 store.base_layer.n_data_per_block(), store.upper_layer.n_data_per_block()};
     }
 
-    void repair_basepoint(T id, const UnorderedSet<size_t> &deleted)
+    void repair_basepoint(PointExtensionContext &ctx, T id, const UnorderedSet<size_t> &deleted)
     {
         auto neighbors_id = std::get<0>(store.template get_point_info<true>(id));
         uint16 nbr_num = m * 2;
@@ -314,7 +314,7 @@ retry:
         ep = search_layer<true>(query, std::move(ep), ef_construction, [&](T check_id) -> bool {
             return id != check_id && !deleted.contains(check_id);
         });
-        get_neighbors_data(ep);
+        get_neighbors_data(ctx, ep, query);
         Vec<Cand> new_neighbors = select_neighbors<true>(std::move(ep));
         std::vector<T> new_neighbors_id(nbr_num); /* nbr_num = m*2, max 256 */
         for (uint16 i = 0; i < nbr_num; ++i) {
@@ -322,12 +322,12 @@ retry:
             new_neighbors_id[i] = new_neighbors[i].id;
         }
         set_base_neighbors(id, new_neighbors_id.data());
-        update_reverse_edges<true>(std::move(new_neighbors), query, id, id);
+        update_reverse_edges<true>(ctx, std::move(new_neighbors), query, id, id);
         vecbuf.release();
         dist_cache->clear();
     }
 
-    void repair_upperpoint(T cur_layer_idx, const UnorderedSet<size_t> &deleted)
+    void repair_upperpoint(PointExtensionContext &ctx, T cur_layer_idx, const UnorderedSet<size_t> &deleted)
     {
         auto [neighbors_info, unused, id] = store.template get_point_info<false>(cur_layer_idx);
         (void)unused;
@@ -346,7 +346,7 @@ retry:
         ep = search_layer<false>(query, std::move(ep), ef_construction, [&](T check_id) -> bool {
             return id != check_id && !deleted.contains(check_id);
         });
-        get_neighbors_data(ep);
+        get_neighbors_data(ctx, ep, query);
         Vec<Cand> new_neighbors = select_neighbors<false>(std::move(ep));
         std::vector<T> new_neighbors_info(nbr_num * 2); /* nbr_num = m, max 256 total */
         T *new_neighbors_id = new_neighbors_info.data();
@@ -358,7 +358,7 @@ retry:
             new_neighobrs_cur_layer_idx[i] = new_neighbors[i].cur_layer_idx;
         }
         store.set_upper_neighbors(cur_layer_idx, new_neighbors_info.data());
-        update_reverse_edges<false>(std::move(new_neighbors), query, id, cur_layer_idx);
+        update_reverse_edges<false>(ctx, std::move(new_neighbors), query, id, cur_layer_idx);
         vecbuf.release();
         dist_cache->clear();
     }
@@ -384,6 +384,20 @@ private:
 
     float get_distance_precise(const char *query, const char *val)
         { return store.get_distance_precise(distancer, query, val); }
+
+    /* Candidate-vs-candidate distance for the prune heuristic. Under PQ
+     * (need_refine), candidate .val points at heap-read-back raw vectors
+     * (see get_neighbors_data), so use the precise raw-vs-raw distance to
+     * match openGauss, which fetches raw vectors during neighbor selection
+     * instead of comparing codes. Otherwise use the normal stored-data path. */
+    float dist_cand(const char *a_val, const char *b_val)
+    {
+        CONSTEXPR_IF (need_refine) {
+            return get_distance_precise(a_val, b_val);
+        } else {
+            return get_distance(a_val, b_val);
+        }
+    }
 
     void update_entry(T id, T cur_layer_idx, int_fast8_t entry_level, int_fast8_t insert_level) 
     {
@@ -458,19 +472,26 @@ private:
 
     InsertStrategy apply_arrangement(InsertContext &ctx, Span<Cand> ep, bool need_retry)
     {
-        for (const auto &p : ep) {
-            /* ep is sorted in order, only need to compare the nearest point */
-            if (likely(memcmp(p.val, ctx.query, store.get_elemsize()) != 0)) {
-                break;
-            }
-            if (store.apply_elem(p.id, [&](point_type &pt) -> bool {
-                /* skip elem under vacuum */
-                if (pt.empty()) {
-                    return false;
+        /* Under PQ (need_refine) candidate .val is a heap-read-back raw vector
+         * while ctx.query is raw too, but get_elemsize() is the code size, so the
+         * memcmp dedup is meaningless (and a code-prefix match wouldn't imply an
+         * exact duplicate anyway). Skip exact dedup for PQ — a duplicate becomes a
+         * distinct node, same as openGauss which does no code-level dedup. */
+        CONSTEXPR_IF (!need_refine) {
+            for (const auto &p : ep) {
+                /* ep is sorted in order, only need to compare the nearest point */
+                if (likely(memcmp(p.val, ctx.query, store.get_elemsize()) != 0)) {
+                    break;
                 }
-                return insert_range_tid<InsertContext>(ctx.ctx, ctx, pt);
-            })) {
-                return InsertStrategy::Trivial;
+                if (store.apply_elem(p.id, [&](point_type &pt) -> bool {
+                    /* skip elem under vacuum */
+                    if (pt.empty()) {
+                        return false;
+                    }
+                    return insert_range_tid<InsertContext>(ctx.ctx, ctx, pt);
+                })) {
+                    return InsertStrategy::Trivial;
+                }
             }
         }
         return InsertStrategy::InsertPoint;
@@ -490,14 +511,14 @@ private:
         Vec<Cand> base_neighbors = select_neighbors<true>(std::move(ep));
         add_basepoint(id, base_neighbors);
         store.add_vector(distancer, id, ctx.query);
-        update_reverse_edges<true>(std::move(base_neighbors), ctx.query, id, cur_layer_idx);
+        update_reverse_edges<true>(ctx.ctx, std::move(base_neighbors), ctx.query, id, cur_layer_idx);
         for (int_fast8_t l = 1; l <= search_level; ++l) {
             lower_layer_idx = cur_layer_idx;
             cur_layer_idx = store.template assign_vector_id<false>();
-            get_neighbors_data(nbr_record[l - 1]);
+            get_neighbors_data(ctx.ctx, nbr_record[l - 1], ctx.query);
             Vec<Cand> upper_neighbors = select_neighbors<false>(std::move(nbr_record[l - 1]));
             add_upperpoint(cur_layer_idx, lower_layer_idx, id, upper_neighbors);
-            update_reverse_edges<false>(std::move(upper_neighbors), ctx.query, id, cur_layer_idx);
+            update_reverse_edges<false>(ctx.ctx, std::move(upper_neighbors), ctx.query, id, cur_layer_idx);
         }
         CONSTEXPR_IF (use_dist_cache) {
             ann_helper::optional_destroy(*dist_cache);
@@ -670,11 +691,11 @@ private:
     float get_distance(const Cand &a, const Cand &b)
     {
         CONSTEXPR_IF (!use_dist_cache) {
-            return get_distance(a.val, b.val);
+            return dist_cand(a.val, b.val);
         } else {
             auto [it, inserted] = dist_cache->try_emplace(Pair<T, T>(a.id, b.id), 0);
             if (inserted) {
-                it->second = get_distance(a.val, b.val);
+                it->second = dist_cand(a.val, b.val);
             }
             return it->second;
         }
@@ -683,11 +704,11 @@ private:
     float get_distance(const PruneNeighbor &a, const PruneNeighbor &b)
     {
         CONSTEXPR_IF (!use_dist_cache) {
-            return get_distance(a.val, b.val);
+            return dist_cand(a.val, b.val);
         } else {
             auto [it, inserted] = dist_cache->try_emplace(Pair<T, T>(a.id, b.id), 0);
             if (inserted) {
-                it->second = get_distance(a.val, b.val);
+                it->second = dist_cand(a.val, b.val);
             }
             return it->second;
         }
@@ -741,8 +762,8 @@ private:
 
     /* backward: neighbors -> new_point, select one neighbor which will be replaced */
     template <bool is_base_layer, bool check_exist = false>
-    int16 select_neighbors(Vec<Cand> &&c, T new_point_id, BitSpan<uint> stat, const Cand &self,
-                           const char *query)
+    int16 select_neighbors(PointExtensionContext &ctx, Vec<Cand> &&c, T new_point_id,
+                           BitSpan<uint> stat, const Cand &self, const char *query)
     {
         int16 pruned = -1;
         CONSTEXPR_IF (check_exist) {
@@ -765,8 +786,12 @@ private:
         Vec<PruneNeighbor> discarded(nbr_num); /* since closest pop in order, discarded is in order naturally */
         PriorityQueue<PruneNeighbor, std::less<PruneNeighbor>, Alloc<PruneNeighbor>> closest(nbr_num + 1);
 
-        get_neighbors_data(c);
-        const_cast<Cand &>(self).val = store.get_data(self.id);
+        get_neighbors_data(ctx, c, query);
+        CONSTEXPR_IF (need_refine) {
+            const_cast<Cand &>(self).val = store.get_data_refine(ctx, self.id);
+        } else {
+            const_cast<Cand &>(self).val = store.get_data(self.id);
+        }
         for (uint_fast16_t i = 0; i < c.size(); ++i) {
             const Cand &nbr = c[i];
             assert(nbr.id != self.id);
@@ -778,7 +803,13 @@ private:
             }
             closest.emplace(nbr.val, i, dist, nbr.id);
         }
-        closest.emplace(store.get_data(new_point_id), (T)INVALID_VECTOR_ID, self.dist, self.id);
+        char *new_point_val;
+        CONSTEXPR_IF (need_refine) {
+            new_point_val = store.get_data_refine(ctx, new_point_id);
+        } else {
+            new_point_val = store.get_data(new_point_id);
+        }
+        closest.emplace(new_point_val, (T)INVALID_VECTOR_ID, self.dist, self.id);
 
         const auto elem_closer = [&](const Vec<PruneNeighbor> &set, const PruneNeighbor &p) -> bool {
             for (const PruneNeighbor &ri : set) {
@@ -900,8 +931,8 @@ private:
     }
 
     template <bool is_base_layer, bool check_exist = false>
-    void update_reverse_edges(Vec<Cand> &&neighbors, const char *query, T newpoint_id,
-                              T newpoint_cur_layer_idx)
+    void update_reverse_edges(PointExtensionContext &ctx, Vec<Cand> &&neighbors, const char *query,
+                              T newpoint_id, T newpoint_cur_layer_idx)
     {
         for (const Cand &nbr : neighbors) {
             if (!is_valid(nbr.id)) {
@@ -911,7 +942,7 @@ private:
             store.template lock_point<is_base_layer, false>(nbr.cur_layer_idx);
             store.template get_neighbors<is_base_layer>(r, nbr);
             auto p = store.template get_neighbor_stats<is_base_layer>(nbr.cur_layer_idx);
-            int16 pruned = select_neighbors<is_base_layer, check_exist>(std::move(r), newpoint_id, p.second, nbr, query);
+            int16 pruned = select_neighbors<is_base_layer, check_exist>(ctx, std::move(r), newpoint_id, p.second, nbr, query);
             if (pruned >= 0) {
                 store.template set_neighbor<is_base_layer>(nbr.cur_layer_idx, pruned, newpoint_id,
                                                            newpoint_cur_layer_idx);
@@ -932,11 +963,28 @@ private:
         }
     }
 
-    void get_neighbors_data(Vec<Cand> &c)
+    /* Fill candidate .val (and, under PQ, refresh .dist) before pruning.
+     * Non-PQ: .val points at stored data (raw for PureVec). PQ (need_refine):
+     * .val points at heap-read-back raw vectors and .dist is recomputed as the
+     * precise raw distance to `query`, so the prune heuristic is fully raw-vs-raw
+     * and self-consistent (matching openGauss). `query` must be the raw vector. */
+    void get_neighbors_data(PointExtensionContext &ctx, Vec<Cand> &c, const char *query)
     {
-        store.reset_neighbors_val_pool();
-        for (Cand &point : c) {
-            point.val = store.get_data(point.id);
+        CONSTEXPR_IF (need_refine) {
+            store.reset_raw_val_pool();
+            for (Cand &point : c) {
+                point.val = store.get_data_refine(ctx, point.id);
+                point.dist = (point.val != nullptr)
+                                 ? get_distance_precise(query, point.val)
+                                 : INVALID_DIST;
+            }
+        } else {
+            (void)ctx;
+            (void)query;
+            store.reset_neighbors_val_pool();
+            for (Cand &point : c) {
+                point.val = store.get_data(point.id);
+            }
         }
     }
 

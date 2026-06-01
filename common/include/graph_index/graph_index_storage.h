@@ -644,6 +644,11 @@ public:
     template <typename Distancer>
     static float get_distance_est(const Distancer &, const char *, T) { __builtin_unreachable(); }
     static char *fetch_vec_from_heap(T) { __builtin_unreachable(); }
+    /* PQ-pruning raw read-back: never reached for MemStore (need_refine is
+     * false when Store==MemStore, so the if-constexpr branch is pruned) but the
+     * names must exist for two-phase lookup. */
+    static char *get_data_refine(PointExtensionContext &, T) { __builtin_unreachable(); }
+    static constexpr void reset_raw_val_pool() {}
 private:
     uint_fast16_t dim;
     uint_fast16_t m;
@@ -1093,6 +1098,15 @@ public:
         neighbors_val_pool->reset();
     }
 
+    /* PQ-only: reset the raw-vector pool used by select_neighbors pruning to
+     * hold heap-read-back original vectors (see get_data_refine). */
+    void reset_raw_val_pool()
+    {
+        if (raw_val_pool.has_value()) {
+            raw_val_pool->reset();
+        }
+    }
+
     char *get_data(T id)
     {
         DO_PERF(read_vec);
@@ -1105,6 +1119,23 @@ public:
         vec_buf.release();
         STOP_PERF(read_vec);
         return res;
+    }
+
+    /* PQ pruning needs raw vectors, not codes: read the original vector back
+     * from the heap into a vec_size pool slot (matches openGauss which fetches
+     * raw vectors during HnswUpdateConnectionDisk). Returns nullptr if the heap
+     * tuple is gone (caller skips that candidate). reset_raw_val_pool() recycles
+     * the arena before each select_neighbors batch. */
+    char *get_data_refine(PointExtensionContext &ctx, T id)
+    {
+        if (!raw_val_pool.has_value()) {
+            raw_val_pool.emplace(vec_size, metap->ef_construction);
+        }
+        char *slot = raw_val_pool->alloc_slot();
+        if (!fetch_vec_from_heap(ctx, id, slot)) {
+            return nullptr;
+        }
+        return slot;
     }
 
     void fetch_vec_via_slot(HeapTuple tuple, char *vec)
@@ -1399,6 +1430,15 @@ private:
             ++idx;
             return dest;
         }
+        /* Reserve an empty slot for the caller to fill directly (e.g. heap
+         * read-back of raw vectors), avoiding the extra memcpy that set() does. */
+        char *alloc_slot()
+        {
+            Assert(idx < pool_size);
+            char *dest = pool + idx * elem_size;
+            ++idx;
+            return dest;
+        }
         void reset() { idx = 0; }
         void destroy() { free_vector(pool); }
     private:
@@ -1431,6 +1471,7 @@ public:
     disk_container::DiskVector<point_type> elems;
 private:
     Optional<NeighborsValPool> neighbors_val_pool; /* used in algorithm:select_neighbors() */
+    Optional<NeighborsValPool> raw_val_pool; /* PQ-only: heap-read-back raw vectors for pruning */
     T *point_info_buf;
 
     size_t neighbors_size() const { return base_layer.data_size(); }
