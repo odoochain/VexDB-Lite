@@ -9,7 +9,7 @@
 
 Shared core directories:
 
-- `include/graph_index/`: graph index headers and shared HNSW logic
+- `include/graph_index/`: graph index headers and shared Graph_index logic
 - `distance/`, `src/distance/`: distance functions, ISA dispatch, transform templates
 - `vtl/`: shared template/container layer
 - `vexdb_duckdb/`: DuckDB integration layer
@@ -34,7 +34,7 @@ Current functionality:
 - optimizer/executor ANN index scan path
 - shared-memory vector buffer manager and parallel build support
 
-### 1.2 DuckDB: `vexdb_duckdb`
+### 1.2 DuckDB: `vexdb_vector`
 
 Current functionality:
 
