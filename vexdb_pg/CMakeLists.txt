@@ -158,7 +158,6 @@ set(GRAPH_INDEX_SRCS
     src/floatvector.cpp
     src/ann_utils.cpp
     src/pg_yield.cpp
-    src/vector_storage.cpp
     src/vector_buffer/vector_smgr.cpp
     src/vector_buffer/local_vec_cache.cpp
     src/pq.cpp

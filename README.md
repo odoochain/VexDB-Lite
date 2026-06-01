@@ -2,18 +2,10 @@
 
 **English** | **[中文](README.zh.md)**
 
-`VexDB` currently contains two vector-index integrations that share the same core graph algorithm and distance stack:
+`VexDB-Lite` is a vector similarity search engine for PostgreSQL (`vexdb_vector` extension) and DuckDB (`vex` extension). Both backends share the same graph index algorithm, SIMD distance dispatch, and quantization kernel.
 
-- `vexdb_pg`: PostgreSQL extension `vexdb_vector`
-- `vexdb_duckdb`: DuckDB extension `vex`
-
-Shared core directories:
-
-- `include/graph_index/`: graph index headers and shared Graph_index logic
-- `distance/`, `src/distance/`: distance functions, ISA dispatch, transform templates
-- `vtl/`: shared template/container layer
-- `vexdb_duckdb/`: DuckDB integration layer
-- `src/`, `include/`, `sql/`: PostgreSQL integration layer
+> See [vexdb_duckdb/README.md](vexdb_duckdb/README.md) for the DuckDB extension docs.  
+> This root README is a project-level overview and build guide.
 
 ---
 
@@ -29,20 +21,20 @@ Current functionality:
   - Inner product: `<#>`
   - Cosine: `<=>`
 - `CREATE INDEX ... USING vexdb_graph`
-- HNSW options such as `m`, `ef_construction`, `parallel_workers`
+- Graph_index options such as `m`, `ef_construction`, `parallel_workers`
 - runtime settings such as `vexdb_vector.ef_search`, `vexdb_vector.vec_architecture`
 - optimizer/executor ANN index scan path
 - shared-memory vector buffer manager and parallel build support
 
-### 1.2 DuckDB: `vexdb_vector`
+### 1.2 DuckDB: `vex`
 
 Current functionality:
 
 - `GRAPH_INDEX` on `FLOAT[N]` vector columns
-- Vector distance functions/operators:
-  - `l2_distance`, `<->`
-  - `inner_product`, `<#>`
-  - `cosine_distance`, `<=>`, `<~>`
+- Vector distance functions:
+  - `l2_distance`
+  - `inner_product`, `list_negative_inner_product`
+  - `cosine_distance`
 - `vector_dims()`, `l2_normalize()`, `vex_version()`, `vex_index_info()`
 - `CREATE INDEX ... USING GRAPH_INDEX (vec [, metadata...])`
 - optimizer rewrite into `VEX_INDEX_SCAN`
@@ -56,10 +48,11 @@ Duck runtime settings:
 ---
 
 ## 2. Capability Matrix
+### 2.1 PG Extension Comparison (pgvector vs vexdb-lite vs VexDB)
 
 | Category | Feature | Description | pgvector | vexdb-lite (open-source) | VexDB (commercial) |
 |---|---|---|:---:|:---:|:---:|
-| Graph Index | graph_index | In-house high-performance graph index, universal | ❌ | ✅ | ✅ |
+| Graph Index | graph_index | A fully self-developed high-performance graph index that merges the advantages of various graph indexes and works seamlessly across all scenarios.| ❌ | ✅ | ✅ |
 | Distance | Distance function dispatch | Inlined distance functions, compile-time optimized | ❌ | ✅ | ✅ |
 | Cache | vector buffer | General vector cache, all scenarios | ❌ | ✅ | ✅ |
 | Cache | bulk buffer | Full in-memory vector cache for max throughput | ❌ | ❌ | ✅ |
@@ -67,7 +60,7 @@ Duck runtime settings:
 | Data types | floatvector | Standard float32 vector type | ✅ | ✅ | ✅ |
 | Data types | halfvector | Float16 vector type | ✅ | 🟡 | ✅ |
 | Data types | int8vector | Int8 vector type | ❌ | 🟡 | ✅ |
-| Quantization | PQ quantization | Maximum compression, QPS close to raw vectors | ❌ | ✅ | ✅ |
+| Quantization | PQ quantization | Maximum compression, QPS close to raw vectors | ❌ | 🟡 | ✅ |
 | Quantization | RaBitQ quantization | Moderate compression, QPS better than raw vectors | ❌ | 🟡 | ✅ |
 | Quantization | Auto quantization | Background auto-enable, supports empty-table index build | ❌ | ❌ | ✅ |
 | Graph index enhancement | Async insert | Fast ingestion for write-heavy workloads | ❌ | ❌ | ✅ |
@@ -75,9 +68,25 @@ Duck runtime settings:
 | HA | Primary-replica HA | Synchronous replication and backup restore | ✅ | ❌ | ✅ |
 | Maintenance | Parallel vacuum | Parallel index cleanup and reclaim | ❌ | ❌ | ✅ |
 
-✅ Supported · 🟡 Coming soon · ❌ Not included in open-source edition
+
+### 2.2 DuckDB Extension Comparison (DuckDB VSS vs VexDB-Lite)
+
+| Category | Feature | Description | DuckDB VSS | VexDB-Lite (`vex`) |
+|---|---|---|:---:|:---:|
+| Index | Graph index | VSS: HNSW; VexDB: graph_index (self-developed hybrid) | ✅ | ✅ |
+| Distance | SIMD dispatch | Inlined distance functions, compile-time optimized | ❌ | ✅ |
+| Quantization | PQ | Vector compression for memory-constrained scenarios | ❌ | ✅ |
+| Quantization | RaBitQ | Vector compression for memory-constrained scenarios | ❌ | 🟡 |
+| Cache | Buffer management | Disk-to-memory vector caching | ❌ | ✅ |
+| Maintenance | Index compaction | Reclaim space from soft-deleted entries | ✅ | ❌ |
+| Search | Filtered ANN search | WHERE filter with automatic oversampling | ❌ | ✅ |
+| Persistence | Disk-backed index | Index survives database restart without rebuild | ✅† | ✅ |
+
+† VSS persistence is experimental — WAL recovery is not implemented, unexpected shutdowns may cause index corruption. VexDB-Lite persists via DuckDB's standard serialization.
 
 ---
+
+✅ Supported · 🟡 Coming soon · ❌ Not included in open-source edition
 
 ## 3. PostgreSQL Syntax Examples
 
@@ -217,9 +226,8 @@ SELECT * FROM vex_index_info();
 ### Dependencies
 
 - PostgreSQL 16 ~ 19 (PG 16/17/18/19 supported; primary validation target is `19devel`)
-- CMake
-- C++17 compiler
-- Boost headers
+- CMake ≥ 3.14
+- C++17 compiler (GCC 9+ or Clang 10+)
 
 ### Build PostgreSQL (release example)
 
@@ -349,26 +357,26 @@ Test environment: Intel Core Ultra 7-265K (20c/20t, 3.9 GHz) / 16 GB DDR5 / x86_
 
 ## 6. Known Limitations
 
-See [docs/known-limitations/](docs/known-limitations/) for the full list.
-
 ### PostgreSQL
 
 - Supports PostgreSQL 16 ~ 19; primary validation target is PostgreSQL 19
-- ARM PG SIMD is not fully wired back yet; current state prioritizes correctness/buildability
-- WAL/quantizer work is still incomplete compared to the full roadmap
 
 ### DuckDB
 
-- Current focus is `GRAPH_INDEX`, optimizer integration, and shared-algorithm alignment
-- Some accepted options such as `threads` and `pq_m` are currently compatibility placeholders on parts of the path
-- ARM Duck builds also currently rely on `GENERAL` distance dispatch
+- `threads` and `pq_m` options are compatibility placeholders on some code paths
+- ARM Duck builds currently use scalar (`GENERAL`) distance dispatch without SIMD acceleration
 
----
+## 7. Repository Structure
 
-## 7. Where To Look Next
-
-- PostgreSQL implementation: `src/`, `include/`, `sql/`
-- DuckDB implementation: [vexdb_duckdb/README.md](vexdb_duckdb/README.md) and `vexdb_duckdb/`
+| Directory | Description |
+|---|---|
+| `common/` | Shared core: graph index algorithm, SIMD distance dispatch, quantizer (PQ/RaBitQ), template containers |
+| `vexdb_pg/` | PostgreSQL extension: index AM, build, search, DML, WAL, distance entry |
+| `vexdb_duckdb/` | DuckDB extension: index lifecycle, optimizer rewrite, distance functions → [README](vexdb_duckdb/README.md) |
+| `documentation/` | Feature docs, build guide |
+| `tests/spec/` | YAML-based spec tests (shared / pg / duckdb) |
+| `scripts/` | Build, release, and packaging scripts |
+| `thirdparties/` | Vendored dependencies (patched Boost) |
 
 ---
 
