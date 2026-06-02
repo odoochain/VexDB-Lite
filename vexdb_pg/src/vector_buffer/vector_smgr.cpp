@@ -322,7 +322,12 @@ void VecBufferManager::init_buffer()
     tag_locks = (slock_t *)palloc(nvecbuf * sizeof(slock_t));
     tag = (VecBufferTag **)palloc0(nvecbuf * sizeof(VecBufferTag *));
     Size buf_size = nvecbuf * vec_block_size + ann_helper::vector_aligned_size;
-    void *temp = palloc(buf_size);
+    /* Default vexdb.vector_buffers (2GB) makes buf_size exceed PG's 1GB
+     * MaxAllocSize, so plain palloc trips the AllocSizeIsValid guard and the
+     * postmaster FATALs at preload on PG 16 ("invalid memory alloc request size").
+     * The pool is legitimately large; use the Huge variant (AllocHugeSizeIsValid).
+     * Routes through the same vecbuf_shared_ctx (SharedAllocSet → ShmemAlloc). */
+    void *temp = MemoryContextAllocHuge(vecbuf_shared_ctx, buf_size);
     if (!temp || !tag ||
         !std::align(ann_helper::vector_aligned_size, nvecbuf * vec_block_size,
                     temp, buf_size)) {
