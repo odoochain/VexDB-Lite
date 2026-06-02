@@ -655,7 +655,7 @@ cmd_package() {
         find "$archdir" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null
 
         if [[ -f "$archdir/vex.duckdb_extension" ]]; then
-            pkg_tar "$RELEASE_DIR/vex-duckdb-linux-${arch}.tar.gz" "$archdir" \
+            pkg_tar "$RELEASE_DIR/vexdb-lite-duckdb-linux-${arch}.tar.gz" "$archdir" \
                 vex.duckdb_extension
         fi
 
@@ -663,7 +663,7 @@ cmd_package() {
         # unstripped 全量(没做 objcopy split-debug),比 PG 的 .so.debug 大但
         # 客户没出 crash 用不到;命名跟 PG 对齐用 -debugsymbols- 后缀。
         if [[ -f "$archdir/vex.duckdb_extension.unstripped" ]]; then
-            pkg_tar "$RELEASE_DIR/vex-duckdb-debugsymbols-linux-${arch}.tar.gz" "$archdir" \
+            pkg_tar "$RELEASE_DIR/vexdb-lite-duckdb-debugsymbols-linux-${arch}.tar.gz" "$archdir" \
                 vex.duckdb_extension.unstripped
         fi
 
@@ -675,11 +675,11 @@ cmd_package() {
         for entry in $PG_VERSIONS; do
             local pgver="${entry%%:*}" pgdir="$archdir/${entry%%:*}"
             if [[ -f "$pgdir/vexdb_vector.so" ]]; then
-                pkg_tar "$RELEASE_DIR/vexdb_vector-linux-${arch}-${pgver}.tar.gz" "$pgdir" \
+                pkg_tar "$RELEASE_DIR/vexdb-lite-${pgver}-linux-${arch}.tar.gz" "$pgdir" \
                     vexdb_vector.so vexdb_vector.control vexdb_vector--1.0.sql
             fi
             if [[ -f "$pgdir/vexdb_vector.so.debug" ]]; then
-                pkg_tar "$RELEASE_DIR/vexdb_vector-debugsymbols-linux-${arch}-${pgver}.tar.gz" "$pgdir" \
+                pkg_tar "$RELEASE_DIR/vexdb-lite-${pgver}-debugsymbols-linux-${arch}.tar.gz" "$pgdir" \
                     vexdb_vector.so.debug
             fi
         done
