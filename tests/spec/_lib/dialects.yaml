@@ -57,7 +57,7 @@ pg:
     SYS_INDEXES: "pg_indexes"
     SYS_INDEXES_NAME: "indexname"
     SYS_INDEXES_TABLE: "tablename"
-    GUC_EF_SEARCH: "vexdb_vector.ef_search"
+    GUC_EF_SEARCH: "vex.ef_search"
     # Removed in vexdb_vector cleanup; kept as placeholders for legacy templates.
     GUC_BF_THRESHOLD: "__unsupported_pg_guc_brute_force_threshold__"
     GUC_PQ_SEARCH_MODE: "__unsupported_pg_guc_pq_search_mode__"

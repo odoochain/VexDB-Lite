@@ -34,7 +34,7 @@ Current functionality:
 - Product quantization (PQ) with `compact` mode
 - Optimizer rewrite into an ANN Index Scan
 - Shared-memory vector buffer cache and parallel index build
-- Runtime settings: `vexdb_vector.ef_search`, `vexdb_vector.vec_architecture`
+- Runtime settings: `vex.ef_search`, `vex.vec_architecture`
 
 ### 1.2 DuckDB: `vexdb_vector`
 
@@ -112,7 +112,7 @@ WITH (
 ### 3.3 ANN Query
 
 ```sql
-SET vexdb_vector.ef_search = 100;
+SET vex.ef_search = 100;
 SET enable_seqscan = off;
 
 SELECT id, vec <-> '[0.15, 0.25, 0.35]' AS dist
@@ -177,7 +177,7 @@ WITH (
 ### 4.3 ANN Query
 
 ```sql
-SET vexdb_vector.ef_search = 100;
+SET vex.ef_search = 100;
 
 SELECT id
 FROM items

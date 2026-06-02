@@ -28,7 +28,7 @@ USING vexdb_graph (vec floatvector_l2_ops)
 WITH (m = 16, ef_construction = 64);
 
 -- ANN 查询（优化器自动改写为 Index Scan）
-SET vexdb_vector.ef_search = 64;
+SET vex.ef_search = 64;
 SELECT id, vec <-> '[0.1, 0.2, ..., 0.8]' AS dist
 FROM items
 ORDER BY vec <-> '[0.1, 0.2, ..., 0.8]'
@@ -81,20 +81,20 @@ WITH (
 
 ```sql
 -- 查询时搜索宽度（默认 64，越大召回越好、延迟越高）
-SET vexdb_vector.ef_search = 64;
+SET vex.ef_search = 64;
 
 -- 强制指定 SIMD 架构（留空由运行时自动检测；需要 superuser 权限）
 -- 格式：'usage:arch[, usage:arch, ...]'
 -- usage 取值：all / float / l2 / ip / cos 等
 -- arch 取值：SSE / AVX / AVX512 / NEONV8 / SVE2V8 / GENERAL
-SET vexdb_vector.vec_architecture = '';        -- 自动（推荐）
--- SET vexdb_vector.vec_architecture = 'all:AVX';  -- 强制 AVX2
+SET vex.vec_architecture = '';        -- 自动（推荐）
+-- SET vex.vec_architecture = 'all:AVX';  -- 强制 AVX2
 ```
 
 | 参数 | 默认值 | 权限 | 说明 |
 |------|--------|------|------|
-| `vexdb_vector.ef_search` | `64` | 普通用户 | 搜索时的候选集大小 |
-| `vexdb_vector.vec_architecture` | `''`（自动） | superuser | 强制指定 SIMD 实现；格式 `'usage:arch'` |
+| `vex.ef_search` | `64` | 普通用户 | 搜索时的候选集大小 |
+| `vex.vec_architecture` | `''`（自动） | superuser | 强制指定 SIMD 实现；格式 `'usage:arch'` |
 
 ### 并行构建
 
