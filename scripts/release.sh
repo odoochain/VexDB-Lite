@@ -462,20 +462,48 @@ build_pg() {
             export LD_LIBRARY_PATH=\$GCC/lib64:\${LD_LIBRARY_PATH:-} && \
             export CC=\$GCC/bin/gcc CXX=\$GCC/bin/g++ &&"
     fi
-    section "$arch build vexdb_vector ($PG_VERSION, cmake)"
-
-    # CMake out-of-tree build(build/pg)。TMPDIR 切 /home(同 build_duck:x86 /tmp 40G
-    # 不够中间产物)。boost:CMakeLists 的 thirdparties(vendored, getpid patch)优先 +
-    # -DBOOST_FALLBACK_INC=完整 boost 兜底 vendored trim 掉的 preprocessor 等(系统无
-    # boost 的 Kylin build 机必需)。CMake 输出 vexdb_vector.so cp 回仓库根供 split-debug/下载。
-    rssh "$arch" "mkdir -p \$HOME/tmpdir && \
-        $env_setup \
-        cd ~/$REMOTE_DIR/vexdb_lite && \
-        ${CLEAN_BUILD:+rm -rf build/pg-$PG_VERSION &&} mkdir -p build/pg-$PG_VERSION && cd build/pg-$PG_VERSION && \
-        TMPDIR=\$HOME/tmpdir PG_CONFIG=$pg_config cmake ../../vexdb_pg -DCMAKE_BUILD_TYPE=Release -DBOOST_FALLBACK_INC=$boost && \
-        TMPDIR=\$HOME/tmpdir cmake --build . -j8 && \
-        cp vexdb_vector.so ../../vexdb_vector.so" \
-        || fail "$arch PG build 失败"
+    # 构建产物 vexdb_vector.so 落仓库根,供后续 split-debug / 下载。
+    # MANYLINUX=1(默认):在 manylinux_2_28 派生镜像(scripts/docker/Dockerfile.pg-manylinux,
+    #   内含 PG 16-19)里编 → 产物 GLIBC_2.17 可移植。MANYLINUX=0:host build(绑构建机 glibc)。
+    if [[ "${MANYLINUX:-1}" == "1" ]]; then
+        local image pgc docker_pfx host_uid host_gid
+        [[ "$arch" == "x86" ]] && { image="vexdb-pg-manylinux:x86_64"; docker_pfx="echo '$X86_PASS' | sudo -S docker"; } \
+                              || { image="vexdb-pg-manylinux:aarch64"; docker_pfx="docker"; }
+        case "$PG_VERSION" in
+            pg16) pgc=/usr/pgsql-16/bin/pg_config ;;
+            pg17) pgc=/usr/pgsql-17/bin/pg_config ;;
+            pg18) pgc=/usr/pgsql-18/bin/pg_config ;;
+            pg19) pgc=/opt/pg19/bin/pg_config ;;
+            *)    fail "$PG_VERSION 无对应 manylinux 容器内 pg_config（仅 pg16-19）" ;;
+        esac
+        section "$arch build vexdb_vector ($PG_VERSION, manylinux 容器)"
+        rssh "$arch" "$docker_pfx image inspect $image >/dev/null 2>&1" \
+            || fail "$arch manylinux 镜像 $image 不在；先 docker build -f scripts/docker/Dockerfile.pg-manylinux"
+        host_uid=$(rssh "$arch" 'id -u'); host_gid=$(rssh "$arch" 'id -g')
+        rssh "$arch" "$docker_pfx run --rm \
+            -v \$HOME/$REMOTE_DIR/vexdb_lite:/work \
+            -v $boost:/opt/boost:ro \
+            -w /work \
+            $image \
+            bash -c 'set -e
+                export PATH=/opt/python/cp310-cp310/bin:\$PATH
+                ${CLEAN_BUILD:+rm -rf build/pg-ml-$PG_VERSION;} mkdir -p build/pg-ml-$PG_VERSION && cd build/pg-ml-$PG_VERSION
+                PG_CONFIG=$pgc cmake ../../vexdb_pg -DCMAKE_BUILD_TYPE=Release -DBOOST_FALLBACK_INC=/opt/boost
+                cmake --build . -j8
+                cp vexdb_vector.so /work/vexdb_vector.so
+                chown -R $host_uid:$host_gid /work/build/pg-ml-$PG_VERSION /work/vexdb_vector.so
+            '" || fail "$arch $PG_VERSION manylinux build 失败"
+    else
+        section "$arch build vexdb_vector ($PG_VERSION, cmake host)"
+        rssh "$arch" "mkdir -p \$HOME/tmpdir && \
+            $env_setup \
+            cd ~/$REMOTE_DIR/vexdb_lite && \
+            ${CLEAN_BUILD:+rm -rf build/pg-$PG_VERSION &&} mkdir -p build/pg-$PG_VERSION && cd build/pg-$PG_VERSION && \
+            TMPDIR=\$HOME/tmpdir PG_CONFIG=$pg_config cmake ../../vexdb_pg -DCMAKE_BUILD_TYPE=Release -DBOOST_FALLBACK_INC=$boost && \
+            TMPDIR=\$HOME/tmpdir cmake --build . -j8 && \
+            cp vexdb_vector.so ../../vexdb_vector.so" \
+            || fail "$arch PG build 失败"
+    fi
 
     # Split debug: standard GNU binutils workflow (Fedora/Debian also use this
     # for their PG -dbgsym packages). Produces vexdb_vector.so (stripped, light) and
