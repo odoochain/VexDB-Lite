@@ -86,9 +86,12 @@ bool graph_index_insert_internal(Relation index, Relation heap, Datum *values, c
         xlog.init(index, metabuf, BufferGetPage(metabuf));
         xlog.update_num_new_data(nnd);
         LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
-        /* one-shot at ~20% drift; (size_t)nnd*5 == nv avoids the integer-division
-         * ambiguity where nnd == nv/5 fires on two adjacent inserts. */
-        if (nv >= 256 && (size_t)nnd * 5 == nv) {
+        /* Fire when new rows first cross ~20% of the vector count. Detect the
+         * crossing edge (prev below, now at/above) rather than exact equality:
+         * num_vectors keeps growing as we insert, so nnd*5 == nv almost never
+         * lands exactly. Edge-detect keeps it one-shot per 20% band. */
+        size_t thresh = nv / 5;
+        if (nv >= 256 && nnd >= thresh && (nnd - 1) < thresh) {
             /* Phase C: enqueue an async retrain (launcher spawns a DB-connected
              * worker). Falls back to a NOTICE so the user can also retrain
              * manually if the queue is full / the launcher is disabled. */

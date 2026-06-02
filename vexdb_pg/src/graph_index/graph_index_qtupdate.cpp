@@ -39,7 +39,12 @@ static const size_t QTUPDATE_MIN_VECTORS = 256;
 
 bool graph_index_qtupdate_internal(Oid index_oid)
 {
-    Relation index = index_open(index_oid, AccessExclusiveLock);
+    /* try_index_open tolerates a concurrently-dropped index (async worker may
+     * arrive after the index is gone) — returns NULL instead of ERROR. */
+    Relation index = try_index_open(index_oid, AccessExclusiveLock);
+    if (index == NULL) {
+        return false;
+    }
     if (index->rd_index == NULL || !OidIsValid(index->rd_index->indrelid)) {
         index_close(index, AccessExclusiveLock);
         ereport(ERROR, (errmsg("vexdb_graph: not a valid index relation")));

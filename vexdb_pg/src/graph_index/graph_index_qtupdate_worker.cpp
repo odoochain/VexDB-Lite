@@ -67,8 +67,10 @@ void qtupdate_register_launcher(void)
 
 bool qtupdate_submit(Oid dbid, Oid index_oid)
 {
-    if (qtupdate_shared_state == NULL)
+    if (qtupdate_shared_state == NULL) {
+        elog(LOG, "qtupdate_submit: shared_state is NULL (shmem not attached in backend)");
         return false;
+    }
 
     /* dedup: skip if the same index already has a queued/running retrain */
     for (int i = 0; i < QT_UPDATE_QUEUE_SIZE; ++i) {
