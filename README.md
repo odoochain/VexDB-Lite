@@ -28,7 +28,7 @@ Current functionality:
 - Shared-memory vector buffer cache and parallel index build
 - Runtime settings: `vexdb.ef_search`, `vexdb.vec_architecture`
 
-### 1.2 DuckDB: `vex`
+### 1.2 DuckDB: `vexdb_vector`
 
 Current functionality:
 

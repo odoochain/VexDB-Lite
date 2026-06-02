@@ -28,7 +28,7 @@
 - 共享内存向量缓存、并行建索引
 - 运行参数：`vexdb.ef_search`、`vexdb.vec_architecture`
 
-### 1.2 DuckDB：`vex`
+### 1.2 DuckDB：`vexdb_vector`
 
 详见 [vexdb_duckdb/README.md](vexdb_duckdb/README.md)。当前能力：
 
