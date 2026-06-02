@@ -10,7 +10,7 @@ engines:
 - duckdb
 - pg
 - opengauss
-description: Test runtime configuration parameters (vex_ef_search, vex_brute_force_threshold)
+description: Test runtime configuration parameters (vexdb_ef_search, vexdb_brute_force_threshold)
 steps:
 - query: SELECT current_setting('${GUC_EF_SEARCH}');
   _field_types: I

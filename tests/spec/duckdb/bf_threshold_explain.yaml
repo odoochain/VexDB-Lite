@@ -7,7 +7,7 @@ engines:
 - duckdb
 - pg
 - opengauss
-description: Verify vex_brute_force_threshold is reflected in EXPLAIN ANALYZE output
+description: Verify vexdb_brute_force_threshold is reflected in EXPLAIN ANALYZE output
 steps:
 - statement: CREATE TABLE t_bf (id BIGINT, v ${VECTOR(4)});
 - statement: INSERT INTO t_bf SELECT i, ${VEC_LITERAL([(i*0.1)::FLOAT, (i*0.2)::FLOAT, (i*0.3)::FLOAT, (i*0.4)::FLOAT], 4)} FROM ${RANGE(500)} t(i);

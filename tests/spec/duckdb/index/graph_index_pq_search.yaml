@@ -10,7 +10,7 @@ engines:
 - duckdb
 - pg
 - opengauss
-description: vex_pq_search_mode='pq_only' must drive search through the PQ
+description: vexdb_pq_search_mode='pq_only' must drive search through the PQ
 steps:
 - statement: SET ${GUC_BF_THRESHOLD} = 0;
 - statement: CREATE TABLE pq_search (id INTEGER, vec ${VECTOR(8)});

@@ -1,6 +1,6 @@
 name: graph_index_threads_default
 tags: [vex, regression]
-description: GRAPH_INDEX threads default should pick up TaskScheduler::NumberOfThreads() rather than 1. This spec verifies CREATE INDEX without explicit WITH (threads=...) succeeds and explicit threads=1 / threads=4 also succeed.
+description: GRAPH_INDEX threads default should pick up TaskScheduler::NumberOfThreads() rather than 1. This spec verifies CREATE INDEX without explicit WITH (threads=...) succeeds and explicit threads=1 / threads=4 also succeed. Also verifies the unified WITH (parallel_workers=...) name (aligned with PG/openGauss) works, with threads kept as an alias.
 engines: [duckdb]
 steps:
   - statement: CREATE TABLE t_1079144 (id INTEGER, vec FLOAT[8]);
@@ -29,5 +29,13 @@ steps:
     expect:
       - - 10
   - statement: DROP INDEX idx_1079144_t4;
+
+  # parallel_workers (unified name with PG/openGauss) works as the preferred alias of threads
+  - statement: CREATE INDEX idx_1079144_pw ON t_1079144 USING GRAPH_INDEX (vec) WITH (m=8, metric='l2', parallel_workers=4);
+  - query: SELECT count(*)::INTEGER FROM (SELECT id FROM t_1079144 ORDER BY l2_distance(vec, [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]::FLOAT[8]) LIMIT 10) s;
+    _field_types: I
+    expect:
+      - - 10
+  - statement: DROP INDEX idx_1079144_pw;
 
   - statement: DROP TABLE t_1079144;

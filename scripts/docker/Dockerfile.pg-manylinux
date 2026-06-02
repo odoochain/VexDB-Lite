@@ -1,0 +1,44 @@
+# manylinux_2_28 + PG 16/17/18(PGDG)+ PG19devel(源码)——给 vexdb_vector 编可移植 PG 扩展。
+# 产物 .so 底线 GLIBC_2.17 / GLIBCXX_3.4.22(POC 已验证)。
+# 构建:  docker build -t vexdb-pg-manylinux:aarch64 \
+#           --build-arg BASE=quay.io/pypa/manylinux_2_28_aarch64 --build-arg ELARCH=aarch64 \
+#           -f Dockerfile.pg-manylinux .
+#         x86: BASE=...x86_64, ELARCH=x86_64
+ARG BASE=quay.io/pypa/manylinux_2_28_aarch64
+FROM ${BASE}
+ARG ELARCH=aarch64
+
+# cmake(扩展构建需要;烤进镜像省得每次装)
+RUN /opt/python/cp310-cp310/bin/pip install --quiet -i https://mirrors.aliyun.com/pypi/simple cmake==3.29.6 \
+ || /opt/python/cp310-cp310/bin/pip install --quiet cmake==3.29.6
+ENV PATH=/opt/python/cp310-cp310/bin:$PATH
+
+# PG 16/17/18:PGDG el8 包。download.postgresql.org 在国内构建机上慢到 ~18KB/s,
+# 把 baseurl 换清华镜像(AlmaLinux 基础源本身够快,只换 PGDG)。
+RUN dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-${ELARCH}/pgdg-redhat-repo-latest.noarch.rpm \
+ && sed -i 's#download.postgresql.org/pub/repos/yum#mirrors.aliyun.com/postgresql/repos/yum#g' /etc/yum.repos.d/pgdg-redhat-all.repo \
+ && dnf -qy module disable postgresql \
+ && dnf install -y postgresql16-devel postgresql16-server \
+                   postgresql17-devel postgresql17-server \
+                   postgresql18-devel postgresql18-server \
+ && dnf clean all
+
+# pg19 dev 快照编译需 flex(manylinux 镜像缺;bison 镜像自带)。单独一层,保住上面 PG 的缓存。
+RUN dnf install -y flex bison && dnf clean all
+
+# PG 19devel:PGDG 没有,用官方 dev 快照源码编到 /opt/pg19。
+# 快照在容器里 curl 太慢 → 用预先(Mac 快网)下好、放进 build context 的本地包 COPY 进来。
+# 注意:解压后必须先删 tar 包,否则 `cd postgresql-*` 会同时匹配 .tar.bz2 与解压目录而报错。
+COPY postgresql-snapshot.tar.bz2 /tmp/
+RUN cd /tmp \
+ && tar xf postgresql-snapshot.tar.bz2 \
+ && rm -f postgresql-snapshot.tar.bz2 \
+ && cd postgresql-*/ \
+ && ./configure --prefix=/opt/pg19 --without-icu --without-readline --without-zlib CFLAGS="-O2" \
+ && make -j"$(nproc)" >/dev/null \
+ && make install >/dev/null \
+ && cd /tmp && rm -rf postgresql-*
+
+# pg_config 路径速查(供 release.sh 用):
+#   pg16=/usr/pgsql-16  pg17=/usr/pgsql-17  pg18=/usr/pgsql-18  pg19=/opt/pg19
+LABEL purpose="manylinux PG 16-19 build env for vexdb_vector"

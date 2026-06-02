@@ -87,7 +87,7 @@ vexdb_vector_init_guc(void)
                       1, 1, 1024, AccessExclusiveLock);
 
     /* GUC parameters */
-    DefineCustomIntVariable("vexdb_vector.ef_search",
+    DefineCustomIntVariable("vexdb.ef_search",
                             "Search list size for HNSW index search.",
                             "Controls the size of the dynamic candidate list during search. "
                             "Higher values improve recall at the cost of speed.",
@@ -98,7 +98,7 @@ vexdb_vector_init_guc(void)
                             GUC_NOT_IN_SAMPLE,
                             NULL, assign_ef_search, NULL);
 
-    DefineCustomBoolVariable("vexdb_vector.enable_vec_buffer_manager",
+    DefineCustomBoolVariable("vexdb.enable_vec_buffer_manager",
                               "Enable the vector buffer manager.",
                               "When enabled, uses a shared buffer pool for vector data.",
                               &vexdb_vector_enable_vec_buffer_manager,
@@ -107,7 +107,7 @@ vexdb_vector_init_guc(void)
                               GUC_NOT_IN_SAMPLE,
                               NULL, NULL, NULL);
 
-    DefineCustomIntVariable("vexdb_vector.vector_buffers",
+    DefineCustomIntVariable("vexdb.vector_buffers",
                             "Memory size for vector buffers in KB.",
                             "Total memory for vector buffer manager. Each block is 1MB.",
                             &vexdb_vector_vector_buffers,
@@ -117,7 +117,7 @@ vexdb_vector_init_guc(void)
                             GUC_UNIT_KB,
                             NULL, NULL, NULL);
 
-    DefineCustomIntVariable("vexdb_vector.vector_buffer_workers",
+    DefineCustomIntVariable("vexdb.vector_buffer_workers",
                             "Number of background workers for vector buffer management.",
                             "Workers handle buffer expansion and eviction. Set to 0 to disable.",
                             &vexdb_vector_vector_buffer_workers,
@@ -126,7 +126,7 @@ vexdb_vector_init_guc(void)
                             GUC_NOT_IN_SAMPLE,
                             NULL, NULL, NULL);
 
-    DefineCustomStringVariable("vexdb_vector.vec_architecture",
+    DefineCustomStringVariable("vexdb.vec_architecture",
                                "SIMD architecture selection for distance functions.",
                                "Format: 'usage:arch[, usage:arch, ...]'. "
                                "Usage: all, float, half, int8, l2, ip, cos, or combinations like float_l2. "

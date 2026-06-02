@@ -148,17 +148,20 @@ unique_ptr<BoundIndex> GraphIndex::Create(CreateIndexInput &input) {
         metric = ParseMetric(metric_it->second.GetValue<string>());
     }
     /* Default build_threads = available scheduler threads (matches `SET threads`).
-     * Users can override via WITH (threads=N) to force single-threaded build. */
+     * Override via WITH (parallel_workers=N) — the name unified with PG / openGauss —
+     * or its DuckDB-native alias WITH (threads=N). parallel_workers takes precedence. */
     int build_threads;
-    auto threads_it = input.options.find("threads");
+    auto pw_it = input.options.find("parallel_workers");
+    auto threads_it = (pw_it != input.options.end()) ? pw_it : input.options.find("threads");
     if (threads_it != input.options.end()) {
+        const char *opt_name = (pw_it != input.options.end()) ? "parallel_workers" : "threads";
         try {
             build_threads = threads_it->second.DefaultCastAs(LogicalType::INTEGER).GetValue<int>();
         } catch (...) {
-            throw InvalidInputException("GRAPH_INDEX option 'threads' must be a valid integer in [1, 1024]");
+            throw InvalidInputException("GRAPH_INDEX option '%s' must be a valid integer in [1, 1024]", opt_name);
         }
         if (build_threads < 1 || build_threads > 1024) {
-            throw InvalidInputException("GRAPH_INDEX option 'threads' must be in [1, 1024], got %d", build_threads);
+            throw InvalidInputException("GRAPH_INDEX option '%s' must be in [1, 1024], got %d", opt_name, build_threads);
         }
     } else {
         idx_t nthreads = TaskScheduler::GetScheduler(input.context).NumberOfThreads();
@@ -214,7 +217,7 @@ unique_ptr<BoundIndex> GraphIndex::Create(CreateIndexInput &input) {
         // the user passes quantizer='pq' alone.
         pq_m = ::vex::quantizer::ProductQuantizer::AutoSelectM(static_cast<uint32_t>(dimension));
     }
-    static const char *known_options[] = {"m", "ef_construction", "metric", "threads",
+    static const char *known_options[] = {"m", "ef_construction", "metric", "parallel_workers", "threads",
                                           "quantizer", "pq_m", "memory_mode"};
     for (auto &kv : input.options) {
         bool ok = false;
@@ -741,7 +744,7 @@ void GraphIndex::SearchANN(const float *query_vec, idx_t k, int ef, std::vector<
     if (compact_mode_) {
         throw InvalidInputException(
             "GRAPH_INDEX memory_mode='compact': raw vectors were released after PQ training, "
-            "SearchANN is unavailable. Use SET vex_pq_search_mode='pq_only'.");
+            "SearchANN is unavailable. Use SET vexdb_pq_search_mode='pq_only'.");
     }
     auto &store = runtime_->store;
     PointExtensionContext point_ctx;

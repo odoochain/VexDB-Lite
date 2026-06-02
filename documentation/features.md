@@ -28,7 +28,7 @@ USING vexdb_graph (vec floatvector_l2_ops)
 WITH (m = 16, ef_construction = 64);
 
 -- ANN 查询（优化器自动改写为 Index Scan）
-SET vexdb_vector.ef_search = 64;
+SET vexdb.ef_search = 64;
 SELECT id, vec <-> '[0.1, 0.2, ..., 0.8]' AS dist
 FROM items
 ORDER BY vec <-> '[0.1, 0.2, ..., 0.8]'
@@ -81,20 +81,20 @@ WITH (
 
 ```sql
 -- 查询时搜索宽度（默认 64，越大召回越好、延迟越高）
-SET vexdb_vector.ef_search = 64;
+SET vexdb.ef_search = 64;
 
 -- 强制指定 SIMD 架构（留空由运行时自动检测；需要 superuser 权限）
 -- 格式：'usage:arch[, usage:arch, ...]'
 -- usage 取值：all / float / l2 / ip / cos 等
 -- arch 取值：SSE / AVX / AVX512 / NEONV8 / SVE2V8 / GENERAL
-SET vexdb_vector.vec_architecture = '';        -- 自动（推荐）
--- SET vexdb_vector.vec_architecture = 'all:AVX';  -- 强制 AVX2
+SET vexdb.vec_architecture = '';        -- 自动（推荐）
+-- SET vexdb.vec_architecture = 'all:AVX';  -- 强制 AVX2
 ```
 
 | 参数 | 默认值 | 权限 | 说明 |
 |------|--------|------|------|
-| `vexdb_vector.ef_search` | `64` | 普通用户 | 搜索时的候选集大小 |
-| `vexdb_vector.vec_architecture` | `''`（自动） | superuser | 强制指定 SIMD 实现；格式 `'usage:arch'` |
+| `vexdb.ef_search` | `64` | 普通用户 | 搜索时的候选集大小 |
+| `vexdb.vec_architecture` | `''`（自动） | superuser | 强制指定 SIMD 实现；格式 `'usage:arch'` |
 
 ### 并行构建
 
@@ -127,7 +127,7 @@ INSERT INTO items VALUES (1, array_fill(0.1::FLOAT, [128])::FLOAT[128]);
 CREATE INDEX idx_vec ON items USING GRAPH_INDEX (vec)
     WITH (m = 16, ef_construction = 64);
 
-SET vex_ef_search = 64;
+SET vexdb_ef_search = 64;
 SELECT id
 FROM items
 ORDER BY l2_distance(vec, array_fill(0.5::FLOAT, [128])::FLOAT[128])
@@ -184,24 +184,24 @@ WITH (
 
 ```sql
 -- 查询搜索宽度（默认 64）
-SET vex_ef_search = 64;
+SET vexdb_ef_search = 64;
 
 -- 暴力搜索阈值：行数 ≤ 此值时走全量扫描（默认 10000）
-SET vex_brute_force_threshold = 10000;
+SET vexdb_brute_force_threshold = 10000;
 
 -- PQ 搜索模式：'off'（默认）或 'pq_only'
-SET vex_pq_search_mode = 'off';
+SET vexdb_pq_search_mode = 'off';
 
 -- PQ refine 倍率（默认 1.0 = 关闭 refine；设 >1.0 开启精确 refine）
-SET vex_pq_refine_k_factor = 1.0;
+SET vexdb_pq_refine_k_factor = 1.0;
 ```
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `vex_ef_search` | `64` | 查询候选集大小 |
-| `vex_brute_force_threshold` | `10000` | 行数低于此值走全量扫描 |
-| `vex_pq_search_mode` | `'off'` | `'pq_only'` 跳过精确 refine，速度更快但召回略低 |
-| `vex_pq_refine_k_factor` | `1.0` | refine 倍率；`1.0` = 关闭（只用 PQ 距离排序） |
+| `vexdb_ef_search` | `64` | 查询候选集大小 |
+| `vexdb_brute_force_threshold` | `10000` | 行数低于此值走全量扫描 |
+| `vexdb_pq_search_mode` | `'off'` | `'pq_only'` 跳过精确 refine，速度更快但召回略低 |
+| `vexdb_pq_refine_k_factor` | `1.0` | refine 倍率；`1.0` = 关闭（只用 PQ 距离排序） |
 
 ### WHERE 过滤与 ANN 查询
 

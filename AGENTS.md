@@ -182,10 +182,10 @@ SET vexdb_vector.vector_buffer_workers = 1;      -- 缓存后台 worker 数
 ### DuckDB
 
 ```sql
-SET vex_ef_search = 40;                -- 搜索宽度（默认 40）
-SET vex_brute_force_threshold = 10000; -- 行数阈值，低于此值走全量扫描（默认 10000）
-SET vex_pq_search_mode = 'off';        -- 'off' 或 'pq_only'
-SET vex_pq_refine_k_factor = 1.0;      -- refine 倍率（1.0 = 关闭）
+SET vexdb_ef_search = 40;                -- 搜索宽度（默认 40）
+SET vexdb_brute_force_threshold = 10000; -- 行数阈值，低于此值走全量扫描（默认 10000）
+SET vexdb_pq_search_mode = 'off';        -- 'off' 或 'pq_only'
+SET vexdb_pq_refine_k_factor = 1.0;      -- refine 倍率（1.0 = 关闭）
 ```
 
 ---

@@ -10,22 +10,22 @@ engines:
 - duckdb
 - pg
 - opengauss
-description: Test runtime parameter validation (vex_ef_search, vex_brute_force_threshold)
+description: Test runtime parameter validation (vexdb_ef_search, vexdb_brute_force_threshold)
 steps:
 - statement: CREATE TABLE t_param (id INTEGER, vec ${VECTOR(4)});
 - statement: INSERT INTO t_param SELECT i, ${VEC_LITERAL([(i*0.1)::FLOAT, (i*0.2)::FLOAT, (i*0.3)::FLOAT, (i*0.4)::FLOAT], 4)} FROM ${RANGE(100)} t(i);
 - statement: CREATE INDEX idx_param ON t_param USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_OPTS_L2};
-# 验证 vex_ef_search 越界报错需要走 HNSW 路径
+# 验证 vexdb_ef_search 越界报错需要走 HNSW 路径
 - statement: SET ${GUC_BF_THRESHOLD} = 0;
 - statement: SET ${GUC_EF_SEARCH} = -1;
 - statement: SELECT * FROM t_param ORDER BY ${L2(vec, ${VEC_LITERAL([0.1, 0.2, 0.3, 0.4], 4)})} LIMIT 5;
-  expect_error: vex_ef_search
+  expect_error: vexdb_ef_search
 - statement: SET ${GUC_EF_SEARCH} = 0;
 - statement: SELECT * FROM t_param ORDER BY ${L2(vec, ${VEC_LITERAL([0.1, 0.2, 0.3, 0.4], 4)})} LIMIT 5;
-  expect_error: vex_ef_search
+  expect_error: vexdb_ef_search
 - statement: SET ${GUC_EF_SEARCH} = 99999;
 - statement: SELECT * FROM t_param ORDER BY ${L2(vec, ${VEC_LITERAL([0.1, 0.2, 0.3, 0.4], 4)})} LIMIT 5;
-  expect_error: vex_ef_search
+  expect_error: vexdb_ef_search
 - statement: SET ${GUC_EF_SEARCH} = 40;
 - query: SELECT count(*) FROM (SELECT * FROM t_param ORDER BY ${L2(vec, ${VEC_LITERAL([0.1, 0.2, 0.3, 0.4], 4)})} LIMIT 5);
   _field_types: I
@@ -39,7 +39,7 @@ steps:
 - statement: RESET ${GUC_EF_SEARCH};
 - statement: SET ${GUC_BF_THRESHOLD} = 99999999;
 - statement: SELECT * FROM t_param ORDER BY ${L2(vec, ${VEC_LITERAL([0.1, 0.2, 0.3, 0.4], 4)})} LIMIT 5;
-  expect_error: vex_brute_force_threshold
+  expect_error: vexdb_brute_force_threshold
 - statement: SET ${GUC_BF_THRESHOLD} = 100;
 - query: SELECT count(*) FROM (SELECT * FROM t_param ORDER BY ${L2(vec, ${VEC_LITERAL([0.1, 0.2, 0.3, 0.4], 4)})} LIMIT 5);
   _field_types: I

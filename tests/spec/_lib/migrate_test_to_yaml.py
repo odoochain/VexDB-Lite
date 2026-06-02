@@ -46,8 +46,8 @@ REVERSE_PATTERNS: list[tuple[re.Pattern, object]] = [
     (re.compile(r"\bvex_ef_search\b"), "${GUC_EF_SEARCH}"),
     (re.compile(r"\bvex_brute_force_threshold\b"), "${GUC_BF_THRESHOLD}"),
     (re.compile(r"\bvex_pq_search_mode\b"), "${GUC_PQ_SEARCH_MODE}"),
-    (re.compile(r"\bvex_pq_refine\b"), "${GUC_PQ_REFINE}"),
-    (re.compile(r"\bvex_parallel_search\b"), "${GUC_PARALLEL_SEARCH}"),
+    (re.compile(r"\bvexdb_pq_refine\b"), "${GUC_PQ_REFINE}"),
+    (re.compile(r"\bvexdb_parallel_search\b"), "${GUC_PARALLEL_SEARCH}"),
     # range(n)  → ${RANGE(n)}    (支持负号/数字)
     (re.compile(r"\brange\((\s*\d+\s*)\)"), lambda m: f"${{RANGE({m.group(1).strip()})}}"),
     # range(a, b) → ${RANGE2(a, b)}

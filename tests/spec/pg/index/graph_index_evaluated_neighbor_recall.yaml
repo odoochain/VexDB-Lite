@@ -20,7 +20,7 @@ steps:
            || ',' || sin(i*0.23) || ',' || cos(i*0.29) || ',' || sin(i*0.31) || ',' || cos(i*0.37) || ']')::floatvector
     FROM generate_series(1, 500) AS i;
 - statement: CREATE INDEX idx_eval_nbr ON t_eval_nbr USING vexdb_graph (vec floatvector_l2_ops) WITH (m=4, ef_construction=20);
-- statement: SET vexdb_vector.ef_search = 50;
+- statement: SET vexdb.ef_search = 50;
 - query: |
     WITH ann AS (
       SELECT id FROM t_eval_nbr

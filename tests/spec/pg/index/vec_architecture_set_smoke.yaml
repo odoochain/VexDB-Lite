@@ -1,7 +1,7 @@
 name: vec_architecture_set_smoke
 tags: [pg-only, migrated, regression, simd]
 description: |
-  vexdb_vector.vec_architecture GUC must accept the documented rule formats
+  vexdb.vec_architecture GUC must accept the documented rule formats
   (usage:arch list) and a subsequent ANN search must still return correct results.
   Detailed per-arch dispatch unit tests live in distance/simd; this is the
   GUC-syntax surface smoke.
@@ -17,14 +17,14 @@ steps:
       FROM generate_series(1, 50) AS t(i);
   - statement: CREATE INDEX idx_va_rule ON t_va_rule USING vexdb_graph (v floatvector_l2_ops);
 
-  - statement: SET vexdb_vector.vec_architecture = 'all:scalar';
+  - statement: SET vexdb.vec_architecture = 'all:scalar';
   - query: SELECT count(*) FROM (SELECT id FROM t_va_rule ORDER BY v <-> '[10,10,10,10,10,10,10,10]'::floatvector LIMIT 5) s;
     expect: [["5"]]
 
-  - statement: SET vexdb_vector.vec_architecture = 'l2:scalar, ip:scalar';
+  - statement: SET vexdb.vec_architecture = 'l2:scalar, ip:scalar';
   - query: SELECT count(*) FROM (SELECT id FROM t_va_rule ORDER BY v <-> '[10,10,10,10,10,10,10,10]'::floatvector LIMIT 5) s;
     expect: [["5"]]
 
-  - statement: RESET vexdb_vector.vec_architecture;
+  - statement: RESET vexdb.vec_architecture;
   - query: SELECT count(*) FROM (SELECT id FROM t_va_rule ORDER BY v <-> '[10,10,10,10,10,10,10,10]'::floatvector LIMIT 5) s;
     expect: [["5"]]

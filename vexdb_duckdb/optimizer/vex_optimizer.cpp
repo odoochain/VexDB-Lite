@@ -372,7 +372,7 @@ static bool TryOptimizeANN(ClientContext &context, unique_ptr<LogicalOperator> &
         return false;
     }
 
-    // Honor vex_brute_force_threshold: when node_count <= threshold, skip the rewrite
+    // Honor vexdb_brute_force_threshold: when node_count <= threshold, skip the rewrite
     // and let DuckDB run the natural SEQ_SCAN+ORDER_BY+LIMIT plan, which returns the
     // exact top-k. Users raise this to bypass HNSW (e.g., recall degradation after
     // bulk delete + reinsert).

@@ -1,0 +1,23 @@
+name: distance_operators
+tags:
+- duckdb-only
+description: DuckDB distance operators <-> / <=> / <~> (mirrors pg/functions/distance_operators; <~> is negative inner product, unified with PG)
+engines:
+- duckdb
+steps:
+- query: SELECT [1, 0, 0]::FLOAT[3] <-> [0, 1, 0]::FLOAT[3];
+  _field_types: R
+  expect:
+  - - 1.4142135
+- query: SELECT [1, 0]::FLOAT[2] <=> [0, 1]::FLOAT[2];
+  _field_types: R
+  expect:
+  - - 1.0
+- query: SELECT [1, 2]::FLOAT[2] <=> [2, 4]::FLOAT[2];
+  _field_types: R
+  expect:
+  - - 0.0
+- query: SELECT [1, 2]::FLOAT[2] <~> [3, 4]::FLOAT[2];
+  _field_types: R
+  expect:
+  - - -11.0

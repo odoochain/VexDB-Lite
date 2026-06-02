@@ -16,34 +16,35 @@
 Current functionality:
 
 - `floatvector(N)` type
-- Distance operators/functions:
-  - L2: `<->`
-  - Inner product: `<#>`
-  - Cosine: `<=>`
+- Distance functions and operators:
+  - `l2_distance` (`<->`)
+  - `cosine_distance` (`<=>`)
+  - `inner_product` (use `<~>` for negative inner product / MIPS)
+- Scalar helpers: `vector_dims()`, `vector_norm()`, `l2_normalize()`, `vex_index_info()`
 - `CREATE INDEX ... USING vexdb_graph`
-- Graph_index options such as `m`, `ef_construction`, `parallel_workers`
-- runtime settings such as `vexdb_vector.ef_search`, `vexdb_vector.vec_architecture`
-- optimizer/executor ANN index scan path
-- shared-memory vector buffer manager and parallel build support
+- Index options: `m`, `ef_construction`, `parallel_workers` (parallel build), `quantizer` / `pq_m` (PQ)
+- Product quantization (PQ) with `compact` mode
+- Optimizer rewrite into an ANN Index Scan
+- Shared-memory vector buffer cache and parallel index build
+- Runtime settings: `vexdb.ef_search`, `vexdb.vec_architecture`
 
 ### 1.2 DuckDB: `vex`
 
 Current functionality:
 
 - `GRAPH_INDEX` on `FLOAT[N]` vector columns
-- Vector distance functions:
-  - `l2_distance`
-  - `inner_product`, `list_negative_inner_product`
-  - `cosine_distance`
-- `vector_dims()`, `l2_normalize()`, `vex_version()`, `vex_index_info()`
-- `CREATE INDEX ... USING GRAPH_INDEX (vec [, metadata...])`
-- optimizer rewrite into `VEX_INDEX_SCAN`
-- filtered vector index syntax with metadata columns
-
-Duck runtime settings:
-
-- `vex_ef_search`
-- `vex_brute_force_threshold`
+- Distance functions and operators:
+  - `l2_distance` (`<->`)
+  - `cosine_distance` (`<=>`)
+  - `inner_product` (use `<~>` for negative inner product / MIPS)
+  > Note: `<#>` is unavailable in DuckDB (`#` clashes with its comment syntax); use `<~>` for negative inner product — same meaning as in PG.
+- Scalar helpers: `vector_dims()`, `l2_normalize()`, `vex_version()`, `vex_index_info()`
+- `CREATE INDEX ... USING GRAPH_INDEX (vec [, metadata...])` with metadata filtering
+- Index options: `m`, `ef_construction`, `parallel_workers` (parallel build), `quantizer` / `pq_m` (PQ)
+- Product quantization (PQ) with `compact` mode
+- Optimizer rewrite into `VEX_INDEX_SCAN`
+- Vector buffer cache and parallel index build
+- Runtime settings: `vexdb_ef_search`, `vexdb_brute_force_threshold`, `vexdb_pq_search_mode`, `vexdb_pq_refine_k_factor`
 
 ---
 
@@ -90,7 +91,7 @@ Duck runtime settings:
 
 ## 3. PostgreSQL Syntax Examples
 
-### 2.1 Install and Create Table
+### 3.1 Install and Create Table
 
 ```sql
 CREATE EXTENSION vexdb_vector;
@@ -105,7 +106,7 @@ INSERT INTO items (vec) VALUES
     ('[0.40, 0.50, 0.60]');
 ```
 
-### 2.2 Build Index
+### 3.2 Build Index
 
 ```sql
 CREATE INDEX idx_items_vec
@@ -117,10 +118,10 @@ WITH (
 );
 ```
 
-### 2.3 ANN Query
+### 3.3 ANN Query
 
 ```sql
-SET vexdb_vector.ef_search = 100;
+SET vexdb.ef_search = 100;
 SET enable_seqscan = off;
 
 SELECT id, vec <-> '[0.15, 0.25, 0.35]' AS dist
@@ -129,7 +130,7 @@ ORDER BY vec <-> '[0.15, 0.25, 0.35]'
 LIMIT 10;
 ```
 
-### 2.4 Other Metrics
+### 3.4 Other Metrics
 
 ```sql
 SELECT id
@@ -145,9 +146,9 @@ LIMIT 10;
 
 ---
 
-## 3. DuckDB Syntax Examples
+## 4. DuckDB Syntax Examples
 
-### 3.1 Load Extension
+### 4.1 Load Extension
 
 ```sql
 LOAD '/path/to/vex.duckdb_extension';
@@ -163,7 +164,7 @@ con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
 con.execute("LOAD '/path/to/vex.duckdb_extension'")
 ```
 
-### 3.2 Create Table and Index
+### 4.2 Create Table and Index
 
 ```sql
 CREATE TABLE items (
@@ -182,10 +183,10 @@ WITH (
 );
 ```
 
-### 3.3 ANN Query
+### 4.3 ANN Query
 
 ```sql
-SET vexdb_vector.ef_search = 100;
+SET vexdb_ef_search = 100;
 
 SELECT id
 FROM items
@@ -193,7 +194,7 @@ ORDER BY l2_distance(vec, [0.15, 0.25, 0.35]::FLOAT[3])
 LIMIT 10;
 ```
 
-### 3.4 Filtered Index Example
+### 4.4 Filtered Index Example
 
 ```sql
 CREATE INDEX idx_items_vec_meta
@@ -207,7 +208,7 @@ ORDER BY l2_distance(vec, [0.15, 0.25, 0.35]::FLOAT[3])
 LIMIT 10;
 ```
 
-### 3.5 Other Functions
+### 4.5 Other Functions
 
 ```sql
 SELECT inner_product([1.0, 0.0]::FLOAT[2], [0.5, 0.5]::FLOAT[2]);
@@ -219,9 +220,9 @@ SELECT * FROM vex_index_info();
 
 ---
 
-## 4. Build
+## 5. Build
 
-## 4.1 Build the PostgreSQL Variant
+### 5.1 Build the PostgreSQL Variant
 
 ### Dependencies
 
@@ -272,7 +273,7 @@ CREATE EXTENSION vexdb_vector;
 
 ---
 
-## 4.2 Build the DuckDB Variant
+### 5.2 Build the DuckDB Variant
 
 **Recommended: use `build_duck.sh`** — it handles DuckDB clone, cmake configuration, compilation, and metadata processing in one command.
 
@@ -299,7 +300,7 @@ DuckDB extensions must be compiled inside DuckDB's source tree — you cannot ru
 
 ---
 
-## Running Tests
+## 6. Running Tests
 
 ### DuckDB Extension Tests
 
@@ -318,13 +319,13 @@ Tests are driven by a YAML spec DSL; test files live under `tests/spec/`.
 
 ---
 
-## 5. Benchmark Results
+## 7. Benchmark Results
 
 Dataset: SIFT-1M 128-dim, `m=16`, `ef_construction=128`. Columns: `QPS (reads=1)` / `QPS (reads=16)` / `Recall@10`.
 
 Test environment: Intel Core Ultra 7-265K (20c/20t, 3.9 GHz) / 16 GB DDR5 / x86_64 Linux
 
-### 5.1 Comparison with pgvector / VSS (x86_64)
+### 7.1 Comparison with pgvector / VSS (x86_64)
 
 **ef_search = 50**
 
@@ -355,7 +356,7 @@ Test environment: Intel Core Ultra 7-265K (20c/20t, 3.9 GHz) / 16 GB DDR5 / x86_
 
 ---
 
-## 6. Known Limitations
+## 8. Known Limitations
 
 ### PostgreSQL
 

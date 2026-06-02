@@ -66,6 +66,17 @@ ARCH="${2:-all}"
 RELEASE_DIR="$DIST_DIR/release"
 PG_VERSION="${PG_VERSION:-pg19}"
 
+# 多版本 PG 打包：每条 "版本:x86_pg_config:arm_pg_config"，空格分隔多条。
+# 留空 → 用上面的单版本(PG_VERSION + X86/ARM_PG_CONFIG)合成一条，完全向后兼容。
+PG_VERSIONS="${PG_VERSIONS:-}"
+[[ -z "$PG_VERSIONS" ]] && PG_VERSIONS="${PG_VERSION}:${X86_PG_CONFIG}:${ARM_PG_CONFIG}"
+
+# PG smoke(validate_pg)：端口默认 5532；SKIP_PG_SMOKE=1 跳过 in-PG CREATE EXTENSION
+# 那段(符号/ELF 检查仍跑)。多版本构建建议设 SKIP_PG_SMOKE=1，除非每版本各有一个
+# 在跑的 PG 实例并用 PG_SMOKE_PORT 指定端口。
+PG_SMOKE_PORT="${PG_SMOKE_PORT:-5532}"
+SKIP_PG_SMOKE="${SKIP_PG_SMOKE:-}"
+
 # ============================================================
 # Util
 # ============================================================
@@ -153,7 +164,7 @@ prepare_local() {
     # rsync 增量上传源码:本地 → 远程,跳过未变文件。不再 tar+scp(每次重传几十/几百 MB)。
     command -v rsync >/dev/null || fail "缺少 rsync(brew install rsync)"
 
-    [[ -d "$DUCKDB_SRC_LOCAL" ]] || fail "本地 DuckDB src 不存在: $DUCKDB_SRC_LOCAL；先跑 build_duck.sh setup"
+    [[ -d "${DUCKDB_SRC_LOCAL}" ]] || fail "本地 DuckDB src 不存在: ${DUCKDB_SRC_LOCAL} (先跑 build_duck.sh setup, 或从构建机 rsync 回 build/duck/duckdb_src)"
 
     ok "本地准备完成"
 }
@@ -442,8 +453,8 @@ validate_duck() {
 
 build_pg() {
     local arch=$1 outdir pg_config boost env_setup=""
-    [[ "$arch" == "x86" ]] && { outdir="$DIST_DIR/x86_64-linux"; pg_config="$X86_PG_CONFIG"; boost="$X86_BOOST"; } \
-                          || { outdir="$DIST_DIR/aarch64-linux"; pg_config="$ARM_PG_CONFIG"; boost="$ARM_BOOST"; }
+    [[ "$arch" == "x86" ]] && { outdir="$DIST_DIR/x86_64-linux/$PG_VERSION"; pg_config="$X86_PG_CONFIG"; boost="$X86_BOOST"; } \
+                          || { outdir="$DIST_DIR/aarch64-linux/$PG_VERSION"; pg_config="$ARM_PG_CONFIG"; boost="$ARM_BOOST"; }
     # x86 用 portable cmake + 指定 gcc10.3(同 build_duck);ARM 用 Kylin 系统 cmake(3.16+ 够)。
     if [[ "$arch" == "x86" ]]; then
         env_setup="GCC=$X86_GCC_DIR && \
@@ -451,20 +462,48 @@ build_pg() {
             export LD_LIBRARY_PATH=\$GCC/lib64:\${LD_LIBRARY_PATH:-} && \
             export CC=\$GCC/bin/gcc CXX=\$GCC/bin/g++ &&"
     fi
-    section "$arch build vexdb_vector (PG 19, cmake)"
-
-    # CMake out-of-tree build(build/pg)。TMPDIR 切 /home(同 build_duck:x86 /tmp 40G
-    # 不够中间产物)。boost:CMakeLists 的 thirdparties(vendored, getpid patch)优先 +
-    # -DBOOST_FALLBACK_INC=完整 boost 兜底 vendored trim 掉的 preprocessor 等(系统无
-    # boost 的 Kylin build 机必需)。CMake 输出 vexdb_vector.so cp 回仓库根供 split-debug/下载。
-    rssh "$arch" "mkdir -p \$HOME/tmpdir && \
-        $env_setup \
-        cd ~/$REMOTE_DIR/vexdb_lite && \
-        rm -rf build/pg && mkdir -p build/pg && cd build/pg && \
-        TMPDIR=\$HOME/tmpdir PG_CONFIG=$pg_config cmake ../../vexdb_pg -DCMAKE_BUILD_TYPE=Release -DBOOST_FALLBACK_INC=$boost && \
-        TMPDIR=\$HOME/tmpdir cmake --build . -j8 && \
-        cp vexdb_vector.so ../../vexdb_vector.so" \
-        || fail "$arch PG build 失败"
+    # 构建产物 vexdb_vector.so 落仓库根,供后续 split-debug / 下载。
+    # MANYLINUX=1(默认):在 manylinux_2_28 派生镜像(scripts/docker/Dockerfile.pg-manylinux,
+    #   内含 PG 16-19)里编 → 产物 GLIBC_2.17 可移植。MANYLINUX=0:host build(绑构建机 glibc)。
+    if [[ "${MANYLINUX:-1}" == "1" ]]; then
+        local image pgc docker_pfx host_uid host_gid
+        [[ "$arch" == "x86" ]] && { image="vexdb-pg-manylinux:x86_64"; docker_pfx="echo '$X86_PASS' | sudo -S docker"; } \
+                              || { image="vexdb-pg-manylinux:aarch64"; docker_pfx="docker"; }
+        case "$PG_VERSION" in
+            pg16) pgc=/usr/pgsql-16/bin/pg_config ;;
+            pg17) pgc=/usr/pgsql-17/bin/pg_config ;;
+            pg18) pgc=/usr/pgsql-18/bin/pg_config ;;
+            pg19) pgc=/opt/pg19/bin/pg_config ;;
+            *)    fail "$PG_VERSION 无对应 manylinux 容器内 pg_config（仅 pg16-19）" ;;
+        esac
+        section "$arch build vexdb_vector ($PG_VERSION, manylinux 容器)"
+        rssh "$arch" "$docker_pfx image inspect $image >/dev/null 2>&1" \
+            || fail "$arch manylinux 镜像 $image 不在；先 docker build -f scripts/docker/Dockerfile.pg-manylinux"
+        host_uid=$(rssh "$arch" 'id -u'); host_gid=$(rssh "$arch" 'id -g')
+        rssh "$arch" "$docker_pfx run --rm \
+            -v \$HOME/$REMOTE_DIR/vexdb_lite:/work \
+            -v $boost:/opt/boost:ro \
+            -w /work \
+            $image \
+            bash -c 'set -e
+                export PATH=/opt/python/cp310-cp310/bin:\$PATH
+                ${CLEAN_BUILD:+rm -rf build/pg-ml-$PG_VERSION;} mkdir -p build/pg-ml-$PG_VERSION && cd build/pg-ml-$PG_VERSION
+                PG_CONFIG=$pgc cmake ../../vexdb_pg -DCMAKE_BUILD_TYPE=Release -DBOOST_FALLBACK_INC=/opt/boost
+                cmake --build . -j8
+                cp vexdb_vector.so /work/vexdb_vector.so
+                chown -R $host_uid:$host_gid /work/build/pg-ml-$PG_VERSION /work/vexdb_vector.so
+            '" || fail "$arch $PG_VERSION manylinux build 失败"
+    else
+        section "$arch build vexdb_vector ($PG_VERSION, cmake host)"
+        rssh "$arch" "mkdir -p \$HOME/tmpdir && \
+            $env_setup \
+            cd ~/$REMOTE_DIR/vexdb_lite && \
+            ${CLEAN_BUILD:+rm -rf build/pg-$PG_VERSION &&} mkdir -p build/pg-$PG_VERSION && cd build/pg-$PG_VERSION && \
+            TMPDIR=\$HOME/tmpdir PG_CONFIG=$pg_config cmake ../../vexdb_pg -DCMAKE_BUILD_TYPE=Release -DBOOST_FALLBACK_INC=$boost && \
+            TMPDIR=\$HOME/tmpdir cmake --build . -j8 && \
+            cp vexdb_vector.so ../../vexdb_vector.so" \
+            || fail "$arch PG build 失败"
+    fi
 
     # Split debug: standard GNU binutils workflow (Fedora/Debian also use this
     # for their PG -dbgsym packages). Produces vexdb_vector.so (stripped, light) and
@@ -483,6 +522,7 @@ build_pg() {
 
     validate_pg "$arch" || fail "$arch PG smoke 失败"
 
+    mkdir -p "$outdir"
     rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_vector.so" "$outdir/"
     rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_vector.so.debug" "$outdir/"
     rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_pg/vexdb_vector.control" "$outdir/"
@@ -509,11 +549,11 @@ validate_pg() {
         test -f \$SO_DBG || { echo 'companion .debug missing'; exit 1; }
         readelf -n \$SO_DBG 2>/dev/null | grep -q 'Build ID:' || { echo '.debug missing build-id'; exit 1; }
         # 2. 覆盖部署 + 跑 smoke + 恢复（如果有权限）
-        if [ -w \"\$PG_LIB/vexdb_vector.so\" ]; then
+        if [ -z "$SKIP_PG_SMOKE" ] && [ -w \"\$PG_LIB/vexdb_vector.so\" ]; then
             cp \"\$PG_LIB/vexdb_vector.so\" \"\$PG_LIB/vexdb_vector.so.bak\"
             cp \$SO \"\$PG_LIB/vexdb_vector.so\"
             trap 'cp \"\$PG_LIB/vexdb_vector.so.bak\" \"\$PG_LIB/vexdb_vector.so\" && rm \"\$PG_LIB/vexdb_vector.so.bak\"' EXIT
-            psql -p 5532 -d spec_test -At -c \"DROP TABLE IF EXISTS vex_smoke;
+            psql -p ${PG_SMOKE_PORT:-5532} -d spec_test -At -c \"DROP TABLE IF EXISTS vex_smoke;
                 CREATE TABLE vex_smoke(id INT, v floatvector(3));
                 INSERT INTO vex_smoke VALUES (1,'[1,0,0]'),(2,'[0,1,0]'),(3,'[0,0,1]');
                 CREATE INDEX ON vex_smoke USING vexdb_graph (v floatvector_l2_ops);
@@ -544,8 +584,16 @@ cmd_build() {
 
     for arch in "${ARCHES[@]}"; do
         [[ "$TARGET" == "duck" || "$TARGET" == "all" ]] && build_duck "$arch"
-        [[ "$TARGET" == "pg"   || "$TARGET" == "all" ]] && build_pg   "$arch"
     done
+
+    # PG：按 PG_VERSIONS 逐版本构建（每条覆盖 PG_VERSION + 该版本的 x86/arm pg_config）。
+    if [[ "$TARGET" == "pg" || "$TARGET" == "all" ]]; then
+        for entry in $PG_VERSIONS; do
+            IFS=: read -r PG_VERSION X86_PG_CONFIG ARM_PG_CONFIG <<<"$entry"
+            section "PG 版本 $PG_VERSION (x86:$X86_PG_CONFIG arm:$ARM_PG_CONFIG)"
+            for arch in "${ARCHES[@]}"; do build_pg "$arch"; done
+        done
+    fi
 
     section "build 完成"
     find "$DIST_DIR" -maxdepth 2 -type f \( -name "*.duckdb_extension" -o -name "vexdb_vector.so" \
@@ -619,20 +667,22 @@ cmd_package() {
                 vex.duckdb_extension.unstripped
         fi
 
-        if [[ -f "$archdir/vexdb_vector.so" ]]; then
-            pkg_tar "$RELEASE_DIR/vexdb_vector-linux-${arch}-${PG_VERSION}.tar.gz" "$archdir" \
-                vexdb_vector.so vexdb_vector.control vexdb_vector--1.0.sql
-        fi
-
-        # PG debug symbols ship as a separate asset (Fedora/Debian convention).
-        # Customers download main tarball only; if they hit a crash worth a
-        # gdb session, ask them to download the matching debugsymbols asset
-        # and drop the .debug file next to .so. gdb auto-loads it via
-        # .gnu_debuglink CRC + .note.gnu.build-id match.
-        if [[ -f "$archdir/vexdb_vector.so.debug" ]]; then
-            pkg_tar "$RELEASE_DIR/vexdb_vector-debugsymbols-linux-${arch}-${PG_VERSION}.tar.gz" "$archdir" \
-                vexdb_vector.so.debug
-        fi
+        # PG：每个版本从 $archdir/<版本> 子目录打包（build_pg 已按版本下载到子目录）。
+        # PG debug symbols ship as a separate asset (Fedora/Debian convention):
+        # customers download the main tarball; on a crash they fetch the matching
+        # debugsymbols asset and drop the .debug next to the .so (gdb auto-loads
+        # via .gnu_debuglink CRC + .note.gnu.build-id match).
+        for entry in $PG_VERSIONS; do
+            local pgver="${entry%%:*}" pgdir="$archdir/${entry%%:*}"
+            if [[ -f "$pgdir/vexdb_vector.so" ]]; then
+                pkg_tar "$RELEASE_DIR/vexdb_vector-linux-${arch}-${pgver}.tar.gz" "$pgdir" \
+                    vexdb_vector.so vexdb_vector.control vexdb_vector--1.0.sql
+            fi
+            if [[ -f "$pgdir/vexdb_vector.so.debug" ]]; then
+                pkg_tar "$RELEASE_DIR/vexdb_vector-debugsymbols-linux-${arch}-${pgver}.tar.gz" "$pgdir" \
+                    vexdb_vector.so.debug
+            fi
+        done
     done
 
     # 防回归: 每个 tarball 都扫一遍,有 AppleDouble 直接 fail。
