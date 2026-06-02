@@ -2,7 +2,7 @@ name: vectorbuffer_inspect_smoke
 tags: [pg-only, migrated, regression, buffer]
 description: |
   vectorbuffer_inspect() SRF exists and
-  returns at least one row when vex.enable_vec_buffer_manager is on
+  returns at least one row when vexdb.enable_vec_buffer_manager is on
   and an index is in use. Pure callable-surface smoke; the original case
   required postgresql.conf restart (vector_buffers, shared_preload) which
   is out of scope for the spec runner — covered indirectly via index use.

@@ -744,7 +744,7 @@ void GraphIndex::SearchANN(const float *query_vec, idx_t k, int ef, std::vector<
     if (compact_mode_) {
         throw InvalidInputException(
             "GRAPH_INDEX memory_mode='compact': raw vectors were released after PQ training, "
-            "SearchANN is unavailable. Use SET vex_pq_search_mode='pq_only'.");
+            "SearchANN is unavailable. Use SET vexdb_pq_search_mode='pq_only'.");
     }
     auto &store = runtime_->store;
     PointExtensionContext point_ctx;

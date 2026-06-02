@@ -29,7 +29,7 @@ INSERT INTO items SELECT i, list_value(...)::FLOAT[128] FROM range(100000) t(i);
 CREATE INDEX idx_vec ON items USING GRAPH_INDEX (vec)
   WITH (m = 16, ef_construction = 64);
 
-SET vex_ef_search = 40;
+SET vexdb_ef_search = 40;
 SELECT id FROM items
   ORDER BY l2_distance(vec, [0.5, 0.5, ...]::FLOAT[128])
   LIMIT 10;
@@ -153,17 +153,17 @@ WITH (
 
 ### 索引 vs 暴力搜索
 
-`vexdb_duckdb` 内置 small-data fast path：当索引行数 ≤ `vex_brute_force_threshold`（默认 10000）时，优化器**跳过 HNSW**直接走 SEQ_SCAN + ORDER BY + LIMIT 精确扫描。
+`vexdb_duckdb` 内置 small-data fast path：当索引行数 ≤ `vexdb_brute_force_threshold`（默认 10000）时，优化器**跳过 HNSW**直接走 SEQ_SCAN + ORDER BY + LIMIT 精确扫描。
 
 - 小表（n < 10k）：自动 brute force，100% 召回，无索引开销
 - 大表（n ≥ 10k）：HNSW 路径，~99% 召回，毫秒响应
 
-需要绕开 fast path（如测优化器、测 ANN 路径）：`SET vex_brute_force_threshold = 0;`
+需要绕开 fast path（如测优化器、测 ANN 路径）：`SET vexdb_brute_force_threshold = 0;`
 
 ### ANN 查询
 
 ```sql
-SET vex_ef_search = 40;  -- 查询时搜索宽度，越大召回越好越慢
+SET vexdb_ef_search = 40;  -- 查询时搜索宽度，越大召回越好越慢
 
 SELECT id
 FROM items
@@ -227,9 +227,9 @@ WITH (quantizer = 'pq', pq_m = 16, memory_mode = 'compact');
 ### 搜索模式（GUC）
 
 ```sql
-SET vex_pq_search_mode = 'pq_only';   -- 仅用 PQ codes，最快
-SET vex_pq_search_mode = 'off';       -- 仅用原始向量（compact 模式会自动启用 pq_only）
-SET vex_pq_refine_k_factor = 4.0;     -- HNSW 找 4k 个候选后用原向量精排
+SET vexdb_pq_search_mode = 'pq_only';   -- 仅用 PQ codes，最快
+SET vexdb_pq_search_mode = 'off';       -- 仅用原始向量（compact 模式会自动启用 pq_only）
+SET vexdb_pq_refine_k_factor = 4.0;     -- HNSW 找 4k 个候选后用原向量精排
 ```
 
 ---
@@ -238,17 +238,17 @@ SET vex_pq_refine_k_factor = 4.0;     -- HNSW 找 4k 个候选后用原向量精
 
 | GUC | 默认值 | 说明 |
 |---|---|---|
-| `vex_ef_search` | 40 | HNSW 查询搜索宽度。提高 → 召回 ↑ / QPS ↓ |
-| `vex_brute_force_threshold` | 10000 | 行数 ≤ 此值走 brute force 精确路径 |
-| `vex_pq_search_mode` | `'off'` | PQ 搜索模式：`'off'` / `'pq_only'` |
-| `vex_pq_refine_k_factor` | 1.0 | PQ pq_only 时取 k×factor 候选用原向量精排 |
+| `vexdb_ef_search` | 40 | HNSW 查询搜索宽度。提高 → 召回 ↑ / QPS ↓ |
+| `vexdb_brute_force_threshold` | 10000 | 行数 ≤ 此值走 brute force 精确路径 |
+| `vexdb_pq_search_mode` | `'off'` | PQ 搜索模式：`'off'` / `'pq_only'` |
+| `vexdb_pq_refine_k_factor` | 1.0 | PQ pq_only 时取 k×factor 候选用原向量精排 |
 
 ```sql
-SET vex_ef_search = 100;       -- 高召回
-SET vex_ef_search = 10;        -- 高 QPS
+SET vexdb_ef_search = 100;       -- 高召回
+SET vexdb_ef_search = 10;        -- 高 QPS
 
-SET vex_brute_force_threshold = 0;     -- 强制走 HNSW（调试用）
-SET vex_brute_force_threshold = 100000;-- 大表也走 brute force（重 build 后召回未恢复时临时绕过）
+SET vexdb_brute_force_threshold = 0;     -- 强制走 HNSW（调试用）
+SET vexdb_brute_force_threshold = 100000;-- 大表也走 brute force（重 build 后召回未恢复时临时绕过）
 ```
 
 ---
@@ -393,7 +393,7 @@ Python：`config={"allow_unsigned_extensions": "true"}`
 调试：
 
 ```sql
-SET vex_brute_force_threshold = 0;  -- 排除原因 1
+SET vexdb_brute_force_threshold = 0;  -- 排除原因 1
 EXPLAIN SELECT id FROM items ORDER BY l2_distance(vec, ...) LIMIT 10;
 ```
 
@@ -402,13 +402,13 @@ EXPLAIN SELECT id FROM items ORDER BY l2_distance(vec, ...) LIMIT 10;
 HNSW 是近似算法，召回 < 100% 是预期。提高召回：
 
 ```sql
-SET vex_ef_search = 200;  -- 默认 40，提到 200 召回大幅提升
+SET vexdb_ef_search = 200;  -- 默认 40，提到 200 召回大幅提升
 ```
 
 或直接用 brute force（小数据集已经自动这样做）：
 
 ```sql
-SET vex_brute_force_threshold = 99999999;
+SET vexdb_brute_force_threshold = 99999999;
 ```
 
 ### `Parser Error: syntax error at or near "#>"`

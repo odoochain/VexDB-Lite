@@ -10,7 +10,7 @@ engines:
 - duckdb
 - pg
 - opengauss
-description: vex_brute_force_threshold high enough to bypass the index must
+description: vexdb_brute_force_threshold high enough to bypass the index must
 steps:
 - statement: CREATE TABLE bft_correctness (id INTEGER, vec ${VECTOR(4)});
 - statement: INSERT INTO bft_correctness SELECT i, ${VEC_LITERAL([(i*0.13)::FLOAT, (i*0.07)::FLOAT, (i*0.21)::FLOAT, (i*0.05)::FLOAT], 4)} FROM ${RANGE(300)} t(i);

@@ -190,11 +190,11 @@ OperatorResultType PhysicalVexIndexScan::Execute(ExecutionContext &context, Data
 
         int ef = 40;
         Value ef_val;
-        if (context.client.TryGetCurrentSetting("vex_ef_search", ef_val)) {
+        if (context.client.TryGetCurrentSetting("vexdb_ef_search", ef_val)) {
             ef = ef_val.GetValue<int>();
             if (ef < 1 || ef > 65535) {
                 throw InvalidInputException(
-                    "vex_ef_search must be in [1, 65535], got %d", ef);
+                    "vexdb_ef_search must be in [1, 65535], got %d", ef);
             }
         }
         // bft is validated up front in TryOptimizeANN; by the time we run, the
@@ -205,13 +205,13 @@ OperatorResultType PhysicalVexIndexScan::Execute(ExecutionContext &context, Data
 
         bool pq_only = false;
         Value pq_mode_val;
-        if (context.client.TryGetCurrentSetting("vex_pq_search_mode", pq_mode_val)) {
+        if (context.client.TryGetCurrentSetting("vexdb_pq_search_mode", pq_mode_val)) {
             auto mode = StringUtil::Lower(pq_mode_val.ToString());
             if (mode == "pq_only") {
                 pq_only = true;
             } else if (mode != "off" && !mode.empty()) {
                 throw InvalidInputException(
-                    "vex_pq_search_mode must be 'off' or 'pq_only', got '%s'", pq_mode_val.ToString());
+                    "vexdb_pq_search_mode must be 'off' or 'pq_only', got '%s'", pq_mode_val.ToString());
             }
         }
         // compact mode 不保留原始向量，只能走 PQ 搜索；无视 GUC 自动路由
@@ -224,15 +224,15 @@ OperatorResultType PhysicalVexIndexScan::Execute(ExecutionContext &context, Data
         if (pq_only) {
             if (!graph_index.UsesPQ()) {
                 throw InvalidInputException(
-                    "vex_pq_search_mode='pq_only' requires the index to be built with WITH (quantizer='pq', pq_m=N)");
+                    "vexdb_pq_search_mode='pq_only' requires the index to be built with WITH (quantizer='pq', pq_m=N)");
             }
             double refine_factor = 1.0;
             Value refine_val;
-            if (context.client.TryGetCurrentSetting("vex_pq_refine_k_factor", refine_val)) {
+            if (context.client.TryGetCurrentSetting("vexdb_pq_refine_k_factor", refine_val)) {
                 refine_factor = refine_val.GetValue<double>();
                 if (refine_factor < 1.0 || refine_factor > 1000.0) {
                     throw InvalidInputException(
-                        "vex_pq_refine_k_factor must be in [1.0, 1000.0], got %.3f", refine_factor);
+                        "vexdb_pq_refine_k_factor must be in [1.0, 1000.0], got %.3f", refine_factor);
                 }
             }
             graph_index.SearchPQ(query_vec.data(), k, result_row_ids, result_distances, refine_factor);

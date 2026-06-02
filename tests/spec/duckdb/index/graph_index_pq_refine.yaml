@@ -10,7 +10,7 @@ engines:
 - duckdb
 - pg
 - opengauss
-description: vex_pq_refine_k_factor takes top k*factor by PQ then re-ranks
+description: vexdb_pq_refine_k_factor takes top k*factor by PQ then re-ranks
 steps:
 - statement: SET ${GUC_BF_THRESHOLD} = 0;
 - statement: CREATE TABLE pq_ref (id INTEGER, vec ${VECTOR(8)});
@@ -22,7 +22,7 @@ steps:
   _field_types: I
   expect:
   - - 1
-- statement: SET vex_pq_refine_k_factor = 4.0;
+- statement: SET vexdb_pq_refine_k_factor = 4.0;
 - query: 'SELECT id FROM pq_ref
 
     ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 8)})}
@@ -31,19 +31,19 @@ steps:
   _field_types: I
   expect:
   - - 100
-- statement: 'SET vex_pq_refine_k_factor = 0.5;
+- statement: 'SET vexdb_pq_refine_k_factor = 0.5;
 
     SELECT id FROM pq_ref ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 8)})} LIMIT 1;'
   expect_error: must be in [1.0, 1000.0]
-- statement: RESET vex_pq_refine_k_factor;
+- statement: RESET vexdb_pq_refine_k_factor;
 - statement: DROP INDEX idx_pq_ref;
 - statement: CREATE INDEX idx_pq_ref ON pq_ref USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_WITH_L2(quantizer = 'pq', pq_m = 4, memory_mode = 'compact')};
-- statement: SET vex_pq_refine_k_factor = 4.0;
+- statement: SET vexdb_pq_refine_k_factor = 4.0;
 - query: "SELECT COUNT(*) FROM (\n    SELECT id FROM pq_ref\n    ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 8)})}\n    LIMIT 5\n) t;"
   _field_types: I
   expect:
   - - 5
-- statement: RESET vex_pq_refine_k_factor;
+- statement: RESET vexdb_pq_refine_k_factor;
 - statement: RESET ${GUC_PQ_SEARCH_MODE};
 - statement: DROP TABLE pq_ref;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_pq_refine.test

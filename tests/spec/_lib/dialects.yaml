@@ -22,11 +22,11 @@ duckdb:
     SYS_INDEXES_NAME: "index_name"
     SYS_INDEXES_TABLE: "table_name"
     # ── 运行时 GUC ──
-    GUC_EF_SEARCH: "vex_ef_search"
-    GUC_BF_THRESHOLD: "vex_brute_force_threshold"
-    GUC_PQ_SEARCH_MODE: "vex_pq_search_mode"
-    GUC_PQ_REFINE: "vex_pq_refine"
-    GUC_PARALLEL_SEARCH: "vex_parallel_search"
+    GUC_EF_SEARCH: "vexdb_ef_search"
+    GUC_BF_THRESHOLD: "vexdb_brute_force_threshold"
+    GUC_PQ_SEARCH_MODE: "vexdb_pq_search_mode"
+    GUC_PQ_REFINE: "vexdb_pq_refine"
+    GUC_PARALLEL_SEARCH: "vexdb_parallel_search"
     # ── 字面量 ──
     NULL_LITERAL: "NULL"
   functions:
@@ -57,7 +57,7 @@ pg:
     SYS_INDEXES: "pg_indexes"
     SYS_INDEXES_NAME: "indexname"
     SYS_INDEXES_TABLE: "tablename"
-    GUC_EF_SEARCH: "vex.ef_search"
+    GUC_EF_SEARCH: "vexdb.ef_search"
     # Removed in vexdb_vector cleanup; kept as placeholders for legacy templates.
     GUC_BF_THRESHOLD: "__unsupported_pg_guc_brute_force_threshold__"
     GUC_PQ_SEARCH_MODE: "__unsupported_pg_guc_pq_search_mode__"

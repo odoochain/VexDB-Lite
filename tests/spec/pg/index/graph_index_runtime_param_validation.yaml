@@ -12,25 +12,25 @@ steps:
 - statement: INSERT INTO t_param SELECT i, ('['||((i*0.1)::FLOAT)::text||','||((i*0.2)::FLOAT)::text||','||((i*0.3)::FLOAT)::text||','||((i*0.4)::FLOAT)::text||']')::floatvector FROM generate_series(0,
     99) t(i);
 - statement: CREATE INDEX idx_param ON t_param USING vexdb_graph (vec);
-- statement: SET vex.ef_search = -1;
+- statement: SET vexdb.ef_search = -1;
 - query: SELECT * FROM t_param ORDER BY l2_distance(vec, '[0.1, 0.2, 0.3, 0.4]'::floatvector) LIMIT 5;
   expect:
-  - - ERROR ~ vex.ef_search
-- statement: SET vex.ef_search = 0;
+  - - ERROR ~ vexdb.ef_search
+- statement: SET vexdb.ef_search = 0;
 - query: SELECT * FROM t_param ORDER BY l2_distance(vec, '[0.1, 0.2, 0.3, 0.4]'::floatvector) LIMIT 5;
   expect:
-  - - ERROR ~ vex.ef_search
-- statement: SET vex.ef_search = 99999;
+  - - ERROR ~ vexdb.ef_search
+- statement: SET vexdb.ef_search = 99999;
 - query: SELECT * FROM t_param ORDER BY l2_distance(vec, '[0.1, 0.2, 0.3, 0.4]'::floatvector) LIMIT 5;
   expect:
-  - - ERROR ~ vex.ef_search
-- statement: SET vex.ef_search = 40;
+  - - ERROR ~ vexdb.ef_search
+- statement: SET vexdb.ef_search = 40;
 - query: SELECT count(*) FROM (SELECT * FROM t_param ORDER BY l2_distance(vec, '[0.1, 0.2, 0.3, 0.4]'::floatvector) LIMIT 5);
   expect:
   - - 5
-- statement: SET vex.ef_search = 5000;
+- statement: SET vexdb.ef_search = 5000;
 - query: SELECT count(*) FROM (SELECT * FROM t_param ORDER BY l2_distance(vec, '[0.1, 0.2, 0.3, 0.4]'::floatvector) LIMIT 5);
   expect:
   - - 5
-- statement: RESET vex.ef_search;
+- statement: RESET vexdb.ef_search;
 - statement: DROP TABLE t_param;

@@ -44,9 +44,9 @@ void LoadInternal(ExtensionLoader &loader) {
     RegisterIndexTypes(config);
     OptimizerExtension::Register(config, VexOptimizerExtension());
 
-    config.AddExtensionOption("vex_ef_search", "Search expansion factor for GRAPH_INDEX.",
+    config.AddExtensionOption("vexdb_ef_search", "Search expansion factor for GRAPH_INDEX.",
                               LogicalType::INTEGER, Value::INTEGER(40));
-    config.AddExtensionOption("vex_brute_force_threshold",
+    config.AddExtensionOption("vexdb_brute_force_threshold",
                               "Run exact brute-force search when index row count <= threshold. "
                               "Below ~10k rows ANN offers no perf win but loses recall, so default "
                               "favors precision. Set higher to bypass HNSW after large delete+reinsert "
@@ -56,13 +56,13 @@ void LoadInternal(ExtensionLoader &loader) {
     // pq_only:       brute-force over PQ codes using a precomputed distance
     //                table. Approximate but fast for small indexes; useful
     //                as a way to verify PQ training is healthy.
-    config.AddExtensionOption("vex_pq_search_mode",
+    config.AddExtensionOption("vexdb_pq_search_mode",
                               "PQ search mode for GRAPH_INDEX: 'off' or 'pq_only'.",
                               LogicalType::VARCHAR, Value("off"));
     // pq_only-mode refinement: take top k*factor by PQ distance, then re-rank
     // via raw vector L2/cosine. Trades a per-query raw-vec lookup for higher
     // recall. 1.0 disables. Compact-mode indexes ignore (no raw vec to fetch).
-    config.AddExtensionOption("vex_pq_refine_k_factor",
+    config.AddExtensionOption("vexdb_pq_refine_k_factor",
                               "PQ refine factor: SearchPQ takes top k*factor candidates "
                               "and re-ranks by raw distance. 1.0 = no refine. Range [1.0, 1000.0].",
                               LogicalType::DOUBLE, Value::DOUBLE(1.0));

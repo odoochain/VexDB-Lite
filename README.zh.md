@@ -36,7 +36,7 @@
 - 产品量化 PQ + compact 模式
 - 优化器生成 Index Scan，执行器走 ANN 索引检索
 - 共享内存向量缓存、并行建索引
-- 运行参数：`vex.ef_search`、`vex.vec_architecture`
+- 运行参数：`vexdb.ef_search`、`vexdb.vec_architecture`
 
 ### 1.2 DuckDB：`vexdb_vector`
 
@@ -53,7 +53,7 @@
 - 产品量化 PQ + compact 模式（百亿级内存优化）
 - 优化器生成 `VEX_INDEX_SCAN`
 - 向量缓存、并行建索引
-- 运行参数：`vex_ef_search`、`vex_brute_force_threshold`、`vex_pq_search_mode`、`vex_pq_refine_k_factor`
+- 运行参数：`vexdb_ef_search`、`vexdb_brute_force_threshold`、`vexdb_pq_search_mode`、`vexdb_pq_refine_k_factor`
 
 ---
 
@@ -143,7 +143,7 @@ WHERE indexname = 'idx_pq';
 ### 3.3 ANN 查询
 
 ```sql
-SET vex.ef_search = 100;
+SET vexdb.ef_search = 100;
 SET enable_seqscan = off;
 
 SELECT id, vec <-> '[0.15, 0.25, 0.35]' AS dist
@@ -208,7 +208,7 @@ WITH (
 ### 4.3 ANN 查询
 
 ```sql
-SET vex.ef_search = 100;
+SET vexdb_ef_search = 100;
 
 SELECT id
 FROM items

@@ -13,13 +13,13 @@ steps:
     \ || ',' || cos(i*0.37) || ','\n         || sin(i*0.41) || ',' || cos(i*0.43) || ',' || sin(i*0.47) || ',' || cos(i*0.53) || ','\n         || sin(i*0.59) || ',' || cos(i*0.61) || ',' || sin(i*0.67)\
     \ || ',' || cos(i*0.71) || ']')::floatvector\nFROM generate_series(1, 2000) AS t(i);"
 - statement: "CREATE INDEX idx ON t USING vexdb_graph (vec)\n    WITH (quantizer='pq', pq_m=4, metric='l2', m=16, ef_construction=100);"
-- statement: SET vex.ef_search=100;
+- statement: SET vexdb.ef_search=100;
 - statement: "CREATE TABLE before_restart AS\nSELECT id, row_number() OVER () AS rn FROM (\n    SELECT id FROM t ORDER BY l2_distance(vec, '[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]'::floatvector)\
     \ LIMIT 10\n) sub;"
 - statement: CHECKPOINT;
 - statement: '\echo "TODO: pg_ctl restart here"
 
-    SET vex.ef_search=100;'
+    SET vexdb.ef_search=100;'
 - statement: "WITH after_restart AS (\n    SELECT id, row_number() OVER () AS rn FROM (\n        SELECT id FROM t ORDER BY l2_distance(vec, '[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8]'::floatvector)\
     \ LIMIT 10\n    ) sub\n)\nSELECT b.rn, b.id, a.id FROM before_restart b JOIN after_restart a USING (rn) WHERE b.id <> a.id ORDER BY b.rn;"
 - statement: DROP TABLE t;

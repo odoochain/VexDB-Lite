@@ -102,7 +102,7 @@ steps:
 | `${L2(a,b)}` | `l2_distance(a,b)` | `(a <-> b)` 中缀 |
 | `${COSINE(a,b)}` `${IP(a,b)}` | 函数式 | `<=>` / `inner_product()` |
 | `${RANGE(n)}` | `range(n)` | `generate_series(0, n-1)` |
-| `${GUC_EF_SEARCH}` 等 | `vex_ef_search` | `pg_vexdb.ef_search` |
+| `${GUC_EF_SEARCH}` 等 | `vexdb_ef_search` | `pg_vexdb.ef_search` |
 | `${SYS_INDEXES}` / `${SYS_INDEXES_NAME}` | `duckdb_indexes()` / `index_name` | `pg_indexes` / `indexname` |
 
 完整字典见 `_lib/dialects.yaml`。
