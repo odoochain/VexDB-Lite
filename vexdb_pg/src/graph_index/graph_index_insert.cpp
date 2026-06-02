@@ -4,6 +4,7 @@
 
 #include "graph_index/graph_index.h"
 #include "graph_index/graph_index_algorithm.h"
+#include "graph_index/graph_index_xlog.h"
 #include "ann_utils.h"
 #include "distance/core/distance_dispatcher.h"
 #include "annkmeans.h"
@@ -69,6 +70,32 @@ bool graph_index_insert_internal(Relation index, Relation heap, Datum *values, c
     visit(visitor, disk_store);
     disk_store.destroy();
     ctx.destroy();
+
+    /* Phase B: track post-train drift for PQ indexes and nudge the user to
+     * retrain once enough new rows accumulate. Mirrors openGauss which bumps
+     * num_new_data per insert; lite emits a one-shot NOTICE at the threshold
+     * (automatic bgworker-driven retrain is phase C). */
+    if (metap->quantizer_metainfo.get_setting_type() == QuantizerType::PQ &&
+        metap->quantizer_metainfo.get_pq_metainfo().graph_pq) {
+        LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+        GraphIndexMetaPage mp = GRAPH_INDEX_PAGE_GET_META(BufferGetPage(metabuf));
+        uint32 nnd = mp->quantizer_metainfo.num_new_data + 1;
+        size_t nv = mp->num_vectors;
+        GraphIndexXlog xlog;
+        xlog.init(index, metabuf, BufferGetPage(metabuf));
+        xlog.update_num_new_data(nnd);
+        LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
+        /* one-shot at ~20% drift; (size_t)nnd*5 == nv avoids the integer-division
+         * ambiguity where nnd == nv/5 fires on two adjacent inserts. */
+        if (nv >= 256 && (size_t)nnd * 5 == nv) {
+            ereport(NOTICE,
+                (errmsg("vexdb_graph: %u rows inserted since last PQ codebook train "
+                        "(~%d%% of %zu vectors); run SELECT index_qtupdate(<index>) to "
+                        "retrain and refresh recall",
+                        nnd, (int)(100 * nnd / nv), nv)));
+        }
+    }
+
     if (vec_p != DatumGetPointer(values[0])) {
         pfree(vec_p);
     }
