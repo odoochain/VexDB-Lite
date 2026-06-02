@@ -7,6 +7,7 @@
 #include "guc_config.h"
 #include "vector_buffer/shared_alloc_set.h"
 #include "vector_buffer/vecbuf_shared.h"
+#include "graph_index/graph_index_qtupdate_worker.h"
 
 extern "C" {
 #include "storage/shmem.h"
@@ -76,7 +77,10 @@ vecbuf_shmem_size(void)
     size = add_size(size, ann_helper::vector_aligned_size);
     
     /* Hashtable overhead is negligible per user direction */
-    
+
+    /* PQ async-retrain task queue */
+    size = add_size(size, qtupdate_shmem_size());
+
     return size;
 }
 
@@ -125,6 +129,9 @@ vexdb_vector_shmem_startup(void)
         /* Attaching to existing shared memory */
         vecbuf_shared_ctx = vecbuf_shared_state->vecbuf_ctx;
     }
+
+    /* PQ async-retrain task queue (runs for both first-init and attach) */
+    qtupdate_shmem_init();
 }
 
 static void
@@ -164,12 +171,21 @@ void _PG_init(void);
 
 void _PG_init(void)
 {
-    prev_shmem_request_hook = shmem_request_hook;
-    shmem_request_hook = vexdb_vector_shmem_request;
-    prev_shmem_startup_hook = shmem_startup_hook;
-    shmem_startup_hook = vexdb_vector_shmem_startup;
+    /* shmem hooks + GUC definitions must run exactly once, during
+     * shared_preload_libraries load. A bgworker whose bgw_library_name differs
+     * from the preloaded library file (e.g. launcher loads vexdb_vector.so while
+     * the cluster preloaded pg_vexdb.so) would otherwise re-enter _PG_init and
+     * re-DefineCustom the GUCs -> "attempt to redefine parameter" -> the worker
+     * exits(1) in a restart loop. Gate the once-only setup on the preload phase;
+     * GUCs are inherited by forked bgworkers anyway. */
+    if (process_shared_preload_libraries_in_progress) {
+        prev_shmem_request_hook = shmem_request_hook;
+        shmem_request_hook = vexdb_vector_shmem_request;
+        prev_shmem_startup_hook = shmem_startup_hook;
+        shmem_startup_hook = vexdb_vector_shmem_startup;
 
-    vexdb_vector_init_guc();
+        vexdb_vector_init_guc();
+    }
 
     /* Initialize distance functions */
     g_instance.annvec_cxt.l2_squared_distance = ann_helper::get_general_distance_func(Metric::L2);
@@ -207,5 +223,10 @@ void _PG_init(void)
     if (vexdb_vector_get_enable_vec_buffer_manager() &&
         process_shared_preload_libraries_in_progress) {
         register_vecbuf_workers();
+    }
+
+    /* PQ async-retrain launcher (resident; spawns per-task DB-connected workers) */
+    if (process_shared_preload_libraries_in_progress) {
+        qtupdate_register_launcher();
     }
 }

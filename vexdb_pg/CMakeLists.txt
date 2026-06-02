@@ -156,6 +156,7 @@ set(GRAPH_INDEX_SRCS
     src/graph_index/graph_index_utils.cpp
     src/graph_index/graph_index_vacuum.cpp
     src/graph_index/graph_index_qtupdate.cpp
+    src/graph_index/graph_index_qtupdate_worker.cpp
     src/floatvector.cpp
     src/ann_utils.cpp
     src/pg_yield.cpp

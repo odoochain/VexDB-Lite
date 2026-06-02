@@ -37,7 +37,7 @@ extern int maintenance_work_mem;
 /* Minimum live vectors before a retrain is worthwhile (also the PQ ksub floor). */
 static const size_t QTUPDATE_MIN_VECTORS = 256;
 
-static bool graph_index_qtupdate_internal(Oid index_oid)
+bool graph_index_qtupdate_internal(Oid index_oid)
 {
     Relation index = index_open(index_oid, AccessExclusiveLock);
     if (index->rd_index == NULL || !OidIsValid(index->rd_index->indrelid)) {
@@ -150,7 +150,7 @@ static bool graph_index_qtupdate_internal(Oid index_oid)
     table_close(heap, AccessShareLock);
     /* keep AccessExclusiveLock until transaction end */
     index_close(index, NoLock);
-    ereport(NOTICE, (errmsg("vexdb_graph: PQ codebook retrained over %zu vectors", num_vectors)));
+    ereport(LOG, (errmsg("vexdb_graph: PQ codebook retrained over %zu vectors", num_vectors)));
     return true;
 }
 

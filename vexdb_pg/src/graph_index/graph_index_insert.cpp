@@ -5,6 +5,7 @@
 #include "graph_index/graph_index.h"
 #include "graph_index/graph_index_algorithm.h"
 #include "graph_index/graph_index_xlog.h"
+#include "graph_index/graph_index_qtupdate_worker.h"
 #include "ann_utils.h"
 #include "distance/core/distance_dispatcher.h"
 #include "annkmeans.h"
@@ -88,11 +89,16 @@ bool graph_index_insert_internal(Relation index, Relation heap, Datum *values, c
         /* one-shot at ~20% drift; (size_t)nnd*5 == nv avoids the integer-division
          * ambiguity where nnd == nv/5 fires on two adjacent inserts. */
         if (nv >= 256 && (size_t)nnd * 5 == nv) {
-            ereport(NOTICE,
-                (errmsg("vexdb_graph: %u rows inserted since last PQ codebook train "
-                        "(~%d%% of %zu vectors); run SELECT index_qtupdate(<index>) to "
-                        "retrain and refresh recall",
-                        nnd, (int)(100 * nnd / nv), nv)));
+            /* Phase C: enqueue an async retrain (launcher spawns a DB-connected
+             * worker). Falls back to a NOTICE so the user can also retrain
+             * manually if the queue is full / the launcher is disabled. */
+            if (!qtupdate_submit(MyDatabaseId, RelationGetRelid(index))) {
+                ereport(NOTICE,
+                    (errmsg("vexdb_graph: %u rows inserted since last PQ codebook train "
+                            "(~%d%% of %zu vectors); run SELECT index_qtupdate(<index>) to "
+                            "retrain and refresh recall",
+                            nnd, (int)(100 * nnd / nv), nv)));
+            }
         }
     }
 
