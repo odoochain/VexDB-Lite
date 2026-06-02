@@ -153,9 +153,11 @@ CREATE OPERATOR <=> (
     COMMUTATOR = '<=>'
 );
 
--- Duck-side parity: <~> aliases <=> for cosine distance.
+-- Duck-side parity: <~> is negative inner product, matching DuckDB's <~> /
+-- list_negative_inner_product. (Same procedure as <#>; <#> is the pgvector-style
+-- alias, <~> keeps the operator token usable on DuckDB where # is a comment char.)
 CREATE OPERATOR <~> (
-    LEFTARG = floatvector, RIGHTARG = floatvector, PROCEDURE = cosine_distance,
+    LEFTARG = floatvector, RIGHTARG = floatvector, PROCEDURE = floatvector_negative_inner_product,
     COMMUTATOR = '<~>'
 );
 

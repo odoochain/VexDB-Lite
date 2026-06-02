@@ -27,28 +27,33 @@
 
 - `floatvector(N)` 向量类型
 - 距离函数与运算符：
-  - L2：`<->`
-  - Inner Product：`<#>`
-  - Cosine：`<=>`
+  - `l2_distance`（`<->`）
+  - `cosine_distance`（`<=>`）
+  - `inner_product`（负内积/最大内积检索用 `<~>`）
+- 标量工具：`vector_dims()`、`vector_norm()`、`l2_normalize()`、`vex_index_info()`
 - `CREATE INDEX ... USING vexdb_graph`
-- `m`、`ef_construction`、`parallel_workers` 等索引参数
-- `vexdb_vector.ef_search`、`vexdb_vector.vec_architecture` 等运行参数
+- 索引参数：`m`、`ef_construction`、`parallel_workers`（并行构建）、`quantizer` / `pq_m`（PQ）
+- 产品量化 PQ + compact 模式
 - 优化器生成 Index Scan，执行器走 ANN 索引检索
 - 共享内存向量缓存、并行建索引
+- 运行参数：`vexdb_vector.ef_search`、`vexdb_vector.vec_architecture`
 
-### 1.2 DuckDB：`vexdb_duckdb`
+### 1.2 DuckDB：`vexdb_vector`
 
 详见 [vexdb_duckdb/README.md](vexdb_duckdb/README.md)。当前能力：
 
 - `FLOAT[N]` 向量列上的 `GRAPH_INDEX`
-- 距离函数：`l2_distance` / `inner_product` / `cosine_distance` / `list_negative_inner_product`
-  > 注：DuckDB parser 不支持 pgvector 风格的 `<->` 操作符；统一用函数形式
+- 距离函数与运算符：
+  - `l2_distance`（`<->`）
+  - `cosine_distance`（`<=>`）
+  - `inner_product`（负内积/最大内积检索用 `<~>`）
 - 标量工具：`vector_dims()`、`l2_normalize()`、`vex_version()`、`vex_index_info()`
-- `CREATE INDEX ... USING GRAPH_INDEX (vec [, metadata...])` 含元数据过滤
-- DuckDB 优化器生成 `VEX_INDEX_SCAN`
+- `CREATE INDEX ... USING GRAPH_INDEX (vec [, metadata...])`，支持元数据过滤
+- 索引参数：`m`、`ef_construction`、`parallel_workers`（并行构建）、`quantizer` / `pq_m`（PQ）
 - 产品量化 PQ + compact 模式（百亿级内存优化）
-
-运行参数：`vex_ef_search`、`vex_brute_force_threshold`、`vex_pq_search_mode`、`vex_pq_refine_k_factor`
+- 优化器生成 `VEX_INDEX_SCAN`
+- 向量缓存、并行建索引
+- 运行参数：`vex_ef_search`、`vex_brute_force_threshold`、`vex_pq_search_mode`、`vex_pq_refine_k_factor`
 
 ---
 
@@ -78,7 +83,7 @@
 
 ## 3. PostgreSQL 语法示例
 
-### 2.1 安装与建表
+### 3.1 安装与建表
 
 ```sql
 CREATE EXTENSION vexdb_vector;
@@ -93,7 +98,7 @@ INSERT INTO items (vec) VALUES
     ('[0.40, 0.50, 0.60]');
 ```
 
-### 2.2 建索引
+### 3.2 建索引
 
 ```sql
 CREATE INDEX idx_items_vec
@@ -105,7 +110,7 @@ WITH (
 );
 ```
 
-#### 2.2.1 PQ 量化索引（v1）
+#### 3.2.1 PQ 量化索引（v1）
 
 启用 PQ 可将索引存储压缩约 16×。当前 v1 版本的使用规约：
 
@@ -135,7 +140,7 @@ SELECT indexname, use_pq, pq_m FROM vex_index_info()
 WHERE indexname = 'idx_pq';
 ```
 
-### 2.3 ANN 查询
+### 3.3 ANN 查询
 
 ```sql
 SET vexdb_vector.ef_search = 100;
@@ -147,7 +152,7 @@ ORDER BY vec <-> '[0.15, 0.25, 0.35]'
 LIMIT 10;
 ```
 
-### 2.4 其他距离
+### 3.4 其他距离
 
 ```sql
 SELECT id
@@ -163,9 +168,9 @@ LIMIT 10;
 
 ---
 
-## 3. DuckDB 语法示例
+## 4. DuckDB 语法示例
 
-### 3.1 加载扩展
+### 4.1 加载扩展
 
 ```sql
 LOAD '/path/to/vex.duckdb_extension';
@@ -181,7 +186,7 @@ con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
 con.execute("LOAD '/path/to/vex.duckdb_extension'")
 ```
 
-### 3.2 建表与建索引
+### 4.2 建表与建索引
 
 ```sql
 CREATE TABLE items (
@@ -200,7 +205,7 @@ WITH (
 );
 ```
 
-### 3.3 ANN 查询
+### 4.3 ANN 查询
 
 ```sql
 SET vexdb_vector.ef_search = 100;
@@ -211,7 +216,7 @@ ORDER BY l2_distance(vec, [0.15, 0.25, 0.35]::FLOAT[3])
 LIMIT 10;
 ```
 
-### 3.4 过滤索引示例
+### 4.4 过滤索引示例
 
 ```sql
 CREATE INDEX idx_items_vec_meta
@@ -225,7 +230,7 @@ ORDER BY l2_distance(vec, [0.15, 0.25, 0.35]::FLOAT[3])
 LIMIT 10;
 ```
 
-### 3.5 其他距离函数
+### 4.5 其他距离函数
 
 ```sql
 SELECT inner_product([1.0, 0.0]::FLOAT[2], [0.5, 0.5]::FLOAT[2]);
@@ -237,7 +242,7 @@ SELECT * FROM vex_index_info();
 
 ---
 
-## 4. 构建方法
+## 5. 构建方法
 
 > **预编译产物（推荐）**：见 [GitHub Releases](https://github.com/VexDB-THU/vexdb_lite/releases) 下载 `vex-duckdb-linux-<arch>.tar.gz` / `vexdb_vector-linux-<arch>-pg19.tar.gz`，无需本地编译。
 >
@@ -252,7 +257,7 @@ SELECT * FROM vex_index_info();
 > bash scripts/release.sh upload v0.1.0      # gh release upload
 > ```
 
-## 4.1 构建 PostgreSQL 版本
+### 5.1 构建 PostgreSQL 版本
 
 ### 依赖
 
@@ -313,7 +318,7 @@ CREATE EXTENSION vexdb_vector;
 
 ---
 
-## 4.2 构建 DuckDB 版本
+### 5.2 构建 DuckDB 版本
 
 **推荐方式：使用 `build_duck.sh`**（封装了 DuckDB clone、cmake 配置、编译、元数据处理全流程）
 
@@ -340,7 +345,7 @@ DuckDB 扩展需嵌入 DuckDB 源码树编译，无法单独 `cmake -B build vex
 
 ---
 
-## 运行测试
+## 6. 运行测试
 
 ### DuckDB 扩展测试
 
@@ -359,13 +364,13 @@ bash tests/spec/_lib/docker/run_pg.sh test      # 运行 PG spec 测试（需 Do
 
 ---
 
-## 5. 测试结果
+## 7. 测试结果
 
 数据集：SIFT-1M 128 维，`m=16`，`ef_construction=128`。列含义：`QPS（reads=1）` / `QPS（reads=16）` / `Recall@10`。
 
 测试环境：Intel Core Ultra 7-265K（20c/20t，3.9 GHz）/ 16 GB DDR5 / x86_64 Linux
 
-### 5.1 与 pgvector / VSS 对比（x86_64）
+### 7.1 与 pgvector / VSS 对比（x86_64）
 
 **ef_search = 50**
 
@@ -396,7 +401,7 @@ bash tests/spec/_lib/docker/run_pg.sh test      # 运行 PG spec 测试（需 Do
 
 ---
 
-## 6. 当前已知限制
+## 8. 当前已知限制
 
 详见 [docs/known-limitations/](docs/known-limitations/)。
 
@@ -415,7 +420,7 @@ bash tests/spec/_lib/docker/run_pg.sh test      # 运行 PG spec 测试（需 Do
 
 ---
 
-## 7. 仓库说明
+## 9. 仓库说明
 
 如果你只关心某一部分：
 
