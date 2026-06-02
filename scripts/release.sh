@@ -164,7 +164,7 @@ prepare_local() {
     # rsync 增量上传源码:本地 → 远程,跳过未变文件。不再 tar+scp(每次重传几十/几百 MB)。
     command -v rsync >/dev/null || fail "缺少 rsync(brew install rsync)"
 
-    [[ -d "$DUCKDB_SRC_LOCAL" ]] || fail "本地 DuckDB src 不存在: $DUCKDB_SRC_LOCAL；先跑 build_duck.sh setup"
+    [[ -d "${DUCKDB_SRC_LOCAL}" ]] || fail "本地 DuckDB src 不存在: ${DUCKDB_SRC_LOCAL} (先跑 build_duck.sh setup, 或从构建机 rsync 回 build/duck/duckdb_src)"
 
     ok "本地准备完成"
 }
