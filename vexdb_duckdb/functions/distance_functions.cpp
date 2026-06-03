@@ -257,9 +257,9 @@ void VexFunctions::Register(ExtensionLoader &loader) {
     loader.RegisterFunction(GetVectorAddFunction());
     loader.RegisterFunction(GetVectorSubFunction());
     loader.RegisterFunction(GetL2NormalizeFunction());
-    loader.RegisterFunction(ScalarFunction("vex_testvec3", {}, LogicalType::ARRAY(LogicalType::FLOAT, 3),
+    loader.RegisterFunction(ScalarFunction("vexdb_testvec3", {}, LogicalType::ARRAY(LogicalType::FLOAT, 3),
                                            VexTestVec3Function));
-    loader.RegisterFunction(ScalarFunction("vex_simd_arch", {}, LogicalType::VARCHAR,
+    loader.RegisterFunction(ScalarFunction("vexdb_simd_arch", {}, LogicalType::VARCHAR,
                                            VexSimdArchFunction));
     RegisterIndexInfoFunction(loader);
 }

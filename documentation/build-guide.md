@@ -1,6 +1,6 @@
 # 编译构建指南
 
-本文档说明如何从源码编译 VexDB 的 PostgreSQL 插件（`vexdb_vector.so`）和 DuckDB 扩展（`vex.duckdb_extension`）。
+本文档说明如何从源码编译 VexDB 的 PostgreSQL 插件（`vexdb_lite.so`）和 DuckDB 扩展（`vexdb_lite.duckdb_extension`）。
 
 ---
 
@@ -43,7 +43,7 @@ cmake -B build/pg vexdb_pg/ -DCMAKE_BUILD_TYPE=Release
 cmake --build build/pg -j$(nproc)
 
 # 产物
-ls build/pg/vexdb_vector.so
+ls build/pg/vexdb_lite.so
 ```
 
 CMake 自动调用 `pg_config` 查找 PostgreSQL 头文件。PG 在非标准路径时手动指定：
@@ -78,16 +78,16 @@ sudo cmake --install build/pg
 # 或手动拷贝
 PG_PKGLIB=$(pg_config --pkglibdir)
 PG_SHARE=$(pg_config --sharedir)/extension
-sudo cp build/pg/vexdb_vector.so ${PG_PKGLIB}/
-sudo cp vexdb_pg/vexdb_vector.control ${PG_SHARE}/
-sudo cp vexdb_pg/sql/vexdb_vector--1.0.sql ${PG_SHARE}/
+sudo cp build/pg/vexdb_lite.so ${PG_PKGLIB}/
+sudo cp vexdb_pg/vexdb_lite.control ${PG_SHARE}/
+sudo cp vexdb_pg/sql/vexdb_lite--1.0.sql ${PG_SHARE}/
 ```
 
 ### 在 PostgreSQL 中启用
 
 ```sql
-CREATE EXTENSION vexdb_vector;
-SELECT extversion FROM pg_extension WHERE extname = 'vexdb_vector';
+CREATE EXTENSION vexdb_lite;
+SELECT extversion FROM pg_extension WHERE extname = 'vexdb_lite';
 ```
 
 ---
@@ -98,14 +98,14 @@ DuckDB 扩展有两套构建路径，用途不同：
 
 ### 路径一：build_duck.sh（可加载扩展，生产用）
 
-产出 `vex.duckdb_extension`，作为独立文件通过 `LOAD` 加载到任意 DuckDB 实例。
+产出 `vexdb_lite.duckdb_extension`，作为独立文件通过 `LOAD` 加载到任意 DuckDB 实例。
 
 ```bash
 # Release 构建（首次会自动拉取 DuckDB v1.5.2 源码 ~1.5 GB）
 bash build_duck.sh build
 
 # 产物
-ls build/duck/build/extension/vex/vex.duckdb_extension
+ls build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension
 ```
 
 **子命令列表**（不含 `debug`）：
@@ -131,7 +131,7 @@ bash build_duck.sh clean && bash build_duck.sh build
 
 ### 路径二：build.sh（DuckDB 整体编译，调试 / 测试用）
 
-将 vex 扩展静态链接进 DuckDB 二进制，产出带 vex 的 `duckdb` CLI 和 `unittest` runner。适合本地功能调试和运行测试套件。
+将 vexdb_lite 扩展静态链接进 DuckDB 二进制，产出带 vexdb_lite 的 `duckdb` CLI 和 `unittest` runner。适合本地功能调试和运行测试套件。
 
 ```bash
 # Debug 构建
@@ -140,7 +140,7 @@ bash build.sh dev
 # Release 构建
 bash build.sh release
 
-# 构建并运行所有 vex 测试
+# 构建并运行所有 vexdb_lite 测试
 bash build.sh test
 
 # 只运行匹配 pattern 的测试
@@ -174,10 +174,10 @@ bash build_duck.sh unittest 'test/sql/vex/index/graph*'
 ### 加载扩展（路径一产物）
 
 ```sql
--- 允许加载未签名扩展（vex 扩展当前未签名）
+-- 允许加载未签名扩展（vexdb_lite 扩展当前未签名）
 SET allow_unsigned_extensions = true;
-LOAD '/path/to/vex.duckdb_extension';
-SELECT vex_version();
+LOAD '/path/to/vexdb_lite.duckdb_extension';
+SELECT vexdb_version();
 ```
 
 ---
@@ -208,12 +208,12 @@ bash scripts/release.sh package
 
 | 文件 | 说明 |
 |------|------|
-| `vex.duckdb_extension` | DuckDB 可加载扩展（stripped） |
-| `vex.duckdb_extension.unstripped` | 含调试符号的未 strip 版本 |
-| `vexdb_vector.so` | PG 插件（stripped，含 `.gnu_debuglink`） |
-| `vexdb_vector.so.debug` | PG 插件的独立 debug symbols（split-debug） |
-| `vexdb_vector.control` | PG 控制文件 |
-| `vexdb_vector--1.0.sql` | PG 安装 SQL |
+| `vexdb_lite.duckdb_extension` | DuckDB 可加载扩展（stripped） |
+| `vexdb_lite.duckdb_extension.unstripped` | 含调试符号的未 strip 版本 |
+| `vexdb_lite.so` | PG 插件（stripped，含 `.gnu_debuglink`） |
+| `vexdb_lite.so.debug` | PG 插件的独立 debug symbols（split-debug） |
+| `vexdb_lite.control` | PG 控制文件 |
+| `vexdb_lite--1.0.sql` | PG 安装 SQL |
 
 打包后的 Release tarballs（`dist/release/`）：
 
@@ -222,10 +222,10 @@ vex-duckdb-linux-x86_64.tar.gz
 vex-duckdb-linux-aarch64.tar.gz
 vex-duckdb-debugsymbols-linux-x86_64.tar.gz
 vex-duckdb-debugsymbols-linux-aarch64.tar.gz
-vexdb_vector-linux-x86_64-pg19.tar.gz
-vexdb_vector-linux-aarch64-pg19.tar.gz
-vexdb_vector-debugsymbols-linux-x86_64-pg19.tar.gz
-vexdb_vector-debugsymbols-linux-aarch64-pg19.tar.gz
+vexdb_lite-linux-x86_64-pg19.tar.gz
+vexdb_lite-linux-aarch64-pg19.tar.gz
+vexdb_lite-debugsymbols-linux-x86_64-pg19.tar.gz
+vexdb_lite-debugsymbols-linux-aarch64-pg19.tar.gz
 SHA256SUMS.txt
 ```
 
@@ -259,7 +259,7 @@ SELECT version();  -- 确认为 v1.5.2
 
 ### GLIBCXX 版本不满足
 
-`vex.duckdb_extension`（manylinux_2_28 编译）要求 `GLIBCXX_3.4.22`；`vexdb_vector.so`（host GCC 编译）要求 `GLIBCXX_3.4.26`（x86）。CentOS 7 需升级：
+`vexdb_lite.duckdb_extension`（manylinux_2_28 编译）要求 `GLIBCXX_3.4.22`；`vexdb_lite.so`（host GCC 编译）要求 `GLIBCXX_3.4.26`（x86）。CentOS 7 需升级：
 
 ```bash
 conda install -c conda-forge libstdcxx-ng

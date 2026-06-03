@@ -1,40 +1,40 @@
-name: graph_index_vex_index_info_no_crash
+name: graph_index_vexdb_index_info_no_crash
 tags: [vex, regression, must-not-crash]
-description: vex_index_info on a complex DROP/CREATE/vacuum/merge sequence must not crash. Empty index should return max_level = -1; rebuilt index should return max_level >= 0; repeated calls and ORDER BY on vex_index_info must all be stable.
+description: vexdb_index_info on a complex DROP/CREATE/vacuum/merge sequence must not crash. Empty index should return max_level = -1; rebuilt index should return max_level >= 0; repeated calls and ORDER BY on vexdb_index_info must all be stable.
 engines: [duckdb]
 steps:
   - statement: DROP TABLE IF EXISTS t_1079222 CASCADE;
   - statement: CREATE TABLE t_1079222 (id INTEGER, vec ${VECTOR(4)});
-  # 空表 + 索引 → vex_index_info 应返回 max_level = -1 (空索引)
+  # 空表 + 索引 → vexdb_index_info 应返回 max_level = -1 (空索引)
   - statement: CREATE INDEX idx_1079222a ON t_1079222 USING ${VEX_INDEX}(vec${OPS_L2_COL})${IDX_OPTS_L2};
-  - query: SELECT (max_level = -1)::INTEGER FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_1079222a';
+  - query: SELECT (max_level = -1)::INTEGER FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_1079222a';
     _field_types: I
     expect:
       - - 1
 
-  # 插入数据 → drop index → 重 create → vex_index_info 应正常
+  # 插入数据 → drop index → 重 create → vexdb_index_info 应正常
   - statement: |
       INSERT INTO t_1079222
       SELECT i, ${VEC_LITERAL([(i*0.1)::FLOAT, (i*0.2)::FLOAT, (i*0.3)::FLOAT, (i*0.4)::FLOAT], 4)}
       FROM ${RANGE(500)} t(i);
   - statement: DROP INDEX idx_1079222a;
   - statement: CREATE INDEX idx_1079222b ON t_1079222 USING ${VEX_INDEX}(vec${OPS_L2_COL})${IDX_OPTS_L2};
-  - query: SELECT (max_level >= 0)::INTEGER FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_1079222b';
+  - query: SELECT (max_level >= 0)::INTEGER FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_1079222b';
     _field_types: I
     expect:
       - - 1
 
-  # 大量重复 vex_index_info() 调用 (复现 reporter 场景里的多次 select)
-  - query: SELECT count(*)::INTEGER FROM vex_index_info();
+  # 大量重复 vexdb_index_info() 调用 (复现 reporter 场景里的多次 select)
+  - query: SELECT count(*)::INTEGER FROM vexdb_index_info();
     _field_types: I
     expect:
       - - 1
-  - query: SELECT count(*)::INTEGER FROM vex_index_info();
+  - query: SELECT count(*)::INTEGER FROM vexdb_index_info();
     _field_types: I
     expect:
       - - 1
-  # 直接对 vex_index_info 排序应该也不 crash (复现 reporter 的 ORDER BY index_name 路径)
-  - query: SELECT (count(*) > 0)::INTEGER FROM (SELECT * FROM vex_index_info() ORDER BY index_name) s;
+  # 直接对 vexdb_index_info 排序应该也不 crash (复现 reporter 的 ORDER BY index_name 路径)
+  - query: SELECT (count(*) > 0)::INTEGER FROM (SELECT * FROM vexdb_index_info() ORDER BY index_name) s;
     _field_types: I
     expect:
       - - 1

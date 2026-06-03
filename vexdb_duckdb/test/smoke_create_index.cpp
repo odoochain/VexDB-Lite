@@ -94,11 +94,11 @@ int main(int argc, char **argv) {
         }
         ExecOrThrow(con, "CREATE INDEX idx_t_vec ON t USING GRAPH_INDEX (vec) WITH (metric='l2')");
         auto explain =
-            QueryToString(con, "EXPLAIN SELECT id FROM t ORDER BY l2_distance(vec, vex_testvec3()) LIMIT 1");
-        if (explain.find("VEX_INDEX_SCAN") == std::string::npos) {
-            throw std::runtime_error("expected VEX_INDEX_SCAN in plan, got:\n" + explain);
+            QueryToString(con, "EXPLAIN SELECT id FROM t ORDER BY l2_distance(vec, vexdb_testvec3()) LIMIT 1");
+        if (explain.find("VEXDB_INDEX_SCAN") == std::string::npos) {
+            throw std::runtime_error("expected VEXDB_INDEX_SCAN in plan, got:\n" + explain);
         }
-        auto id = QuerySingleInt(con, "SELECT id FROM t ORDER BY l2_distance(vec, vex_testvec3()) LIMIT 1");
+        auto id = QuerySingleInt(con, "SELECT id FROM t ORDER BY l2_distance(vec, vexdb_testvec3()) LIMIT 1");
         if (id != 1) {
             throw std::runtime_error("expected nearest id=1, got id=" + std::to_string(id));
         }

@@ -8,7 +8,7 @@ import duckdb, h5py, numpy as np, pyarrow as pa
 import time, threading, argparse, statistics
 
 DATA = "/home/ecs-user/ann-bench-data/sift-128-euclidean.hdf5"
-VEX_EXT = "/home/ecs-user/.duckdb_vex/vex.duckdb_extension"
+VEX_EXT = "/home/ecs-user/.duckdb_vex/vexdb_lite.duckdb_extension"
 DIM = 128
 K = 10
 M = 16
@@ -43,7 +43,7 @@ ENGINES = {
         index=f"CREATE INDEX vexidx ON base USING GRAPH_INDEX (vec) "
                f"WITH (m={M}, ef_construction={EFC}, metric='l2', threads=16)",
         distfn="l2_distance",
-        efs=lambda efs: f"SET vex_ef_search={efs}",
+        efs=lambda efs: f"SET vexdb_ef_search={efs}",
     ),
     "vss": dict(
         load=["INSTALL vss", "LOAD vss"],

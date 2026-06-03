@@ -10,7 +10,7 @@ engines:
 - duckdb
 - pg
 - opengauss
-description: Verify PQ is actually wired up — vex_index_info() reflects training,
+description: Verify PQ is actually wired up — vexdb_index_info() reflects training,
 steps:
 - statement: SET ${GUC_BF_THRESHOLD} = 0;
 - raw_directive: load __TEST_DIR__/pq_real.db
@@ -19,27 +19,27 @@ steps:
     \ 8)}\nFROM ${RANGE(500)} t(i);"
 - statement: CREATE INDEX idx_plain ON pq_t USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_OPTS_L2};
 - statement: CREATE INDEX idx_pq ON pq_t USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_WITH_L2(quantizer = 'pq', pq_m = 4)};
-- query: SELECT use_pq FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_plain';
+- query: SELECT use_pq FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_plain';
   _field_types: I
   expect:
   - - 'false'
-- query: SELECT use_pq FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
+- query: SELECT use_pq FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
   _field_types: I
   expect:
   - - 'true'
-- query: SELECT pq_m FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
+- query: SELECT pq_m FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
   _field_types: I
   expect:
   - - 4
-- query: SELECT pq_codebook_bytes FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
+- query: SELECT pq_codebook_bytes FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
   _field_types: I
   expect:
   - - 8192
-- query: SELECT pq_codes_bytes FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
+- query: SELECT pq_codes_bytes FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
   _field_types: I
   expect:
   - - 2000
-- query: SELECT pq_codebook_bytes, pq_codes_bytes FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_plain';
+- query: SELECT pq_codebook_bytes, pq_codes_bytes FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_plain';
   _field_types: II
   expect:
   - - 0
@@ -51,19 +51,19 @@ steps:
 - statement: CHECKPOINT;
 - raw_directive: restart
 - statement: SET ${GUC_BF_THRESHOLD} = 0;
-- query: SELECT use_pq FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
+- query: SELECT use_pq FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
   _field_types: I
   expect:
   - - 'true'
-- query: SELECT pq_m FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
+- query: SELECT pq_m FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
   _field_types: I
   expect:
   - - 4
-- query: SELECT pq_codebook_bytes FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
+- query: SELECT pq_codebook_bytes FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
   _field_types: I
   expect:
   - - 8192
-- query: SELECT pq_codes_bytes FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
+- query: SELECT pq_codes_bytes FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq';
   _field_types: I
   expect:
   - - 2000

@@ -275,12 +275,12 @@ build_duck() {
 
     validate_duck "$arch" || fail "$arch DuckDB smoke 失败"
 
-    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vex/vex.duckdb_extension" "$outdir/"
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension" "$outdir/"
     # Pull the unstripped copy too — kept in dist/<arch>/ for our gdb work,
     # excluded from packaging by .gitignore + cmd_package's explicit allowlist.
-    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vex/vex.duckdb_extension.unstripped" "$outdir/" \
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension.unstripped" "$outdir/" \
         2>/dev/null || info "  (unstripped 未拉到本地，本机调试时再 scp)"
-    ok "$arch DuckDB ext: $(ls -lh "$outdir/vex.duckdb_extension" | awk '{print $5}')"
+    ok "$arch DuckDB ext: $(ls -lh "$outdir/vexdb_lite.duckdb_extension" | awk '{print $5}')"
 }
 
 # host gcc 10.3 路径——快但产物有 GLIBCXX_3.4.26 依赖，仅 dev / 内部测试用。
@@ -313,7 +313,7 @@ _build_duck_host() {
     info "$arch strip + reseal footer"
     rssh "$arch" "$env_setup \
         cd ~/$REMOTE_DIR/vexdb_lite && \
-        TMPDIR=\$HOME/tmpdir UNSTRIPPED_OUT=build/duck/build/extension/vex/vex.duckdb_extension.unstripped \
+        TMPDIR=\$HOME/tmpdir UNSTRIPPED_OUT=build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension.unstripped \
         bash build_duck.sh strip" || return 1
 }
 
@@ -381,7 +381,7 @@ _build_duck_manylinux() {
             # — host (macOS) 上 build_duck.sh setup 生成的版本写死了本地绝对路径
             # (/Users/Four/...), rsync 同步到容器后 cmake add_subdirectory 找不到.
             cat > build/duck/duckdb_src/extension/extension_config_local.cmake <<CFGEOF
-duckdb_extension_load(vex
+duckdb_extension_load(vexdb_lite
     SOURCE_DIR /work/vexdb_duckdb
     INCLUDE_DIR /work/vexdb_duckdb/include
     LOAD_TESTS
@@ -389,7 +389,7 @@ duckdb_extension_load(vex
 CFGEOF
             ${clean_step_in_container}
             bash build_duck.sh build
-            UNSTRIPPED_OUT=build/duck/build/extension/vex/vex.duckdb_extension.unstripped \
+            UNSTRIPPED_OUT=build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension.unstripped \
               bash build_duck.sh strip
             chown -R $host_uid:$host_gid build/duck/build build_duck.sh
         '" || return 1
@@ -405,11 +405,11 @@ CFGEOF
 validate_duck() {
     local arch=$1
     info "$arch DuckDB smoke 验证（ELF + 入口符号 + footer + LOAD）"
-    local ext_path="~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vex/vex.duckdb_extension"
+    local ext_path="~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension"
     rssh "$arch" "set -e
         test -f $ext_path
         file $ext_path | grep -q ELF
-        nm -D $ext_path 2>/dev/null | grep -qE 'vex_duckdb.*init|vex_init|duckdb_init'
+        nm -D $ext_path 2>/dev/null | grep -qE 'vexdb_lite.*init'
         test \$(stat -c %s $ext_path) -gt 1048576
         # footer canary — append_metadata.cmake 写入的 custom-section 名字
         grep -aq duckdb_signature $ext_path || { echo 'missing footer'; exit 1; }" \
@@ -430,14 +430,14 @@ validate_duck() {
     fi
     rssh "$arch" "set -e
         $ld_setup
-        EXT=\$HOME/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vex/vex.duckdb_extension
+        EXT=\$HOME/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension
         CLI=
         for cand in \$HOME/$REMOTE_DIR/vexdb_lite/build/duck/build/duckdb \$HOME/duckdb_cli_1_5_2 /tmp/duckdb; do
             [ -x \"\$cand\" ] && { CLI=\$cand; break; }
         done
         if [ -n \"\$CLI\" ]; then
             echo \"  using CLI: \$CLI\"
-            \"\$CLI\" -unsigned -c \"LOAD '\$EXT'; SELECT vex_version();\" 2>&1 | tail -3
+            \"\$CLI\" -unsigned -c \"LOAD '\$EXT'; SELECT vexdb_version();\" 2>&1 | tail -3
         else
             echo '  (skip LOAD smoke: 找不到任何 duckdb CLI)'
         fi" \
@@ -462,7 +462,7 @@ build_pg() {
             export LD_LIBRARY_PATH=\$GCC/lib64:\${LD_LIBRARY_PATH:-} && \
             export CC=\$GCC/bin/gcc CXX=\$GCC/bin/g++ &&"
     fi
-    # 构建产物 vexdb_vector.so 落仓库根,供后续 split-debug / 下载。
+    # 构建产物 vexdb_lite.so 落仓库根,供后续 split-debug / 下载。
     # MANYLINUX=1(默认):在 manylinux_2_28 派生镜像(scripts/docker/Dockerfile.pg-manylinux,
     #   内含 PG 16-19)里编 → 产物 GLIBC_2.17 可移植。MANYLINUX=0:host build(绑构建机 glibc)。
     if [[ "${MANYLINUX:-1}" == "1" ]]; then
@@ -476,7 +476,7 @@ build_pg() {
             pg19) pgc=/opt/pg19/bin/pg_config ;;
             *)    fail "$PG_VERSION 无对应 manylinux 容器内 pg_config（仅 pg16-19）" ;;
         esac
-        section "$arch build vexdb_vector ($PG_VERSION, manylinux 容器)"
+        section "$arch build vexdb_lite ($PG_VERSION, manylinux 容器)"
         rssh "$arch" "$docker_pfx image inspect $image >/dev/null 2>&1" \
             || fail "$arch manylinux 镜像 $image 不在；先 docker build -f scripts/docker/Dockerfile.pg-manylinux"
         host_uid=$(rssh "$arch" 'id -u'); host_gid=$(rssh "$arch" 'id -g')
@@ -490,47 +490,47 @@ build_pg() {
                 ${CLEAN_BUILD:+rm -rf build/pg-ml-$PG_VERSION;} mkdir -p build/pg-ml-$PG_VERSION && cd build/pg-ml-$PG_VERSION
                 PG_CONFIG=$pgc cmake ../../vexdb_pg -DCMAKE_BUILD_TYPE=Release -DBOOST_FALLBACK_INC=/opt/boost
                 cmake --build . -j8
-                cp vexdb_vector.so /work/vexdb_vector.so
-                chown -R $host_uid:$host_gid /work/build/pg-ml-$PG_VERSION /work/vexdb_vector.so
+                cp vexdb_lite.so /work/vexdb_lite.so
+                chown -R $host_uid:$host_gid /work/build/pg-ml-$PG_VERSION /work/vexdb_lite.so
             '" || fail "$arch $PG_VERSION manylinux build 失败"
     else
-        section "$arch build vexdb_vector ($PG_VERSION, cmake host)"
+        section "$arch build vexdb_lite ($PG_VERSION, cmake host)"
         rssh "$arch" "mkdir -p \$HOME/tmpdir && \
             $env_setup \
             cd ~/$REMOTE_DIR/vexdb_lite && \
             ${CLEAN_BUILD:+rm -rf build/pg-$PG_VERSION &&} mkdir -p build/pg-$PG_VERSION && cd build/pg-$PG_VERSION && \
             TMPDIR=\$HOME/tmpdir PG_CONFIG=$pg_config cmake ../../vexdb_pg -DCMAKE_BUILD_TYPE=Release -DBOOST_FALLBACK_INC=$boost && \
             TMPDIR=\$HOME/tmpdir cmake --build . -j8 && \
-            cp vexdb_vector.so ../../vexdb_vector.so" \
+            cp vexdb_lite.so ../../vexdb_lite.so" \
             || fail "$arch PG build 失败"
     fi
 
     # Split debug: standard GNU binutils workflow (Fedora/Debian also use this
-    # for their PG -dbgsym packages). Produces vexdb_vector.so (stripped, light) and
-    # vexdb_vector.so.debug (heavy companion). The .debug carries .debug_info etc.
+    # for their PG -dbgsym packages). Produces vexdb_lite.so (stripped, light) and
+    # vexdb_lite.so.debug (heavy companion). The .debug carries .debug_info etc.
     # and is linked back via .gnu_debuglink so gdb auto-loads it whenever both
     # files sit next to each other (or .debug is placed under
     # /usr/lib/debug/.build-id/ matching the .so's .note.gnu.build-id).
     # 旧 Makefile 的 split-debug target 随 Makefile 删除,这里直接走 binutils 流程。
     info "$arch split-debug"
     rssh "$arch" "cd ~/$REMOTE_DIR/vexdb_lite && \
-        objcopy --only-keep-debug vexdb_vector.so vexdb_vector.so.debug && \
-        strip --strip-unneeded vexdb_vector.so && \
-        objcopy --add-gnu-debuglink=vexdb_vector.so.debug vexdb_vector.so && \
-        chmod -x vexdb_vector.so.debug" \
+        objcopy --only-keep-debug vexdb_lite.so vexdb_lite.so.debug && \
+        strip --strip-unneeded vexdb_lite.so && \
+        objcopy --add-gnu-debuglink=vexdb_lite.so.debug vexdb_lite.so && \
+        chmod -x vexdb_lite.so.debug" \
         || fail "$arch split-debug 失败"
 
     validate_pg "$arch" || fail "$arch PG smoke 失败"
 
     mkdir -p "$outdir"
-    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_vector.so" "$outdir/"
-    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_vector.so.debug" "$outdir/"
-    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_pg/vexdb_vector.control" "$outdir/"
-    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_pg/sql/vexdb_vector--1.0.sql" "$outdir/"
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_lite.so" "$outdir/"
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_lite.so.debug" "$outdir/"
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_pg/vexdb_lite.control" "$outdir/"
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/vexdb_pg/sql/vexdb_lite--1.0.sql" "$outdir/"
 }
 
 # PG smoke：替换远程现成 PG 的 .so + CREATE EXTENSION + 最小 ANN 查询。
-# 远程 PG 已部署 vexdb_vector，备份原 .so 后用新 .so 覆盖，跑完恢复（避免污染共用环境）。
+# 远程 PG 已部署 vexdb_lite，备份原 .so 后用新 .so 覆盖，跑完恢复（避免污染共用环境）。
 validate_pg() {
     local arch=$1 pg_config
     [[ "$arch" == "x86" ]] && pg_config="$X86_PG_CONFIG" || pg_config="$ARM_PG_CONFIG"
@@ -539,8 +539,8 @@ validate_pg() {
     rssh "$arch" "set -e
         PG_LIB=\$($pg_config --pkglibdir)
         PG_SHARE=\$($pg_config --sharedir)/extension
-        SO=~/$REMOTE_DIR/vexdb_lite/vexdb_vector.so
-        SO_DBG=~/$REMOTE_DIR/vexdb_lite/vexdb_vector.so.debug
+        SO=~/$REMOTE_DIR/vexdb_lite/vexdb_lite.so
+        SO_DBG=~/$REMOTE_DIR/vexdb_lite/vexdb_lite.so.debug
         # 1. 符号检查：PG 扩展必须有 Pg_magic_func
         nm -D \$SO 2>/dev/null | grep -q Pg_magic_func || { echo 'no Pg_magic_func symbol'; exit 1; }
         # 2. split-debug 卫生检查：build-id + debuglink section + .debug 文件
@@ -549,10 +549,10 @@ validate_pg() {
         test -f \$SO_DBG || { echo 'companion .debug missing'; exit 1; }
         readelf -n \$SO_DBG 2>/dev/null | grep -q 'Build ID:' || { echo '.debug missing build-id'; exit 1; }
         # 2. 覆盖部署 + 跑 smoke + 恢复（如果有权限）
-        if [ -z "$SKIP_PG_SMOKE" ] && [ -w \"\$PG_LIB/vexdb_vector.so\" ]; then
-            cp \"\$PG_LIB/vexdb_vector.so\" \"\$PG_LIB/vexdb_vector.so.bak\"
-            cp \$SO \"\$PG_LIB/vexdb_vector.so\"
-            trap 'cp \"\$PG_LIB/vexdb_vector.so.bak\" \"\$PG_LIB/vexdb_vector.so\" && rm \"\$PG_LIB/vexdb_vector.so.bak\"' EXIT
+        if [ -z "$SKIP_PG_SMOKE" ] && [ -w \"\$PG_LIB/vexdb_lite.so\" ]; then
+            cp \"\$PG_LIB/vexdb_lite.so\" \"\$PG_LIB/vexdb_lite.so.bak\"
+            cp \$SO \"\$PG_LIB/vexdb_lite.so\"
+            trap 'cp \"\$PG_LIB/vexdb_lite.so.bak\" \"\$PG_LIB/vexdb_lite.so\" && rm \"\$PG_LIB/vexdb_lite.so.bak\"' EXIT
             psql -p ${PG_SMOKE_PORT:-5532} -d spec_test -At -c \"DROP TABLE IF EXISTS vex_smoke;
                 CREATE TABLE vex_smoke(id INT, v floatvector(3));
                 INSERT INTO vex_smoke VALUES (1,'[1,0,0]'),(2,'[0,1,0]'),(3,'[0,0,1]');
@@ -562,7 +562,7 @@ validate_pg() {
         else
             echo '(skip in-PG smoke: no write perm to \$PG_LIB; ABI 符号检查通过)'
         fi"
-    ok "$arch vexdb_vector.so: $(ls -lh "$outdir/vexdb_vector.so" | awk '{print $5}')"
+    ok "$arch vexdb_lite.so: $(ls -lh "$outdir/vexdb_lite.so" | awk '{print $5}')"
 }
 
 # ============================================================
@@ -596,7 +596,7 @@ cmd_build() {
     fi
 
     section "build 完成"
-    find "$DIST_DIR" -maxdepth 2 -type f \( -name "*.duckdb_extension" -o -name "vexdb_vector.so" \
+    find "$DIST_DIR" -maxdepth 2 -type f \( -name "*.duckdb_extension" -o -name "vexdb_lite.so" \
         -o -name "*.control" -o -name "*.sql" \) -exec ls -lh {} \;
 }
 
@@ -624,7 +624,7 @@ cmd_package() {
     # v0.0.6 踩过坑: macOS 上 BSD tar 默认把扩展属性 (xattr / quarantine /
     # provenance) 落成 `._<filename>` AppleDouble 文件混进 tarball,在
     # macOS 上 `tar -tzf` 又故意把 `._*` 当 xattr 隐藏不显示 → 发版前看
-    # 不见,Linux 用户解包后 PG 扫 `*.control` glob 把 `._vexdb_vector.control`
+    # 不见,Linux 用户解包后 PG 扫 `*.control` glob 把 `._vexdb_lite.control`
     # 一起读 → "syntax error in file ... near token \"\""。
     # 修法:
     #   1. COPYFILE_DISABLE=1 关掉 macOS 写 AppleDouble 的源头
@@ -654,17 +654,17 @@ cmd_package() {
         # 打包前清掉源目录里残留的 AppleDouble (防御性,正常情况下不该有)
         find "$archdir" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null
 
-        if [[ -f "$archdir/vex.duckdb_extension" ]]; then
+        if [[ -f "$archdir/vexdb_lite.duckdb_extension" ]]; then
             pkg_tar "$RELEASE_DIR/vexdb-lite-duckdb-linux-${arch}.tar.gz" "$archdir" \
-                vex.duckdb_extension
+                vexdb_lite.duckdb_extension
         fi
 
         # Duck debug symbols 单独 ship,跟 PG 对齐(参 line 483 注释)。Duck 走
         # unstripped 全量(没做 objcopy split-debug),比 PG 的 .so.debug 大但
         # 客户没出 crash 用不到;命名跟 PG 对齐用 -debugsymbols- 后缀。
-        if [[ -f "$archdir/vex.duckdb_extension.unstripped" ]]; then
+        if [[ -f "$archdir/vexdb_lite.duckdb_extension.unstripped" ]]; then
             pkg_tar "$RELEASE_DIR/vexdb-lite-duckdb-debugsymbols-linux-${arch}.tar.gz" "$archdir" \
-                vex.duckdb_extension.unstripped
+                vexdb_lite.duckdb_extension.unstripped
         fi
 
         # PG：每个版本从 $archdir/<版本> 子目录打包（build_pg 已按版本下载到子目录）。
@@ -674,13 +674,13 @@ cmd_package() {
         # via .gnu_debuglink CRC + .note.gnu.build-id match).
         for entry in $PG_VERSIONS; do
             local pgver="${entry%%:*}" pgdir="$archdir/${entry%%:*}"
-            if [[ -f "$pgdir/vexdb_vector.so" ]]; then
+            if [[ -f "$pgdir/vexdb_lite.so" ]]; then
                 pkg_tar "$RELEASE_DIR/vexdb-lite-${pgver}-linux-${arch}.tar.gz" "$pgdir" \
-                    vexdb_vector.so vexdb_vector.control vexdb_vector--1.0.sql
+                    vexdb_lite.so vexdb_lite.control vexdb_lite--1.0.sql
             fi
-            if [[ -f "$pgdir/vexdb_vector.so.debug" ]]; then
+            if [[ -f "$pgdir/vexdb_lite.so.debug" ]]; then
                 pkg_tar "$RELEASE_DIR/vexdb-lite-${pgver}-debugsymbols-linux-${arch}.tar.gz" "$pgdir" \
-                    vexdb_vector.so.debug
+                    vexdb_lite.so.debug
             fi
         done
     done

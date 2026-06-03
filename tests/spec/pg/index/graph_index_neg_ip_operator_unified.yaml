@@ -1,0 +1,39 @@
+name: graph_index_neg_ip_operator_unified
+tags:
+- pg-only
+- regression
+description: |
+  负内积运算符 <~> 与 <#> 都挂 floatvector_ip_ops opclass（同为负内积，
+  metric 来自索引元数据 FUNCTION 1）。enable_seqscan=off 下两者都必须走
+  vexdb_graph IP 索引并返回相同 top-k —— 这是 PG/DuckDB 跨引擎统一的关键
+  （DuckDB 负内积用 <~>，PG 通过此 opclass 别名让 <~> 同样可用且走索引）。
+  <#> 为 pgvector 兼容写法，<~> 为跨引擎统一写法。
+engines:
+- pg
+steps:
+- statement: DROP TABLE IF EXISTS t_negip CASCADE;
+- statement: CREATE TABLE t_negip (id int, v floatvector(4));
+- statement: "INSERT INTO t_negip SELECT i, ('[' || i || ',1,2,3]')::floatvector(4) FROM generate_series(1,200) i;"
+- statement: CREATE INDEX idx_negip ON t_negip USING vexdb_graph (v floatvector_ip_ops);
+- statement: ANALYZE t_negip;
+- statement: SET enable_seqscan = off;
+- statement: SET vexdb.ef_search = 100;
+# <#>（pgvector 兼容）走 IP 索引，返回 k 行
+- query: SELECT count(*) FROM (SELECT id FROM t_negip ORDER BY v <#> '[150,1,2,3]'::floatvector(4) LIMIT 10) s;
+  expect:
+  - - "10"
+# <~>（跨引擎统一）走同一 IP 索引（opclass strategy 2），同样返回 k 行
+- query: SELECT count(*) FROM (SELECT id FROM t_negip ORDER BY v <~> '[150,1,2,3]'::floatvector(4) LIMIT 10) s;
+  expect:
+  - - "10"
+# <~> 与 <#> 同为负内积，top-k 必须完全一致（用 EXCEPT 校验差集为空）
+- query: |
+    SELECT count(*) FROM (
+      (SELECT id FROM t_negip ORDER BY v <#> '[150,1,2,3]'::floatvector(4) LIMIT 10)
+      EXCEPT
+      (SELECT id FROM t_negip ORDER BY v <~> '[150,1,2,3]'::floatvector(4) LIMIT 10)
+    ) d;
+  expect:
+  - - "0"
+- statement: RESET enable_seqscan;
+- statement: DROP TABLE t_negip;

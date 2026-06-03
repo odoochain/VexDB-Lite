@@ -207,7 +207,7 @@ static bool FindGetChild(LogicalOperator &child, GetChildInfo &info) {
             }
             // CROSS_PRODUCT -> [FILTER -> GET, subquery]: WHERE clause + scalar
             // subquery query vector. Rewrite the GET; FILTER stays where it is and
-            // post-filters VEX_INDEX_SCAN's row_id-fetched output.
+            // post-filters VEXDB_INDEX_SCAN's row_id-fetched output.
             if (cp_child->type == LogicalOperatorType::LOGICAL_FILTER &&
                 cp_child->children.size() == 1 &&
                 cp_child->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
@@ -252,7 +252,7 @@ struct IndexMatch {
 // burning budget on filters that are barely selective at all.
 static constexpr idx_t kDefaultOversampleFactor = 4;
 
-// Decide how many rows VEX_INDEX_SCAN should produce so that, after the post-filter
+// Decide how many rows VEXDB_INDEX_SCAN should produce so that, after the post-filter
 // trims, the outer TOPN still has at least k rows. When cardinality estimates are
 // unavailable or the filter isn't selective, fall back to k * factor; clamp to the
 // table's row count so we never ask for more than exists.
@@ -338,7 +338,7 @@ static bool TryOptimizeANN(ClientContext &context, unique_ptr<LogicalOperator> &
 
     // dynamic_filters are runtime-built (semi-join pruning etc.) and not safe to
     // lift; bail. table_filters from static pushdown are lifted back into a
-    // LogicalFilter above VEX_INDEX_SCAN below.
+    // LogicalFilter above VEXDB_INDEX_SCAN below.
     if (get->dynamic_filters && get->dynamic_filters->HasFilters()) {
         return false;
     }
@@ -410,7 +410,7 @@ static bool TryOptimizeANN(ClientContext &context, unique_ptr<LogicalOperator> &
     unique_ptr<LogicalOperator> replacement = std::move(scan);
     if (has_lifted_filter) {
         // Reconstruct a LogicalFilter from predicates that DuckDB had pushed into
-        // LogicalGet.table_filters. VEX_INDEX_SCAN fetches by row_id and doesn't
+        // LogicalGet.table_filters. VEXDB_INDEX_SCAN fetches by row_id and doesn't
         // honor table_filters; wrapping with a LogicalFilter restores correctness
         // and lets the over-sampled k_scan above provide enough candidates so the
         // outer TOP-N still receives k results after this filter trims.

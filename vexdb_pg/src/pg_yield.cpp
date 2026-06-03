@@ -1,6 +1,6 @@
 /**
  * Copyright (c) 2024, openGauss Contributors
- * Copyright (c) 2024, vexdb_vector Contributors
+ * Copyright (c) 2024, vexdb_lite Contributors
  * 
  * A mimic to boost rw_spinlock::yield
  * Copied from openGauss src/gausskernel/storage/access/annvector/module/pg_yield.cpp

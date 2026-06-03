@@ -1,9 +1,9 @@
-# PG 19devel + pg_vexdb 测试镜像
+# PG 19devel + vexdb_lite 测试镜像
 #
 # 多阶段构建:
 #   stage 1 (pg-build):  从源码 build PG 19devel
-#   stage 2 (vex-build): build pg_vexdb 扩展, 链到上一阶段的 PG
-#   stage 3 (runtime):   运行环境 - 含 PG server + pg_vexdb 已安装
+#   stage 2 (vex-build): build vexdb_lite 扩展, 链到上一阶段的 PG
+#   stage 3 (runtime):   运行环境 - 含 PG server + vexdb_lite 已安装
 #
 # Build:
 #   docker build -t vexdb-pg19 -f tests/spec/_lib/docker/Dockerfile .
@@ -33,7 +33,7 @@ RUN ./configure --prefix=/opt/pg19 --enable-debug --enable-cassert \
     && make install \
     && cd contrib && make -j${JOBS} && make install
 
-# ─────────────────────────── stage 2: build pg_vexdb ─────────────────────────────
+# ─────────────────────────── stage 2: build vexdb_lite ─────────────────────────────
 FROM pg-build AS vex-build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -46,9 +46,9 @@ ENV PATH=/opt/pg19/bin:$PATH
 ENV PG_CONFIG=/opt/pg19/bin/pg_config
 
 # 通过 build 上下文挂载 PG_VEXDB 源码 (需要 build 时把它放在上下文里)
-COPY pg_vexdb_src /src/pg_vexdb
+COPY vexdb_lite_src /src/vexdb_lite
 
-WORKDIR /src/pg_vexdb
+WORKDIR /src/vexdb_lite
 # - 替换硬编码 PG_CONFIG
 # - ARM64 注入 -DFLT16_SUPPORT (用 (float)__fp16 cast 走 std::isnan, 避免 __fp16 直接位运算)
 # - GCC 14 严格化对部分 const 用法报错, 加 -fpermissive 兜底
@@ -74,7 +74,7 @@ USER postgres
 WORKDIR /home/postgres
 
 RUN /opt/pg19/bin/initdb -D ${PGDATA} -E UTF8 --locale=C && \
-    echo "shared_preload_libraries = 'pg_vexdb'" >> ${PGDATA}/postgresql.conf && \
+    echo "shared_preload_libraries = 'vexdb_lite'" >> ${PGDATA}/postgresql.conf && \
     # 容器内 trust (容器边界即信任边界); 容器外暴露需走 docker -p 127.0.0.1:5433:5432
     echo "host all all 127.0.0.1/32 trust" >> ${PGDATA}/pg_hba.conf && \
     echo "host all all ::1/128 trust"     >> ${PGDATA}/pg_hba.conf && \
@@ -87,6 +87,6 @@ EXPOSE 5432
 # 启动: pg_ctl + 创建 test 数据库 + 加载扩展, 然后保持前台
 CMD pg_ctl -D ${PGDATA} -l /tmp/pg.log -w start && \
     createdb test && \
-    psql -d test -c 'CREATE EXTENSION pg_vexdb;' && \
-    echo '=== pg_vexdb ready on port 5432, db=test ===' && \
+    psql -d test -c 'CREATE EXTENSION vexdb_lite;' && \
+    echo '=== vexdb_lite ready on port 5432, db=test ===' && \
     tail -f /tmp/pg.log

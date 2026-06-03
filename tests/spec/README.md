@@ -45,8 +45,8 @@ tests/spec/
 │   ├── functions/  (3)
 │   └── index/      (20)
 ├── duckdb/                        ✅ DuckDB 独有 (~80 个)
-│   ├── functions/                 含 list_transform / vex_index_info / 表达式数组等 DuckDB-only
-│   └── index/                     含 ATTACH / restart / optimizer_explain / vex_simd_arch 等
+│   ├── functions/                 含 list_transform / vexdb_index_info / 表达式数组等 DuckDB-only
+│   └── index/                     含 ATTACH / restart / optimizer_explain / vexdb_simd_arch 等
 ├── pg/                            🟡 PG 独有 (待补; 13 个 PG 专属用例)
 └── opengauss/                     🟡 openGauss 独有 (待补; ivfpq_basic_hnsw_adapted 等)
 ```
@@ -102,7 +102,7 @@ steps:
 | `${L2(a,b)}` | `l2_distance(a,b)` | `(a <-> b)` 中缀 |
 | `${COSINE(a,b)}` `${IP(a,b)}` | 函数式 | `<=>` / `inner_product()` |
 | `${RANGE(n)}` | `range(n)` | `generate_series(0, n-1)` |
-| `${GUC_EF_SEARCH}` 等 | `vexdb_ef_search` | `pg_vexdb.ef_search` |
+| `${GUC_EF_SEARCH}` 等 | `vexdb_ef_search` | `vexdb.ef_search` |
 | `${SYS_INDEXES}` / `${SYS_INDEXES_NAME}` | `duckdb_indexes()` / `index_name` | `pg_indexes` / `indexname` |
 
 完整字典见 `_lib/dialects.yaml`。
@@ -128,7 +128,7 @@ python3 tests/spec/_lib/classify.py --apply              # 从 migrated/ 首次�
 python3 tests/spec/_lib/classify.py --from shared --apply  # 从 shared/ 重新分类
 
 # PG Docker 测试 (本仓库自带)
-bash tests/spec/_lib/docker/run_pg.sh build  # 首次 build PG 19devel + pg_vexdb (~30min)
+bash tests/spec/_lib/docker/run_pg.sh build  # 首次 build PG 19devel + vexdb_lite (~30min)
 bash tests/spec/_lib/docker/run_pg.sh up     # 启动容器
 bash tests/spec/_lib/docker/run_pg.sh test   # 跑 build/spec/pg/ 全部
 bash tests/spec/_lib/docker/run_pg.sh down   # 清理

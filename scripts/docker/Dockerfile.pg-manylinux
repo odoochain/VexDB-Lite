@@ -1,4 +1,4 @@
-# manylinux_2_28 + PG 16/17/18(PGDG)+ PG19devel(源码)——给 vexdb_vector 编可移植 PG 扩展。
+# manylinux_2_28 + PG 16/17/18(PGDG)+ PG19devel(源码)——给 vexdb_lite 编可移植 PG 扩展。
 # 产物 .so 底线 GLIBC_2.17 / GLIBCXX_3.4.22(POC 已验证)。
 # 构建:  docker build -t vexdb-pg-manylinux:aarch64 \
 #           --build-arg BASE=quay.io/pypa/manylinux_2_28_aarch64 --build-arg ELARCH=aarch64 \
@@ -41,4 +41,4 @@ RUN cd /tmp \
 
 # pg_config 路径速查(供 release.sh 用):
 #   pg16=/usr/pgsql-16  pg17=/usr/pgsql-17  pg18=/usr/pgsql-18  pg19=/opt/pg19
-LABEL purpose="manylinux PG 16-19 build env for vexdb_vector"
+LABEL purpose="manylinux PG 16-19 build env for vexdb_lite"

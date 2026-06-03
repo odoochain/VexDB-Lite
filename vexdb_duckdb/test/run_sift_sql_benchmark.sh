@@ -7,7 +7,7 @@ DATASET="${2:-both}"
 # VEXDB_ROOT: root of the vexdb_lite checkout (defaults to two levels up from this script).
 VEXDB_ROOT="${VEXDB_ROOT:-$ROOT_DIR}"
 DATA_DIR="${3:-$VEXDB_ROOT/vexdb_duckdb/test/benchmark/data}"
-EXTENSION_PATH="${4:-$DUCKDB_BUILD_DIR/extension/vex/vex.duckdb_extension}"
+EXTENSION_PATH="${4:-$DUCKDB_BUILD_DIR/extension/vexdb_lite/vexdb_lite.duckdb_extension}"
 BENCH_SRC="$ROOT_DIR/vexdb_duckdb/test/benchmark/vex_sift_sql_benchmark.cpp"
 BENCH_BIN="${5:-$DUCKDB_BUILD_DIR/vex_sift_sql_benchmark}"
 CXX_BIN="${CXX:-c++}"

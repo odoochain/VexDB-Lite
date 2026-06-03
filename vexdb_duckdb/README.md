@@ -1,6 +1,6 @@
 # vexdb_duckdb
 
-`vexdb_duckdb` 是 VexDB-Lite 在 DuckDB 端的实现：作为 DuckDB out-of-tree extension 提供向量类型、距离函数、HNSW 图索引（`GRAPH_INDEX`）和优化器 rewrite（`VEX_INDEX_SCAN`）。
+`vexdb_duckdb` 是 VexDB-Lite 在 DuckDB 端的实现：作为 DuckDB out-of-tree extension 提供向量类型、距离函数、HNSW 图索引（`GRAPH_INDEX`）和优化器 rewrite（`VEXDB_INDEX_SCAN`）。
 
 **目录**
 
@@ -21,7 +21,7 @@
 ## 一分钟上手
 
 ```sql
-LOAD '/path/to/vex.duckdb_extension';
+LOAD '/path/to/vexdb_lite.duckdb_extension';
 
 CREATE TABLE items (id INTEGER, vec FLOAT[128]);
 INSERT INTO items SELECT i, list_value(...)::FLOAT[128] FROM range(100000) t(i);
@@ -53,26 +53,26 @@ con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
 
 -- 任意客户端
 SET allow_unsigned_extensions = true;
-LOAD '/path/to/vex.duckdb_extension';
-SELECT vex_version();
+LOAD '/path/to/vexdb_lite.duckdb_extension';
+SELECT vexdb_version();
 ```
 
-`vex_version()` 返回当前扩展版本号，验证加载成功。
+`vexdb_version()` 返回当前扩展版本号，验证加载成功。
 
 ### 平台与产物
 
 | 架构 | 平台 | 文件 |
 |---|---|---|
-| `aarch64` Linux (Kylin/Ubuntu) | `vex.duckdb_extension` | `dist/aarch64-linux/` |
-| `x86_64` Linux | `vex.duckdb_extension` | 见 [构建](#构建) |
-| `x86_64` / `arm64` macOS | `vex.duckdb_extension` | 见 [构建](#构建) |
+| `aarch64` Linux (Kylin/Ubuntu) | `vexdb_lite.duckdb_extension` | `dist/aarch64-linux/` |
+| `x86_64` Linux | `vexdb_lite.duckdb_extension` | 见 [构建](#构建) |
+| `x86_64` / `arm64` macOS | `vexdb_lite.duckdb_extension` | 见 [构建](#构建) |
 
 ### 加载到持久数据库
 
 ```sql
 ATTACH '/path/to/db.duckdb' AS my_db;
 USE my_db;
-LOAD '/path/to/vex.duckdb_extension';
+LOAD '/path/to/vexdb_lite.duckdb_extension';
 ```
 
 每次打开数据库都要 `LOAD` 一次（DuckDB 不会持久化扩展自动加载状态）。
@@ -98,7 +98,7 @@ DuckDB extension API 暂未暴露稳定的自定义类型接口；`FLOAT[N]` 已
 
 ## 距离函数
 
-DuckDB 侧仅支持**函数形式**（不支持 `<->` / `<=>` / `<#>` / `<~>` 运算符语法，这些是 PG 特有语法）：
+DuckDB 侧支持**函数形式**，同时 `<->`、`<=>`、`<~>` 运算符也可用（`<#>` 因 `#` 与 DuckDB 注释符冲突不可用，负内积用 `<~>`）：
 
 | 函数 | 等价数学 | 备注 |
 |---|---|---|
@@ -169,13 +169,13 @@ ORDER BY l2_distance(vec, [0.5, ...]::FLOAT[128])
 LIMIT 10;
 ```
 
-优化器识别 `ORDER BY <distance_func>(vec, query) LIMIT k` 模式后会改写为 `VEX_INDEX_SCAN`，可通过 EXPLAIN 验证：
+优化器识别 `ORDER BY <distance_func>(vec, query) LIMIT k` 模式后会改写为 `VEXDB_INDEX_SCAN`，可通过 EXPLAIN 验证：
 
 ```sql
 EXPLAIN SELECT id FROM items
   ORDER BY l2_distance(vec, [...]::FLOAT[128])
   LIMIT 10;
--- physical_plan 应包含 VEX_INDEX_SCAN
+-- physical_plan 应包含 VEXDB_INDEX_SCAN
 ```
 
 ### 元数据过滤
@@ -254,11 +254,11 @@ SET vexdb_brute_force_threshold = 100000;-- 大表也走 brute force（重 build
 ## 内省函数
 
 ```sql
-SELECT vex_version();           -- 扩展版本号
-SELECT vex_simd_arch();         -- 当前 SIMD 路径（'AVX512' / 'NEONV8' / 'GENERAL' 等）
+SELECT vexdb_version();           -- 扩展版本号
+SELECT vexdb_simd_arch();         -- 当前 SIMD 路径（'AVX512' / 'NEONV8' / 'GENERAL' 等）
 
 -- 索引统计
-SELECT * FROM vex_index_info();
+SELECT * FROM vexdb_index_info();
 -- 列：index_name, table_name, dimension, metric, m, ef_construction, node_count,
 --     use_pq, pq_m, pq_codebook_bytes, pq_codes_bytes, ...
 
@@ -279,7 +279,7 @@ import duckdb
 import numpy as np
 
 con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
-con.execute("LOAD '/path/to/vex.duckdb_extension'")
+con.execute("LOAD '/path/to/vexdb_lite.duckdb_extension'")
 
 # 建表 + 插入
 con.execute("CREATE TABLE items (id INTEGER, vec FLOAT[128])")
@@ -323,7 +323,7 @@ bash build_duck.sh setup    # clone DuckDB v1.5.2 + cmake configure（首次 ~5 
 bash build_duck.sh build    # 编 vex 扩展（~20 min）
 ```
 
-产物：`build/duck/build/extension/vex/vex.duckdb_extension`
+产物：`build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension`
 
 ### Boost 路径自定义
 
@@ -352,11 +352,11 @@ cmake --build . --target unittest -j8
 未加载扩展或加载失败：
 
 ```sql
-LOAD '/path/to/vex.duckdb_extension';
-SELECT vex_version();  -- 应返回版本号
+LOAD '/path/to/vexdb_lite.duckdb_extension';
+SELECT vexdb_version();  -- 应返回版本号
 ```
 
-### `Could not load library "vex.duckdb_extension"`
+### `Could not load library "vexdb_lite.duckdb_extension"`
 
 通常是 DuckDB 版本不匹配。扩展必须用 build 时的 DuckDB 版本加载。检查：
 
@@ -379,7 +379,7 @@ LOAD '...';
 
 Python：`config={"allow_unsigned_extensions": "true"}`
 
-### EXPLAIN 显示 SEQ_SCAN 而不是 VEX_INDEX_SCAN
+### EXPLAIN 显示 SEQ_SCAN 而不是 VEXDB_INDEX_SCAN
 
 可能原因：
 
@@ -409,16 +409,18 @@ SET vexdb_ef_search = 200;  -- 默认 40，提到 200 召回大幅提升
 SET vexdb_brute_force_threshold = 99999999;
 ```
 
-### `Parser Error: syntax error at or near "->"`
+### `Parser Error: syntax error at or near "#>"`
 
-DuckDB parser 不支持 pgvector 风格的 `<->` `<=>` `<#>` `<~>` 运算符。改用函数形式：
+DuckDB 支持 `<->`（L2）、`<=>`（cosine）、`<~>`（负内积）运算符；仅 `<#>` 因 `#` 与注释符冲突不可用，负内积改用 `<~>` 或函数形式：
 
 ```sql
--- 错
-SELECT id FROM items ORDER BY vec <-> [...]::FLOAT[3] LIMIT 10;
+-- 错（<#> 不可用）
+SELECT id FROM items ORDER BY vec <#> [...]::FLOAT[3] LIMIT 10;
 
 -- 对
-SELECT id FROM items ORDER BY l2_distance(vec, [...]::FLOAT[3]) LIMIT 10;
+SELECT id FROM items ORDER BY vec <~> [...]::FLOAT[3] LIMIT 10;
+-- 或函数形式
+SELECT id FROM items ORDER BY list_negative_inner_product(vec, [...]::FLOAT[3]) LIMIT 10;
 ```
 
 ### Index build OOM

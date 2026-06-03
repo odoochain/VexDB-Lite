@@ -44,7 +44,10 @@ graph_index_amroutine(void)
 {
     IndexAmRoutine *amroutine = makeNode(IndexAmRoutine);
 
-    amroutine->amstrategies = 1;
+    /* 2 个 ORDER BY strategy: 1 = <#>(pgvector 兼容), 2 = <~>(跨引擎统一). 二者同为
+     * 负内积; metric 实际来自索引元数据(FUNCTION 1), scan 不读 strategy, amvalidate 恒真.
+     * 此值是 PG 建 opclass 时对 operator number 的上界校验, 必须 >= 用到的最大 strategy. */
+    amroutine->amstrategies = 2;
     amroutine->amsupport = 2;
     amroutine->amoptsprocnum = 0;
     amroutine->amcanorder = false;
@@ -207,7 +210,7 @@ graph_index_amgettuple(IndexScanDesc scan, ScanDirection direction)
     (void)direction;
     float dist_out;
     return graph_index_gettuple_internal(scan, scan->opaque, GRAPH_INDEX_METAPAGE_BLKNO,
-                                         vexdb_vector_get_ef_search(), &dist_out);
+                                         vexdb_lite_get_ef_search(), &dist_out);
 }
 
 static void

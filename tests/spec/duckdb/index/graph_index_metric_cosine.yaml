@@ -21,7 +21,7 @@ steps:
   expect:
   - - 1
   - - 2
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_mag';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_mag';
   _field_types: I
   expect:
   - - 'true'
@@ -46,7 +46,7 @@ steps:
   _field_types: I
   expect:
   - - 3
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_zero';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_zero';
   _field_types: I
   expect:
   - - 'true'
@@ -55,7 +55,7 @@ steps:
 - statement: "INSERT INTO t_cos_self SELECT i, list_value(\n  (i * cos(i * 0.3))::FLOAT,\n  (i * sin(i * 0.3))::FLOAT,\n  (i * cos(i * 0.7))::FLOAT,\n  (i * sin(i * 0.7))::FLOAT\n)::${VECTOR(4)}\nFROM ${RANGE2(1,\
     \ 201)} t(i);"
 - statement: CREATE INDEX idx_cos_self ON t_cos_self USING ${VEX_INDEX} (vec${OPS_COSINE_COL})${IDX_OPTS_COSINE};
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_self';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_self';
   _field_types: I
   expect:
   - - 'true'
@@ -67,22 +67,22 @@ steps:
 - statement: CREATE TABLE t_cos_mut (id INTEGER, vec ${VECTOR(4)});
 - statement: "INSERT INTO t_cos_mut SELECT i, list_value(\n  sin(i*0.1)::FLOAT, cos(i*0.1)::FLOAT,\n  sin(i*0.2)::FLOAT, cos(i*0.2)::FLOAT\n)::${VECTOR(4)}\nFROM ${RANGE2(1, 101)} t(i);"
 - statement: CREATE INDEX idx_cos_mut ON t_cos_mut USING ${VEX_INDEX} (vec${OPS_COSINE_COL})${IDX_OPTS_COSINE};
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_mut';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_mut';
   _field_types: I
   expect:
   - - 'true'
 - statement: DELETE FROM t_cos_mut WHERE id <= 30;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_mut';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_mut';
   _field_types: I
   expect:
   - - 'true'
 - statement: UPDATE t_cos_mut SET vec = ${VEC_LITERAL([0.0, 0.0, 0.0, 1.0], 4)} WHERE id BETWEEN 31 AND 50;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_mut';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_mut';
   _field_types: I
   expect:
   - - 'true'
 - statement: "INSERT INTO t_cos_mut SELECT i, list_value(\n  (i * 10.0 * cos(i))::FLOAT, (i * 10.0 * sin(i))::FLOAT, 0.0, 0.0\n)::${VECTOR(4)}\nFROM ${RANGE2(101, 151)} t(i);"
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_mut';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_mut';
   _field_types: I
   expect:
   - - 'true'
@@ -128,17 +128,17 @@ steps:
 - statement: CHECKPOINT;
 - raw_directive: restart
 - statement: "INSERT INTO t_cos_r SELECT i, list_value(\n  (i * 100.0)::FLOAT, 0.0, 0.0, 0.0\n)::${VECTOR(4)}\nFROM ${RANGE2(101, 151)} t(i);"
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_r';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_r';
   _field_types: I
   expect:
   - - 'true'
 - statement: DELETE FROM t_cos_r WHERE id <= 20;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_r';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_r';
   _field_types: I
   expect:
   - - 'true'
 - statement: UPDATE t_cos_r SET vec = ${VEC_LITERAL([0.0, 0.0, 1.0, 0.0], 4)} WHERE id BETWEEN 21 AND 30;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_r';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_r';
   _field_types: I
   expect:
   - - 'true'

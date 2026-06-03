@@ -25,7 +25,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 # HNSW recall 在 dim=4 collinear 数据上不稳；只验返回行数（rewrite 已由 EXPLAIN 覆盖）
 - query: 'WITH tmp AS (SELECT ${VEC_LITERAL([0.5, 1.0, 1.5, 2.0], 4)} AS vec)
 
@@ -37,7 +37,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT count(*) FROM (SELECT id FROM t ORDER BY ${L2(v, (SELECT qvec FROM queries WHERE qid = 1))} LIMIT 5);
   _field_types: I
   expect:
@@ -52,7 +52,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: 'WITH q AS (SELECT ${VEC_LITERAL([0.5, 1.0, 1.5, 2.0], 4)} AS v)
 
     SELECT count(*) FROM (SELECT id FROM t ORDER BY ${L2(v, (SELECT v FROM q))} LIMIT 5);'
@@ -63,7 +63,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT count(*) FROM (SELECT id FROM t ORDER BY ${L2(v, (SELECT ${VEC_LITERAL([0.5, 1.0, 1.5, 2.0], 4)}))} LIMIT 5);
   _field_types: I
   expect:
@@ -72,7 +72,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT count(*) FROM (SELECT id FROM t ORDER BY ${L2(v, ${VEC_LITERAL([0.5, 1.0, 1.5, 2.0], 4)})} LIMIT 5);
   _field_types: I
   expect:
@@ -94,7 +94,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: 'WITH tmp AS (SELECT ${VEC_LITERAL([0.5, 1.0, 1.5, 2.0], 4)} AS vec)
 
     SELECT count(*) FROM (SELECT id FROM t ORDER BY ${COSINE(v, (SELECT vec FROM tmp))} LIMIT 5);'
@@ -107,7 +107,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: 'WITH q AS (SELECT ${VEC_LITERAL([0.5, 1.0, 1.5, 2.0], 4)} AS v)
 
     SELECT count(*) FROM (SELECT id FROM t ORDER BY ${COSINE(v, (SELECT v FROM q))} LIMIT 5);'
@@ -126,7 +126,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: 'WITH tmp AS (SELECT ${VEC_LITERAL([0.5, 1.0, 1.5, 2.0], 4)} AS vec)
 
     SELECT count(*) FROM (SELECT id FROM t ORDER BY ${IP(v, (SELECT vec FROM tmp))} DESC LIMIT 5);'
@@ -147,7 +147,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT count(*) FROM (SELECT id FROM t ORDER BY ${IP(v, (SELECT qvec FROM queries WHERE qid = 1))} DESC LIMIT 5);
   _field_types: I
   expect:

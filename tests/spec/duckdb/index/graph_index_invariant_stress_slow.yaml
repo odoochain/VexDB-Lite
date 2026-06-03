@@ -17,24 +17,24 @@ steps:
 - statement: CREATE INDEX idx_s1 ON t_stress1 USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_OPTS_L2};
 - statement: "INSERT INTO t_stress1 SELECT i, list_value(\n  sin(i*0.01)::FLOAT, cos(i*0.02)::FLOAT, sin(i*0.03)::FLOAT, cos(i*0.04)::FLOAT,\n  sin(i*0.05)::FLOAT, cos(i*0.06)::FLOAT, sin(i*0.07)::FLOAT,\
     \ cos(i*0.08)::FLOAT\n)::${VECTOR(8)}\nFROM ${RANGE2(1, 501)} t(i);"
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s1';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s1';
   _field_types: I
   expect:
   - - 'true'
 - statement: "INSERT INTO t_stress1 SELECT i, list_value(\n  cos(i*0.01)::FLOAT, sin(i*0.02)::FLOAT, cos(i*0.03)::FLOAT, sin(i*0.04)::FLOAT,\n  cos(i*0.05)::FLOAT, sin(i*0.06)::FLOAT, cos(i*0.07)::FLOAT,\
     \ sin(i*0.08)::FLOAT\n)::${VECTOR(8)}\nFROM ${RANGE2(501, 801)} t(i);"
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s1';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s1';
   _field_types: I
   expect:
   - - 'true'
 - statement: "INSERT INTO t_stress1 SELECT i, list_value(\n  0.0, 0.0, 0.0, 0.0, sin(i)::FLOAT, cos(i)::FLOAT, 0.0, 0.0\n)::${VECTOR(8)}\nFROM ${RANGE2(801, 811)} t(i);"
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s1';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s1';
   _field_types: I
   expect:
   - - 'true'
 - statement: "INSERT INTO t_stress1 SELECT i, list_value(\n  sin(i*0.1)::FLOAT, cos(i*0.1)::FLOAT, sin(i*0.2)::FLOAT, cos(i*0.2)::FLOAT,\n  sin(i*0.3)::FLOAT, cos(i*0.3)::FLOAT, sin(i*0.4)::FLOAT, cos(i*0.4)::FLOAT\n\
     )::${VECTOR(8)}\nFROM ${RANGE2(811, 1811)} t(i);"
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s1';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s1';
   _field_types: I
   expect:
   - - 'true'
@@ -50,32 +50,32 @@ steps:
 - statement: CREATE TABLE t_stress2 (id INTEGER, vec ${VECTOR(4)});
 - statement: "INSERT INTO t_stress2 SELECT i, list_value(\n  sin(i*0.1)::FLOAT, cos(i*0.2)::FLOAT, sin(i*0.3)::FLOAT, cos(i*0.4)::FLOAT\n)::${VECTOR(4)}\nFROM ${RANGE2(1, 501)} t(i);"
 - statement: CREATE INDEX idx_s2 ON t_stress2 USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_OPTS_L2};
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
   _field_types: I
   expect:
   - - 'true'
 - statement: DELETE FROM t_stress2 WHERE id <= 100;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
   _field_types: I
   expect:
   - - 'true'
 - statement: "INSERT INTO t_stress2 SELECT i, list_value(\n  cos(i*0.1)::FLOAT, sin(i*0.2)::FLOAT, 0.0, 0.0\n)::${VECTOR(4)}\nFROM ${RANGE2(501, 701)} t(i);"
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
   _field_types: I
   expect:
   - - 'true'
 - statement: DELETE FROM t_stress2 WHERE id BETWEEN 101 AND 300;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
   _field_types: I
   expect:
   - - 'true'
 - statement: "INSERT INTO t_stress2 SELECT i, list_value(\n  sin(i)::FLOAT, cos(i)::FLOAT, 0.1, 0.2\n)::${VECTOR(4)}\nFROM ${RANGE2(701, 801)} t(i);"
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
   _field_types: I
   expect:
   - - 'true'
 - statement: UPDATE t_stress2 SET vec = ${VEC_LITERAL([0.0, 0.0, 0.0, 0.0], 4)} WHERE id BETWEEN 301 AND 400;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_s2';
   _field_types: I
   expect:
   - - 'true'
@@ -87,7 +87,7 @@ steps:
 - statement: CREATE TABLE t_self500 (id INTEGER, vec ${VECTOR(4)});
 - statement: "INSERT INTO t_self500 SELECT i, list_value(\n  (i * 1000.0)::FLOAT, 0.0, 0.0, 0.0\n)::${VECTOR(4)}\nFROM ${RANGE2(1, 501)} t(i);"
 - statement: CREATE INDEX idx_self500 ON t_self500 USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_OPTS_L2};
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_self500';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_self500';
   _field_types: I
   expect:
   - - 'true'
@@ -100,24 +100,24 @@ steps:
 - statement: CREATE TABLE t_restart_inv (id INTEGER, vec ${VECTOR(4)});
 - statement: "INSERT INTO t_restart_inv SELECT i, list_value(\n  sin(i*0.1)::FLOAT, cos(i*0.2)::FLOAT, sin(i*0.3)::FLOAT, cos(i*0.4)::FLOAT\n)::${VECTOR(4)}\nFROM ${RANGE2(1, 301)} t(i);"
 - statement: CREATE INDEX idx_ri ON t_restart_inv USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_OPTS_L2};
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ri';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ri';
   _field_types: I
   expect:
   - - 'true'
 - statement: CHECKPOINT;
 - raw_directive: restart
 - statement: "INSERT INTO t_restart_inv SELECT i, list_value(\n  cos(i*0.1)::FLOAT, sin(i*0.2)::FLOAT, cos(i*0.3)::FLOAT, sin(i*0.4)::FLOAT\n)::${VECTOR(4)}\nFROM ${RANGE2(301, 501)} t(i);"
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ri';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ri';
   _field_types: I
   expect:
   - - 'true'
 - statement: DELETE FROM t_restart_inv WHERE id <= 100;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ri';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ri';
   _field_types: I
   expect:
   - - 'true'
 - statement: UPDATE t_restart_inv SET vec = ${VEC_LITERAL([0.0, 0.0, 0.0, 0.0], 4)} WHERE id BETWEEN 101 AND 150;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ri';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ri';
   _field_types: I
   expect:
   - - 'true'

@@ -2,7 +2,7 @@
 
 **English** | **[中文](README.zh.md)**
 
-`VexDB-Lite` is a vector similarity search engine for PostgreSQL and DuckDB. Both backends share the same graph index algorithm, SIMD distance dispatch, and quantization kernel.
+`VexDB-Lite` is a vector similarity search engine for PostgreSQL (`vexdb_lite` extension) and DuckDB (`vexdb_lite` extension). Both backends share the same graph index algorithm, SIMD distance dispatch, and quantization kernel.
 
 > See [vexdb_duckdb/README.md](vexdb_duckdb/README.md) for the DuckDB extension docs.  
 > This root README is a project-level overview and build guide.
@@ -11,7 +11,7 @@
 
 ## 1. Components
 
-### 1.1 PostgreSQL: `vexdb_vector`
+### 1.1 PostgreSQL: `vexdb_lite`
 
 Current functionality:
 
@@ -20,7 +20,7 @@ Current functionality:
   - `l2_distance` (`<->`)
   - `cosine_distance` (`<=>`)
   - `inner_product` (use `<~>` for negative inner product / MIPS)
-- Scalar helpers: `vector_dims()`, `vector_norm()`, `l2_normalize()`, `vex_index_info()`
+- Scalar helpers: `vector_dims()`, `vector_norm()`, `l2_normalize()`, `vexdb_index_info()`
 - `CREATE INDEX ... USING vexdb_graph`
 - Index options: `m`, `ef_construction`, `parallel_workers` (parallel build), `quantizer` / `pq_m` (PQ)
 - Product quantization (PQ) with `compact` mode
@@ -28,7 +28,7 @@ Current functionality:
 - Shared-memory vector buffer cache and parallel index build
 - Runtime settings: `vexdb.ef_search`, `vexdb.vec_architecture`
 
-### 1.2 DuckDB: `vexdb_vector`
+### 1.2 DuckDB: `vexdb_lite`
 
 Current functionality:
 
@@ -38,11 +38,11 @@ Current functionality:
   - `cosine_distance` (`<=>`)
   - `inner_product` (use `<~>` for negative inner product / MIPS)
   > Note: `<#>` is unavailable in DuckDB (`#` clashes with its comment syntax); use `<~>` for negative inner product — same meaning as in PG.
-- Scalar helpers: `vector_dims()`, `l2_normalize()`, `vex_version()`, `vex_index_info()`
+- Scalar helpers: `vector_dims()`, `l2_normalize()`, `vexdb_version()`, `vexdb_index_info()`
 - `CREATE INDEX ... USING GRAPH_INDEX (vec [, metadata...])` with metadata filtering
 - Index options: `m`, `ef_construction`, `parallel_workers` (parallel build), `quantizer` / `pq_m` (PQ)
 - Product quantization (PQ) with `compact` mode
-- Optimizer rewrite into `VEX_INDEX_SCAN`
+- Optimizer rewrite into `VEXDB_INDEX_SCAN`
 - Vector buffer cache and parallel index build
 - Runtime settings: `vexdb_ef_search`, `vexdb_brute_force_threshold`, `vexdb_pq_search_mode`, `vexdb_pq_refine_k_factor`
 
@@ -72,7 +72,7 @@ Current functionality:
 
 ### 2.2 DuckDB Extension Comparison (DuckDB VSS vs VexDB-Lite)
 
-| Category | Feature | Description | DuckDB VSS | VexDB-Lite (`vex`) |
+| Category | Feature | Description | DuckDB VSS | VexDB-Lite (`vexdb_lite`) |
 |---|---|---|:---:|:---:|
 | Index | Graph index | VSS: HNSW; VexDB: graph_index (self-developed hybrid) | ✅ | ✅ |
 | Distance | SIMD dispatch | Inlined distance functions, compile-time optimized | ❌ | ✅ |
@@ -94,7 +94,7 @@ Current functionality:
 ### 3.1 Install and Create Table
 
 ```sql
-CREATE EXTENSION vexdb_vector;
+CREATE EXTENSION vexdb_lite;
 
 CREATE TABLE items (
     id  BIGSERIAL PRIMARY KEY,
@@ -135,7 +135,7 @@ LIMIT 10;
 ```sql
 SELECT id
 FROM items
-ORDER BY vec <#> '[0.15, 0.25, 0.35]'
+ORDER BY vec <~> '[0.15, 0.25, 0.35]'
 LIMIT 10;
 
 SELECT id
@@ -151,8 +151,8 @@ LIMIT 10;
 ### 4.1 Load Extension
 
 ```sql
-LOAD '/path/to/vex.duckdb_extension';
-SELECT vex_version();
+LOAD '/path/to/vexdb_lite.duckdb_extension';
+SELECT vexdb_version();
 ```
 
 Typical Python usage:
@@ -161,7 +161,7 @@ Typical Python usage:
 import duckdb
 
 con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
-con.execute("LOAD '/path/to/vex.duckdb_extension'")
+con.execute("LOAD '/path/to/vexdb_lite.duckdb_extension'")
 ```
 
 ### 4.2 Create Table and Index
@@ -215,7 +215,7 @@ SELECT inner_product([1.0, 0.0]::FLOAT[2], [0.5, 0.5]::FLOAT[2]);
 SELECT cosine_distance([1.0, 0.0]::FLOAT[2], [0.5, 0.5]::FLOAT[2]);
 SELECT vector_dims([1.0, 2.0, 3.0]::FLOAT[3]);
 SELECT l2_normalize([3.0, 4.0]::FLOAT[2]);
-SELECT * FROM vex_index_info();
+SELECT * FROM vexdb_index_info();
 ```
 
 ---
@@ -244,7 +244,7 @@ make -j$(nproc)
 make install
 ```
 
-### Build `vexdb_vector`
+### Build `vexdb_lite`
 
 ```bash
 cd /path/to/VexDB
@@ -262,13 +262,13 @@ make install
 At minimum:
 
 ```conf
-shared_preload_libraries = 'vexdb_vector'
+shared_preload_libraries = 'vexdb_lite'
 ```
 
 Then restart PostgreSQL and run:
 
 ```sql
-CREATE EXTENSION vexdb_vector;
+CREATE EXTENSION vexdb_lite;
 ```
 
 ---
@@ -282,7 +282,7 @@ bash build_duck.sh setup   # First time: clone DuckDB v1.5.2 and cmake configure
 bash build_duck.sh build   # Compile the extension (incremental)
 ```
 
-Output: `build/duck/build/extension/vex/vex.duckdb_extension`
+Output: `build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension`
 
 ### Dependencies
 
@@ -294,7 +294,7 @@ Output: `build/duck/build/extension/vex/vex.duckdb_extension`
 
 DuckDB extensions must be compiled inside DuckDB's source tree — you cannot run `cmake -B build vexdb_duckdb/` standalone. `build_duck.sh` automates:
 1. Cloning DuckDB v1.5.2
-2. Writing `extension_config_local.cmake` to register the vex extension
+2. Writing `extension_config_local.cmake` to register the vexdb_lite extension
 3. Running `cmake` + `cmake --build`
 4. Appending the extension metadata footer (required by DuckDB's release format)
 
@@ -332,8 +332,8 @@ Test environment: Intel Core Ultra 7-265K (20c/20t, 3.9 GHz) / 16 GB DDR5 / x86_
 | System | QPS (r=1) | QPS (r=16) | Recall@10 |
 |---|---:|---:|---:|
 | pgvector | 507.9 | 7153.5 | 96.22% |
-| **vexdb_vector (PostgreSQL)** | **994.7** | **12084.6** | 95.97% |
-| **vexdb_vector (DuckDB)** | **717.5** | **8667.8** | 95.06% |
+| **vexdb_lite (PostgreSQL)** | **994.7** | **12084.6** | 95.97% |
+| **vexdb_lite (DuckDB)** | **717.5** | **8667.8** | 95.06% |
 | duckdb-vss | 496.1 | 5360.9 | 94.07% |
 
 **ef_search = 100**
@@ -341,8 +341,8 @@ Test environment: Intel Core Ultra 7-265K (20c/20t, 3.9 GHz) / 16 GB DDR5 / x86_
 | System | QPS (r=1) | QPS (r=16) | Recall@10 |
 |---|---:|---:|---:|
 | pgvector | 313.4 | 4272.5 | 98.82% |
-| **vexdb_vector (PostgreSQL)** | **618.5** | **7883.1** | 98.62% |
-| **vexdb_vector (DuckDB)** | **547.2** | **5379.1** | 98.40% |
+| **vexdb_lite (PostgreSQL)** | **618.5** | **7883.1** | 98.62% |
+| **vexdb_lite (DuckDB)** | **547.2** | **5379.1** | 98.40% |
 | duckdb-vss | 405.2 | 4433.3 | 98.04% |
 
 **ef_search = 200**
@@ -350,8 +350,8 @@ Test environment: Intel Core Ultra 7-265K (20c/20t, 3.9 GHz) / 16 GB DDR5 / x86_
 | System | QPS (r=1) | QPS (r=16) | Recall@10 |
 |---|---:|---:|---:|
 | pgvector | 193.1 | 2694.1 | 99.66% |
-| **vexdb_vector (PostgreSQL)** | **421.3** | **5038.0** | 99.58% |
-| **vexdb_vector (DuckDB)** | **383.6** | **4298.8** | 99.53% |
+| **vexdb_lite (PostgreSQL)** | **421.3** | **5038.0** | 99.58% |
+| **vexdb_lite (DuckDB)** | **383.6** | **4298.8** | 99.53% |
 | duckdb-vss | 321.9 | 3809.3 | 99.42% |
 
 ---

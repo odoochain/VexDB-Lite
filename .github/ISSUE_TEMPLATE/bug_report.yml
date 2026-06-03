@@ -13,8 +13,8 @@ body:
       label: Backend
       description: Which backend are you using?
       options:
-        - DuckDB extension (vex)
-        - PostgreSQL plugin (vexdb_vector)
+        - DuckDB extension (vexdb_lite)
+        - PostgreSQL plugin (vexdb_lite)
         - Both
     validations:
       required: true

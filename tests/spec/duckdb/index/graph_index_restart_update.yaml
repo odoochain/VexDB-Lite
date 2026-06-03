@@ -28,7 +28,7 @@ steps:
   _field_types: I
   expect:
   - - 1
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
   _field_types: I
   expect:
   - - 'true'
@@ -42,7 +42,7 @@ steps:
   expect:
   - - 2
     - updated
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
   _field_types: I
   expect:
   - - 'true'
@@ -51,7 +51,7 @@ steps:
   _field_types: I
   expect:
   - - 1
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
   _field_types: I
   expect:
   - - 'true'
@@ -66,7 +66,7 @@ steps:
   _field_types: I
   expect:
   - - 5
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
   _field_types: I
   expect:
   - - 'true'
@@ -78,7 +78,7 @@ steps:
 - statement: CHECKPOINT;
 - raw_directive: restart
 - statement: UPDATE t2 SET vec = ${VEC_LITERAL([0.001, 0.001, 0.001, 0.001], 4)} WHERE id % 10 = 0;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
   _field_types: I
   expect:
   - - 'true'

@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 DUCKDB_BUILD_DIR="${1:-/tmp/vexdb_duckdb-build}"
-EXTENSION_PATH="${2:-$DUCKDB_BUILD_DIR/extension/vex/vex.duckdb_extension}"
+EXTENSION_PATH="${2:-$DUCKDB_BUILD_DIR/extension/vexdb_lite/vexdb_lite.duckdb_extension}"
 SMOKE_SRC="$ROOT_DIR/vexdb_duckdb/test/smoke_create_index.cpp"
 SMOKE_BIN="${3:-$DUCKDB_BUILD_DIR/vexdb_duck_smoke}"
 CXX_BIN="${CXX:-c++}"

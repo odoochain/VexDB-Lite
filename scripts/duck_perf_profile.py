@@ -25,7 +25,7 @@ con.unregister("a")
 t = time.time()
 con.execute(f"CREATE INDEX vexidx ON base USING GRAPH_INDEX (vec) WITH (m={M}, ef_construction={EFC}, metric='l2', threads=16)")
 print(f"build index: {time.time()-t:.1f}s", flush=True)
-con.execute(f"SET vex_ef_search={EFS}")
+con.execute(f"SET vexdb_ef_search={EFS}")
 
 sql = f"SELECT id FROM base ORDER BY l2_distance(vec, ?::FLOAT[{DIM}]) LIMIT {K}"
 qlists = [test[i].tolist() for i in range(test.shape[0])]

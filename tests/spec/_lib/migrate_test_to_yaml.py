@@ -262,7 +262,7 @@ def parse_test_file(text: str) -> dict:
             steps.append({"raw_directive": "restart"})
             continue
         if header.startswith("require"):
-            # require vex 在 emit_duckdb 已默认加, 其他 require 需保留 (parquet/json 等)
+            # require vexdb_lite 在 emit_duckdb 已默认加, 其他 require 需保留 (parquet/json 等)
             req_what = header.split(maxsplit=1)[1] if " " in header else ""
             if req_what.lower() != "vex":
                 steps.append({"raw_directive": header})

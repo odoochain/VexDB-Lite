@@ -600,17 +600,17 @@ static void resolve_vec_arch_cfg(const VecArchConfig &cfg, VecArchConfigResolved
 
 static void apply_vec_arch_cfg(const VecArchConfigResolved &resolved)
 {
-    vexdb_vector_session.attr_storage.float_l2_arch = resolved.float_l2_arch;
-    vexdb_vector_session.attr_storage.float_ip_arch = resolved.float_ip_arch;
-    vexdb_vector_session.attr_storage.float_cos_arch = resolved.float_cos_arch;
+    vexdb_lite_session.attr_storage.float_l2_arch = resolved.float_l2_arch;
+    vexdb_lite_session.attr_storage.float_ip_arch = resolved.float_ip_arch;
+    vexdb_lite_session.attr_storage.float_cos_arch = resolved.float_cos_arch;
 
-    vexdb_vector_session.attr_storage.half_l2_arch = resolved.half_l2_arch;
-    vexdb_vector_session.attr_storage.half_ip_arch = resolved.half_ip_arch;
-    vexdb_vector_session.attr_storage.half_cos_arch = resolved.half_cos_arch;
+    vexdb_lite_session.attr_storage.half_l2_arch = resolved.half_l2_arch;
+    vexdb_lite_session.attr_storage.half_ip_arch = resolved.half_ip_arch;
+    vexdb_lite_session.attr_storage.half_cos_arch = resolved.half_cos_arch;
 
-    vexdb_vector_session.attr_storage.int8_l2_arch = resolved.int8_l2_arch;
-    vexdb_vector_session.attr_storage.int8_ip_arch = resolved.int8_ip_arch;
-    vexdb_vector_session.attr_storage.int8_cos_arch = resolved.int8_cos_arch;
+    vexdb_lite_session.attr_storage.int8_l2_arch = resolved.int8_l2_arch;
+    vexdb_lite_session.attr_storage.int8_ip_arch = resolved.int8_ip_arch;
+    vexdb_lite_session.attr_storage.int8_cos_arch = resolved.int8_cos_arch;
 }
 } /* namespace */
 

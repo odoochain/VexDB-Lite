@@ -74,7 +74,7 @@ struct VecReadRequest {
 /* Initialization */
 extern void init_vector_smgr();
 extern bool enable_vec_buffer_manager();
-extern bool vexdb_vector_is_preloaded();
+extern bool vexdb_lite_is_preloaded();
 
 /* Main API */
 extern VecBuffer vec_read_buffer(Relation rel, size_t loc, size_t vec_size, VecStorageType st = VecStorageType::PureVec);

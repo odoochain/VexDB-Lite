@@ -55,11 +55,11 @@ steps:
 - statement: CHECKPOINT;
 - raw_directive: restart
 - statement: DELETE FROM t2 WHERE id = -999;
-- query: SELECT node_count > 0 FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
+- query: SELECT node_count > 0 FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
   _field_types: I
   expect:
   - - 'true'
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
   _field_types: I
   expect:
   - - 'true'
@@ -73,12 +73,12 @@ steps:
 - statement: CHECKPOINT;
 - raw_directive: restart
 - statement: DELETE FROM t3 WHERE id = -999;
-- query: SELECT node_count > 0 FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx3';
+- query: SELECT node_count > 0 FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx3';
   _field_types: I
   expect:
   - - 'true'
 - statement: DROP INDEX idx3;
-- query: SELECT COUNT(*) FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx3';
+- query: SELECT COUNT(*) FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx3';
   _field_types: I
   expect:
   - - 0

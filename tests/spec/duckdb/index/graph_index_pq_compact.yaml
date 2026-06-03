@@ -17,7 +17,7 @@ steps:
 - statement: "INSERT INTO pq_compact SELECT i,\n    ${VEC_LITERAL([(i*0.01)::FLOAT, (i*0.02)::FLOAT, (i*0.03)::FLOAT, (i*0.04)::FLOAT,\n     (i*0.05)::FLOAT, (i*0.06)::FLOAT, (i*0.07)::FLOAT, (i*0.08)::FLOAT],\
     \ 8)}\nFROM ${RANGE(500)} t(i);"
 - statement: CREATE INDEX idx_compact_auto ON pq_compact USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_WITH_L2(memory_mode = 'compact')};
-- query: SELECT use_pq::INTEGER FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_compact_auto';
+- query: SELECT use_pq::INTEGER FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_compact_auto';
   _field_types: I
   expect:
   - - 1

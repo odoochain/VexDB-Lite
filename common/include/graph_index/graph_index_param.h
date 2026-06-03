@@ -1,6 +1,6 @@
 /**
  * Copyright (c) 2024, openGauss Contributors
- * Copyright (c) 2024, vexdb_vector Contributors
+ * Copyright (c) 2024, vexdb_lite Contributors
  * 
  * Graph index parameters - merged from include/graph_index_param.h
  * Values from openGauss src/include/access/graph_index/graph_index_param.h

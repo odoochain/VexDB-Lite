@@ -42,7 +42,7 @@ steps:
     \  sin(i*0.5)::FLOAT, cos(i*0.5)::FLOAT,\n  sin(i*0.6)::FLOAT, cos(i*0.6)::FLOAT,\n  sin(i*0.7)::FLOAT, cos(i*0.7)::FLOAT,\n  sin(i*0.8)::FLOAT, cos(i*0.8)::FLOAT\n)::${VECTOR(16)}\nFROM ${RANGE2(1,\
     \ 201)} t(i);"
 - statement: CREATE INDEX idx_embed ON t_embed USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_OPTS_L2};
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_embed';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_embed';
   _field_types: I
   expect:
   - - 'true'
@@ -67,7 +67,7 @@ steps:
   _field_types: I
   expect:
   - - 20
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_ins';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_ins';
   _field_types: I
   expect:
   - - 'true'
@@ -93,7 +93,7 @@ steps:
   _field_types: I
   expect:
   - - 1
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_upd';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_upd';
   _field_types: I
   expect:
   - - 'true'
@@ -113,7 +113,7 @@ steps:
   _field_types: I
   expect:
   - - 15
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_restart';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_restart';
   _field_types: I
   expect:
   - - 'true'

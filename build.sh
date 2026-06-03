@@ -251,14 +251,14 @@ case "$CMD" in
             "${MOBILE_EXT_CONFIG:+-DDUCKDB_EXTENSION_CONFIGS=$MOBILE_EXT_CONFIG}"
 
         echo -e "${YELLOW}[Build] Building all targets...${NC}"
-        cmake --build "$BUILD_DIR" --target duckdb_static vex_extension core_functions_extension duckdb_generated_extension_loader -j "$JOBS"
+        cmake --build "$BUILD_DIR" --target duckdb_static vexdb_lite_extension core_functions_extension duckdb_generated_extension_loader -j "$JOBS"
 
         # 合并为单个 libvexdb.a
         LIBVEXDB_DIR="$BUILD_DIR/libvexdb"
         mkdir -p "$LIBVEXDB_DIR"
         echo -e "${YELLOW}[Package] Merging into libvexdb.a...${NC}"
         xcrun libtool -static -o "$LIBVEXDB_DIR/libvexdb.a" \
-            "$BUILD_DIR/extension/vex/libvex_extension.a" \
+            "$BUILD_DIR/extension/vexdb_lite/libvexdb_lite_extension.a" \
             "$BUILD_DIR/extension/core_functions/libcore_functions_extension.a" \
             "$BUILD_DIR/extension/libduckdb_generated_extension_loader.a" \
             "$BUILD_DIR/src/libduckdb_static.a" \
@@ -291,7 +291,7 @@ case "$CMD" in
             "${MOBILE_EXT_CONFIG:+-DDUCKDB_EXTENSION_CONFIGS=$MOBILE_EXT_CONFIG}"
 
         echo -e "${YELLOW}[Build] Building all targets...${NC}"
-        cmake --build "$BUILD_DIR" --target duckdb_static vex_extension core_functions_extension duckdb_generated_extension_loader -j "$JOBS"
+        cmake --build "$BUILD_DIR" --target duckdb_static vexdb_lite_extension core_functions_extension duckdb_generated_extension_loader -j "$JOBS"
 
         # 合并为单个 libvexdb.a
         LIBVEXDB_DIR="$BUILD_DIR/libvexdb"
@@ -307,7 +307,7 @@ case "$CMD" in
         # Create MRI script for proper thin archive merge
         MRI_SCRIPT="$LIBVEXDB_DIR/merge.mri"
         echo "create $LIBVEXDB_DIR/libvexdb.a" > "$MRI_SCRIPT"
-        echo "addlib $BUILD_DIR/extension/vex/libvex_extension.a" >> "$MRI_SCRIPT"
+        echo "addlib $BUILD_DIR/extension/vexdb_lite/libvexdb_lite_extension.a" >> "$MRI_SCRIPT"
         echo "addlib $BUILD_DIR/extension/core_functions/libcore_functions_extension.a" >> "$MRI_SCRIPT"
         echo "addlib $BUILD_DIR/extension/libduckdb_generated_extension_loader.a" >> "$MRI_SCRIPT"
         echo "addlib $BUILD_DIR/src/libduckdb_static.a" >> "$MRI_SCRIPT"

@@ -6,9 +6,9 @@ tags:
 description: |
   Bug 1 regression: graph_index_parallel_build_main must be exported as
   a GLOBAL symbol so PG's parallel-worker bgw_function_name dlsym can
-  resolve it. Before the fix (vexdb_vector 1.0) the function was declared
+  resolve it. Before the fix (vexdb_lite 1.0) the function was declared
   extern "C" but without PGDLLEXPORT; -fvisibility=hidden made it LOCAL
-  in vexdb_vector.so and CREATE INDEX with parallel_workers>0 errored with
+  in vexdb_lite.so and CREATE INDEX with parallel_workers>0 errored with
   "could not find function "graph_index_parallel_build_main" in file ...".
 
   Smoke: a tiny parallel CREATE INDEX must complete; any "could not find

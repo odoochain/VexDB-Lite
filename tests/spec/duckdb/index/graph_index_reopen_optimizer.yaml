@@ -10,7 +10,7 @@ engines:
 - duckdb
 - pg
 - opengauss
-description: ANN query after DB reopen must still go through VEX_INDEX_SCAN
+description: ANN query after DB reopen must still go through VEXDB_INDEX_SCAN
 steps:
 - raw_directive: load __TEST_DIR__/graph_index_reopen_optimizer.db
 - statement: SET ${GUC_BF_THRESHOLD} = 0;
@@ -22,7 +22,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - statement: CHECKPOINT;
 - raw_directive: restart
 - query: SELECT COUNT(*) FROM ${SYS_INDEXES} WHERE ${SYS_INDEXES_NAME} = 'idx';
@@ -33,7 +33,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT id FROM items ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 0.0, 0.0], 3)})}, id LIMIT 3;
   _field_types: I
   expect:

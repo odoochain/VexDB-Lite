@@ -2,7 +2,7 @@
 
 #ifdef PG_EXTENSION
 
-PgVexdbSessionAttrs vexdb_vector_session = {
+PgVexdbSessionAttrs vexdb_lite_session = {
     .attr_storage = {
         .ef_search = 64,
         .float_l2_arch = 0,

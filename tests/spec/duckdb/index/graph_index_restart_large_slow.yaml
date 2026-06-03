@@ -29,11 +29,11 @@ steps:
 - statement: CHECKPOINT;
 - raw_directive: restart
 - statement: DELETE FROM big WHERE id = -999;
-- query: SELECT node_count > 0 FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_big';
+- query: SELECT node_count > 0 FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_big';
   _field_types: I
   expect:
   - - 'true'
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_big';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_big';
   _field_types: I
   expect:
   - - 'true'
@@ -42,7 +42,7 @@ steps:
   _field_types: I
   expect:
   - - 4000
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_big';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_big';
   _field_types: I
   expect:
   - - 'true'
@@ -56,14 +56,14 @@ steps:
   _field_types: I
   expect:
   - - 6000
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_big';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_big';
   _field_types: I
   expect:
   - - 'true'
 - statement: CHECKPOINT;
 - raw_directive: restart
 - statement: DELETE FROM big WHERE id = -999;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_big';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_big';
   _field_types: I
   expect:
   - - 'true'

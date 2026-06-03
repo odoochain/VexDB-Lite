@@ -1,6 +1,0 @@
-# vexdb_vector - Vector Similarity Search Extension for PostgreSQL
-
-comment = 'HNSW graph index for vector similarity search'
-default_version = 1.0
-module_pathname = '$libdir/vexdb_vector'
-relocatable = false

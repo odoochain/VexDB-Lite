@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# PG 19 + vexdb_vector 测试 runner
+# PG 19 + vexdb_lite 测试 runner
 #
 # 用法:
-#   bash run_pg.sh build              # 构建镜像 (首次 ~30min: build PG + vexdb_vector)
+#   bash run_pg.sh build              # 构建镜像 (首次 ~30min: build PG + vexdb_lite)
 #   bash run_pg.sh up                 # 启动容器 (后台)
 #   bash run_pg.sh down               # 停止 + 删容器
 #   bash run_pg.sh shell              # psql 进入容器 test 数据库
@@ -42,14 +42,14 @@ cmd_build() {
     rm -rf /tmp/vexdb_pg-ctx
     mkdir -p /tmp/vexdb_pg-ctx
     cp "${ROOT_DIR}/tests/spec/_lib/docker/Dockerfile" /tmp/vexdb_pg-ctx/
-    cp -R "$PG_VEXDB_SRC" /tmp/vexdb_pg-ctx/vexdb_vector_src
+    cp -R "$PG_VEXDB_SRC" /tmp/vexdb_pg-ctx/vexdb_lite_src
 
     info "patch Makefile (PG_CONFIG / FLT16_SUPPORT / arch / 缺失源文件)"
-    local mk=/tmp/vexdb_pg-ctx/vexdb_vector_src/Makefile
+    local mk=/tmp/vexdb_pg-ctx/vexdb_lite_src/Makefile
     sed -i.bak 's|^PG_CONFIG = .*|PG_CONFIG = /opt/pg19/bin/pg_config|' "$mk"
     sed -i.bak 's|^PG_CPPFLAGS = |PG_CPPFLAGS = -DFLT16_SUPPORT -DPG_EXTENSION -fpermissive |' "$mk"
     # 移除 -fvisibility=hidden / -fvisibility-inlines-hidden: PG 加载扩展时
-    # 需要看到全局符号 (vexdb_vector_session 等)
+    # 需要看到全局符号 (vexdb_lite_session 等)
     sed -i.bak 's|-fvisibility=hidden||g; s|-fvisibility-inlines-hidden||g' "$mk"
     sed -i.bak 's|src/distance/architecture_minimal.cpp|src/distance/architecture.cpp|' "$mk"
     # 注意: distances_simd_template.cpp / rabitq_template.cpp / template_half.cpp /
@@ -61,7 +61,7 @@ cmd_build() {
     # PG_VEXDB 当前只提供 general dispatcher 实现, 其他 ISA dispatcher 缺失.
     # 禁用所有 ARM (NEONV8/V9, SVEV9, SVE2V9, SMEV9, SME2V9) + x86 (SSE/AVX/AVX512) ISA
     # 让 DISTANCER_ISAS 只剩 GENERAL (但保留 enum 可见性给 distance.cpp 内的字面引用)
-    local arch_h="/tmp/vexdb_pg-ctx/vexdb_vector_src/distance/architecture_macro.h"
+    local arch_h="/tmp/vexdb_pg-ctx/vexdb_lite_src/distance/architecture_macro.h"
     info "patch architecture_macro.h: 禁用所有 SIMD ISA (实现缺失)"
     # AVX512_EXTEND 是 derived macro (= DQ && BW && VL), 禁用 DQ/BW/VL 三个底层
     for isa in NEONV8 NEONV9 SVEV9 SVE2V9 SMEV9 SME2V9 SSE AVX AVX512_DQ AVX512_BW AVX512_VL; do
@@ -70,7 +70,7 @@ cmd_build() {
     info "patched Makefile 前 30 行:"
     head -30 "$mk"
 
-    info "docker build (首次 ~30min, build PG 19devel + vexdb_vector)"
+    info "docker build (首次 ~30min, build PG 19devel + vexdb_lite)"
     # CI 通过 BUILDX_EXTRA_ARGS 传 cache 参数 (例: --cache-from type=gha --cache-to type=gha,mode=max)
     if [[ -n "${BUILDX_EXTRA_ARGS:-}" ]]; then
         # shellcheck disable=SC2086  # 故意让 BUILDX_EXTRA_ARGS 按空格 split

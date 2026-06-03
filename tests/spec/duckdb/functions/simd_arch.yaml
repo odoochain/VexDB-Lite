@@ -10,13 +10,13 @@ engines:
 - duckdb
 - pg
 - opengauss
-description: vex_simd_arch() exposes the runtime CPU arch picked by
+description: vexdb_simd_arch() exposes the runtime CPU arch picked by
 steps:
-- query: SELECT vex_simd_arch() IN ('SSE', 'AVX', 'AVX512', 'NEONV8', 'SVEV8', 'SVE2V8', 'GENERAL');
+- query: SELECT vexdb_simd_arch() IN ('SSE', 'AVX', 'AVX512', 'NEONV8', 'SVEV8', 'SVE2V8', 'GENERAL');
   _field_types: I
   expect:
   - - 'true'
-- query: SELECT vex_simd_arch() != 'GENERAL';
+- query: SELECT vexdb_simd_arch() != 'GENERAL';
   _field_types: I
   expect:
   - - 'true'
