@@ -5,7 +5,7 @@
 #              WHERE clause contains an unrecognized predicate.
 # group: [vex]
 
-require vex
+require vexdb_lite
 
 statement ok
 CREATE TABLE prod (
@@ -301,7 +301,7 @@ SELECT COUNT(*) FROM (
 # ============================================================
 # Test 15: EXPLAIN-level assertions — confirm the plan, not just the results.
 # These pin down the optimizer's behaviour so a cliff regression
-# (returning full-table scan instead of VEX_INDEX_SCAN) fails the test
+# (returning full-table scan instead of VEXDB_INDEX_SCAN) fails the test
 # even though the result set would still be correct.
 # ============================================================
 
@@ -310,28 +310,28 @@ query II
 EXPLAIN SELECT id FROM prod WHERE category = 'a' OR rating = 5
 ORDER BY l2_distance(vec, [1.0, 0.0, 0.0, 0.0]::FLOAT[4]) LIMIT 5;
 ----
-physical_plan	<REGEX>:.*VEX_INDEX_SCAN.*
+physical_plan	<REGEX>:.*VEXDB_INDEX_SCAN.*
 
 # LIKE still uses the index
 query II
 EXPLAIN SELECT id FROM prod WHERE category LIKE 'a%'
 ORDER BY l2_distance(vec, [1.0, 0.0, 0.0, 0.0]::FLOAT[4]) LIMIT 4;
 ----
-physical_plan	<REGEX>:.*VEX_INDEX_SCAN.*
+physical_plan	<REGEX>:.*VEXDB_INDEX_SCAN.*
 
 # Strict < (residual) still uses the index
 query II
 EXPLAIN SELECT id FROM prod WHERE price < 30
 ORDER BY l2_distance(vec, [1.0, 0.0, 0.0, 0.0]::FLOAT[4]) LIMIT 3;
 ----
-physical_plan	<REGEX>:.*VEX_INDEX_SCAN.*
+physical_plan	<REGEX>:.*VEXDB_INDEX_SCAN.*
 
 # Mixed in-graph + residual uses the index
 query II
 EXPLAIN SELECT id FROM prod WHERE rating >= 2 AND category LIKE 'a%'
 ORDER BY l2_distance(vec, [1.0, 0.0, 0.0, 0.0]::FLOAT[4]) LIMIT 3;
 ----
-physical_plan	<REGEX>:.*VEX_INDEX_SCAN.*
+physical_plan	<REGEX>:.*VEXDB_INDEX_SCAN.*
 
 # Pure in-graph (cat=a AND price>=20) — both predicates consumed by the index,
 # so the residual FILTER expression for these columns must not appear in the plan.

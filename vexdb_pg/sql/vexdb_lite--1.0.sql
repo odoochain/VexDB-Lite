@@ -276,9 +276,9 @@ CREATE FUNCTION vectorbuffer_inspect()
 COMMENT ON FUNCTION vectorbuffer_inspect() IS
     'Returns statistics about the vector buffer cache';
 
--- vex_index_info: SRF that lists all vexdb_graph indexes with metadata.
+-- vexdb_index_info: SRF that lists all vexdb_graph indexes with metadata.
 -- Schema mirrors duckdb/vexdb_duckdb/functions/index_info_function.cpp.
-CREATE FUNCTION vex_index_info()
+CREATE FUNCTION vexdb_index_info()
     RETURNS TABLE(
         index_name        text,
         indexname         text,
@@ -300,5 +300,5 @@ CREATE FUNCTION vex_index_info()
         memory_mode       text)
     AS 'MODULE_PATHNAME' LANGUAGE C;
 
-COMMENT ON FUNCTION vex_index_info() IS
+COMMENT ON FUNCTION vexdb_index_info() IS
     'Lists all vexdb_graph indexes with metadata (mirrors duck-side schema)';

@@ -22,7 +22,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_UNITTESTS=OFF \
             -DEXTENSION_STATIC_BUILD=ON \
-            -DBUILD_EXTENSIONS="core_functions;parquet;icu;json;vex" \
+            -DBUILD_EXTENSIONS="core_functions;parquet;icu;json;vexdb_lite" \
             -DSKIP_EXTENSIONS="jemalloc" \
             -G "Visual Studio 17 2022" -A x64
           cmake --build build/release --config Release --target shell -j

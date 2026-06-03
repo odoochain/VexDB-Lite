@@ -2,7 +2,7 @@
 # description: Long-running stability test for GRAPH_INDEX
 # group: [vex]
 
-require vex
+require vexdb_lite
 
 # ============================================================
 # Setup: Create table with graph index

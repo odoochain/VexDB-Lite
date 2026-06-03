@@ -2,7 +2,7 @@
 # description: Test GRAPH_INDEX with metadata columns — equality filtering, EXPLAIN, NULL handling
 # group: [vex]
 
-require vex
+require vexdb_lite
 
 # ============================================================
 # Setup: table with vector + VARCHAR metadata
@@ -87,7 +87,7 @@ LIMIT 3;
 3
 
 # ============================================================
-# Test 6: EXPLAIN — filtered query should use index (VEX_INDEX_SCAN)
+# Test 6: EXPLAIN — filtered query should use index (VEXDB_INDEX_SCAN)
 # ============================================================
 query II
 EXPLAIN SELECT id FROM products
@@ -95,7 +95,7 @@ WHERE category = 'electronics'
 ORDER BY l2_distance(vec, [1.0, 0.0, 0.0, 0.0]::FLOAT[4])
 LIMIT 3;
 ----
-physical_plan	<REGEX>:.*VEX_INDEX_SCAN.*
+physical_plan	<REGEX>:.*VEXDB_INDEX_SCAN.*
 
 # ============================================================
 # Test 7: EXPLAIN — unfiltered query should also use index
@@ -105,7 +105,7 @@ EXPLAIN SELECT id FROM products
 ORDER BY l2_distance(vec, [1.0, 0.0, 0.0, 0.0]::FLOAT[4])
 LIMIT 3;
 ----
-physical_plan	<REGEX>:.*VEX_INDEX_SCAN.*
+physical_plan	<REGEX>:.*VEXDB_INDEX_SCAN.*
 
 # ============================================================
 # Test 8: Filter on non-existent category — returns empty
@@ -242,7 +242,7 @@ EXPLAIN SELECT id FROM t_multi_idx
 WHERE cat = 'X'
 ORDER BY l2_distance(vec, [1.0, 0.0, 0.0]::FLOAT[3]) LIMIT 3;
 ----
-physical_plan	<REGEX>:.*VEX_INDEX_SCAN.*
+physical_plan	<REGEX>:.*VEXDB_INDEX_SCAN.*
 
 # Result correctness — only cat='X' rows
 query I
@@ -259,7 +259,7 @@ query II
 EXPLAIN SELECT id FROM t_multi_idx
 ORDER BY l2_distance(vec, [1.0, 0.0, 0.0]::FLOAT[3]) LIMIT 3;
 ----
-physical_plan	<REGEX>:.*VEX_INDEX_SCAN.*
+physical_plan	<REGEX>:.*VEXDB_INDEX_SCAN.*
 
 # ============================================================
 # Cleanup

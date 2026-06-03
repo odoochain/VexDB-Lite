@@ -1,8 +1,8 @@
 # name: test/sql/vex/pq_bytes.test
-# description: vex_index_info exposes pq_codes_bytes / pq_codebook_bytes
+# description: vexdb_index_info exposes pq_codes_bytes / pq_codebook_bytes
 # group: [vex]
 
-require vex
+require vexdb_lite
 
 statement ok
 CREATE TABLE t_a (c1 INT, c2 FLOAT[128]);
@@ -15,7 +15,7 @@ CREATE INDEX idx_full ON t_a USING graph_INDEX(c2) WITH (memory_mode='full');
 
 # full index: PQ disabled → both fields zero
 query II
-SELECT pq_codes_bytes, pq_codebook_bytes FROM vex_index_info() WHERE index_name='idx_full';
+SELECT pq_codes_bytes, pq_codebook_bytes FROM vexdb_index_info() WHERE index_name='idx_full';
 ----
 0	0
 
@@ -35,6 +35,6 @@ SELECT c1 FROM t_b ORDER BY array_distance(c2, (SELECT vec FROM q)) LIMIT 5;
 
 # pq index: codes = 5000 * 8 = 40000 bytes; codebook = 8 * 256 * (128/8) * 4 = 131072 bytes
 query II
-SELECT pq_codes_bytes, pq_codebook_bytes FROM vex_index_info() WHERE index_name='idx_pq';
+SELECT pq_codes_bytes, pq_codebook_bytes FROM vexdb_index_info() WHERE index_name='idx_pq';
 ----
 40000	131072
