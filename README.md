@@ -2,7 +2,7 @@
 
 **English** | **[中文](README.zh.md)**
 
-`VexDB-Lite` is a vector similarity search engine for PostgreSQL (`vexdb_vector` extension) and DuckDB (`vex` extension). Both backends share the same graph index algorithm, SIMD distance dispatch, and quantization kernel.
+`VexDB-Lite` is a vector similarity search engine for PostgreSQL and DuckDB. Both backends share the same graph index algorithm, SIMD distance dispatch, and quantization kernel.
 
 > See [vexdb_duckdb/README.md](vexdb_duckdb/README.md) for the DuckDB extension docs.  
 > This root README is a project-level overview and build guide.
