@@ -131,7 +131,7 @@ bash build_duck.sh clean && bash build_duck.sh build
 
 ### 路径二：build.sh（DuckDB 整体编译，调试 / 测试用）
 
-将 vex 扩展静态链接进 DuckDB 二进制，产出带 vex 的 `duckdb` CLI 和 `unittest` runner。适合本地功能调试和运行测试套件。
+将 vexdb_lite 扩展静态链接进 DuckDB 二进制，产出带 vexdb_lite 的 `duckdb` CLI 和 `unittest` runner。适合本地功能调试和运行测试套件。
 
 ```bash
 # Debug 构建
@@ -140,7 +140,7 @@ bash build.sh dev
 # Release 构建
 bash build.sh release
 
-# 构建并运行所有 vex 测试
+# 构建并运行所有 vexdb_lite 测试
 bash build.sh test
 
 # 只运行匹配 pattern 的测试
@@ -174,7 +174,7 @@ bash build_duck.sh unittest 'test/sql/vex/index/graph*'
 ### 加载扩展（路径一产物）
 
 ```sql
--- 允许加载未签名扩展（vex 扩展当前未签名）
+-- 允许加载未签名扩展（vexdb_lite 扩展当前未签名）
 SET allow_unsigned_extensions = true;
 LOAD '/path/to/vexdb_lite.duckdb_extension';
 SELECT vexdb_version();

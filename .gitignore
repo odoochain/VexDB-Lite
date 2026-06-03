@@ -386,7 +386,7 @@ __pycache__/
 *.duckdb_extension
 
 # Release flow artifacts (build_duck.sh strip + Makefile split-debug)
-# *.unstripped — vex.duckdb_extension 的本地未 strip 副本，仅供内部 gdb 使用
+# *.unstripped — vexdb_lite.duckdb_extension 的本地未 strip 副本，仅供内部 gdb 使用
 # *.so.debug   — vexdb_lite.so 的 split-debug 配套，单独走 release asset 不入 git
 *.unstripped
 *.so.debug

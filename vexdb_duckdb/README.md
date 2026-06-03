@@ -98,7 +98,7 @@ DuckDB extension API 暂未暴露稳定的自定义类型接口；`FLOAT[N]` 已
 
 ## 距离函数
 
-DuckDB 侧仅支持**函数形式**（不支持 `<->` / `<=>` / `<#>` / `<~>` 运算符语法，这些是 PG 特有语法）：
+DuckDB 侧支持**函数形式**，同时 `<->`、`<=>`、`<~>` 运算符也可用（`<#>` 因 `#` 与 DuckDB 注释符冲突不可用，负内积用 `<~>`）：
 
 | 函数 | 等价数学 | 备注 |
 |---|---|---|
@@ -409,16 +409,18 @@ SET vexdb_ef_search = 200;  -- 默认 40，提到 200 召回大幅提升
 SET vexdb_brute_force_threshold = 99999999;
 ```
 
-### `Parser Error: syntax error at or near "->"`
+### `Parser Error: syntax error at or near "#>"`
 
-DuckDB parser 不支持 pgvector 风格的 `<->` `<=>` `<#>` `<~>` 运算符。改用函数形式：
+DuckDB 支持 `<->`（L2）、`<=>`（cosine）、`<~>`（负内积）运算符；仅 `<#>` 因 `#` 与注释符冲突不可用，负内积改用 `<~>` 或函数形式：
 
 ```sql
--- 错
-SELECT id FROM items ORDER BY vec <-> [...]::FLOAT[3] LIMIT 10;
+-- 错（<#> 不可用）
+SELECT id FROM items ORDER BY vec <#> [...]::FLOAT[3] LIMIT 10;
 
 -- 对
-SELECT id FROM items ORDER BY l2_distance(vec, [...]::FLOAT[3]) LIMIT 10;
+SELECT id FROM items ORDER BY vec <~> [...]::FLOAT[3] LIMIT 10;
+-- 或函数形式
+SELECT id FROM items ORDER BY list_negative_inner_product(vec, [...]::FLOAT[3]) LIMIT 10;
 ```
 
 ### Index build OOM

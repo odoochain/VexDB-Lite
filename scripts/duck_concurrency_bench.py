@@ -43,7 +43,7 @@ ENGINES = {
         index=f"CREATE INDEX vexidx ON base USING GRAPH_INDEX (vec) "
                f"WITH (m={M}, ef_construction={EFC}, metric='l2', threads=16)",
         distfn="l2_distance",
-        efs=lambda efs: f"SET vex_ef_search={efs}",
+        efs=lambda efs: f"SET vexdb_ef_search={efs}",
     ),
     "vss": dict(
         load=["INSTALL vss", "LOAD vss"],
