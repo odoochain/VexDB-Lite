@@ -16,6 +16,12 @@
 #     bash scripts/release.sh upload v0.1.0            # 推送到 GitHub Release
 #
 # 凭证: 通过 SERVERS_FILE 环境变量指定凭证文件，或直接覆盖以下 *_HOST/*_USER/*_PASS。
+#
+# 多版本矩阵 (留空各自回落单版本，向后兼容):
+#   DUCKDB_VERSIONS="v1.5.0 v1.5.1 v1.5.2 v1.5.3"   # DuckDB 扩展按版本各编一份
+#   PG_VERSIONS="pg16:...:... pg17:...:..."          # PG .so 按版本各编一份
+#   先对每个 DuckDB 版本跑: DUCKDB_VERSION=vX.Y.Z bash build_duck.sh setup
+#   产物落 dist/<arch>-linux/<dver>/，包名 vexdb-lite-duckdb-<dver>-linux-<arch>.tar.gz
 
 set -euo pipefail
 trap 'echo "[release] FAILED at line $LINENO" >&2' ERR
@@ -35,8 +41,16 @@ CMAKE_VER="3.28.6"
 CMAKE_LINUX_X86="cmake-${CMAKE_VER}-linux-x86_64.tar.gz"
 CMAKE_TARBALL="/tmp/${CMAKE_LINUX_X86}"
 CMAKE_URL="https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/${CMAKE_LINUX_X86}"
-DUCKDB_SRC_LOCAL="${DUCKDB_SRC_LOCAL:-$REPO_ROOT/build/duck/duckdb_src}"
 REMOTE_DIR="pkgbuild"
+
+# 多 DuckDB 版本矩阵：每条一个 git tag，空格分隔。留空 → 单版本(DUCKDB_VERSION
+# 默认 v1.5.2)，完全向后兼容。每版本的本地源码树由 build_duck.sh 放在
+# build/duck/<ver>/(与 build_duck.sh 的 DUCK_BASE/<ver> 对齐)。
+DUCKDB_VERSION="${DUCKDB_VERSION:-v1.5.2}"
+DUCKDB_VERSIONS="${DUCKDB_VERSIONS:-}"
+[[ -z "$DUCKDB_VERSIONS" ]] && DUCKDB_VERSIONS="$DUCKDB_VERSION"
+# 某个 DuckDB 版本的本地源码树路径。
+_duck_src_local() { echo "$REPO_ROOT/build/duck/$1/duckdb_src"; }
 
 # 远程机器配置（Mac bash 3.2 无 assoc 数组，用 prefix 变量）
 # x86：CentOS 8 + gcc 8.5（太老）→ 借同事的 gcc 10.3
@@ -164,7 +178,13 @@ prepare_local() {
     # rsync 增量上传源码:本地 → 远程,跳过未变文件。不再 tar+scp(每次重传几十/几百 MB)。
     command -v rsync >/dev/null || fail "缺少 rsync(brew install rsync)"
 
-    [[ -d "${DUCKDB_SRC_LOCAL}" ]] || fail "本地 DuckDB src 不存在: ${DUCKDB_SRC_LOCAL} (先跑 build_duck.sh setup, 或从构建机 rsync 回 build/duck/duckdb_src)"
+    # 每个待构建的 DuckDB 版本都要有本地源码树（build_duck.sh setup 各出一份）。
+    if [[ "$TARGET" == "all" || "$TARGET" == "duck" ]]; then
+        for dver in $DUCKDB_VERSIONS; do
+            local src; src="$(_duck_src_local "$dver")"
+            [[ -d "$src" ]] || fail "本地 DuckDB src 不存在: $src (先跑: DUCKDB_VERSION=$dver bash build_duck.sh setup)"
+        done
+    fi
 
     ok "本地准备完成"
 }
@@ -198,13 +218,16 @@ stage() {
         rssh x86 "mkdir -p ~/opt && cd ~/opt && tar xzf ~/$CMAKE_LINUX_X86 && rm ~/$CMAKE_LINUX_X86"
     fi
 
+    # 每个 DuckDB 版本一棵独立源码树 build/duck/<ver>/duckdb_src。build_duck.sh
+    # 用 CMakeLists.txt 存在性判断是否 clone(rsync 已带来→走增量,不重 clone),
+    # 版本戳 .vexdb_target_version 随 rsync 同步(不在 exclude)→远程防呆校验放行。
     if [[ "$TARGET" == "all" || "$TARGET" == "duck" ]]; then
-        info "$arch 同步 DuckDB src(rsync 增量)"
-        rssh "$arch" "mkdir -p ~/$REMOTE_DIR/vexdb_lite/build/duck/duckdb_src/.git"
-        rrsync_up "$arch" "$DUCKDB_SRC_LOCAL" "~/$REMOTE_DIR/vexdb_lite/build/duck/duckdb_src" \
-            "${DUCKDB_RSYNC_EXCLUDES[@]}"
-        # build_duck.sh 用 [[ ! -d "$DUCK_SRC/.git" ]] 决定要不要 clone;补一个空 .git 防误触发
-        rssh "$arch" "mkdir -p ~/$REMOTE_DIR/vexdb_lite/build/duck/duckdb_src/.git"
+        for dver in $DUCKDB_VERSIONS; do
+            info "$arch 同步 DuckDB src $dver(rsync 增量)"
+            rssh "$arch" "mkdir -p ~/$REMOTE_DIR/vexdb_lite/build/duck/$dver/duckdb_src"
+            rrsync_up "$arch" "$(_duck_src_local "$dver")" "~/$REMOTE_DIR/vexdb_lite/build/duck/$dver/duckdb_src" \
+                "${DUCKDB_RSYNC_EXCLUDES[@]}"
+        done
     fi
     ok "$arch stage 完成"
 }
@@ -261,32 +284,37 @@ _assert_glibcxx_local() {
     return 1
 }
 
+# build_duck <arch> <dver>：构建并拉回某个 DuckDB 版本的扩展。产物按版本落
+# dist/<arch>-linux/<dver>/(与 PG 的 $archdir/<pgver>/ 对齐)。
 build_duck() {
-    local arch=$1 outdir
-    [[ "$arch" == "x86" ]] && outdir="$DIST_DIR/x86_64-linux" || outdir="$DIST_DIR/aarch64-linux"
+    local arch=$1 dver=$2 outdir
+    [[ "$arch" == "x86" ]] && outdir="$DIST_DIR/x86_64-linux/$dver" || outdir="$DIST_DIR/aarch64-linux/$dver"
+    mkdir -p "$outdir"
+    local rbuild="build/duck/$dver/build"
 
     if [[ "${MANYLINUX:-1}" == "1" ]]; then
-        section "$arch build DuckDB ext (manylinux container)"
-        _build_duck_manylinux "$arch" || fail "$arch DuckDB manylinux build 失败"
+        section "$arch build DuckDB ext $dver (manylinux container)"
+        _build_duck_manylinux "$arch" "$dver" || fail "$arch DuckDB $dver manylinux build 失败"
     else
-        section "$arch build DuckDB ext (host gcc)"
-        _build_duck_host "$arch" || fail "$arch DuckDB host build 失败"
+        section "$arch build DuckDB ext $dver (host gcc)"
+        _build_duck_host "$arch" "$dver" || fail "$arch DuckDB $dver host build 失败"
     fi
 
-    validate_duck "$arch" || fail "$arch DuckDB smoke 失败"
+    validate_duck "$arch" "$dver" || fail "$arch DuckDB $dver smoke 失败"
 
-    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension" "$outdir/"
-    # Pull the unstripped copy too — kept in dist/<arch>/ for our gdb work,
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/$rbuild/extension/vexdb_lite/vexdb_lite.duckdb_extension" "$outdir/"
+    # Pull the unstripped copy too — kept in dist/<arch>/<dver>/ for our gdb work,
     # excluded from packaging by .gitignore + cmd_package's explicit allowlist.
-    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension.unstripped" "$outdir/" \
+    rscp_down "$arch" "~/$REMOTE_DIR/vexdb_lite/$rbuild/extension/vexdb_lite/vexdb_lite.duckdb_extension.unstripped" "$outdir/" \
         2>/dev/null || info "  (unstripped 未拉到本地，本机调试时再 scp)"
-    ok "$arch DuckDB ext: $(ls -lh "$outdir/vexdb_lite.duckdb_extension" | awk '{print $5}')"
+    ok "$arch DuckDB ext $dver: $(ls -lh "$outdir/vexdb_lite.duckdb_extension" | awk '{print $5}')"
 }
 
 # host gcc 10.3 路径——快但产物有 GLIBCXX_3.4.26 依赖，仅 dev / 内部测试用。
 # 对外发版必须用 _build_duck_manylinux（MANYLINUX=1 触发）。
 _build_duck_host() {
-    local arch=$1 env_setup=""
+    local arch=$1 dver=$2 env_setup=""
+    local rbuild="build/duck/$dver/build"
     if [[ "$arch" == "x86" ]]; then
         env_setup="GCC=$X86_GCC_DIR && \
             export PATH=\$GCC/bin:\$HOME/opt/cmake-${CMAKE_VER}-linux-x86_64/bin:\$PATH && \
@@ -299,21 +327,22 @@ _build_duck_host() {
     # TMPDIR redirect: x86 .51 / 卷 40G 不够编 AVX-512 模板 + 链 DuckDB 静态库
     # 的中间产物,挂 "No space left on device"。统一切 /home。详见 build_pg() 注释。
     #
-    # 增量 build (CLEAN_DUCK_BUILD 默认 0): 保留 build/duck/build, CMake 自动检测
-    # 改了的 .cpp 只重编那些, vex extension 改源码后 ~30s 重 link 即可, 不用全量
+    # 增量 build (CLEAN_DUCK_BUILD 默认 0): 保留 build/duck/<ver>/build, CMake 自动
+    # 检测改了的 .cpp 只重编那些, vex extension 改源码后 ~30s 重 link 即可, 不用全量
     # 重编 DuckDB 本体 (~5-8min). 切 toolchain (host gcc <-> manylinux 容器) 时
     # ABI 不兼容会 build fail, 需 CLEAN_DUCK_BUILD=1 强制清.
+    # DUCKDB_VERSION=$dver 让 build_duck.sh 走 build/duck/$dver/ 这棵树。
     local clean_step=""
-    [[ "${CLEAN_DUCK_BUILD:-0}" == "1" ]] && clean_step="rm -rf build/duck/build && \\"$'\n        '
+    [[ "${CLEAN_DUCK_BUILD:-0}" == "1" ]] && clean_step="rm -rf $rbuild && \\"$'\n        '
     rssh "$arch" "mkdir -p \$HOME/tmpdir && \
         $env_setup \
         cd ~/$REMOTE_DIR/vexdb_lite && \
-        ${clean_step}TMPDIR=\$HOME/tmpdir bash build_duck.sh build" || return 1
+        ${clean_step}DUCKDB_VERSION=$dver TMPDIR=\$HOME/tmpdir bash build_duck.sh build" || return 1
 
-    info "$arch strip + reseal footer"
+    info "$arch strip + reseal footer ($dver)"
     rssh "$arch" "$env_setup \
         cd ~/$REMOTE_DIR/vexdb_lite && \
-        TMPDIR=\$HOME/tmpdir UNSTRIPPED_OUT=build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension.unstripped \
+        DUCKDB_VERSION=$dver TMPDIR=\$HOME/tmpdir UNSTRIPPED_OUT=$rbuild/extension/vexdb_lite/vexdb_lite.duckdb_extension.unstripped \
         bash build_duck.sh strip" || return 1
 }
 
@@ -333,7 +362,8 @@ _build_duck_host() {
 #   5. build_duck.sh strip → strip + 重写 footer（commit f5d62cd31c 后必须
 #      走这个，裸 strip 会吃掉 footer）
 _build_duck_manylinux() {
-    local arch=$1 image boost_src docker_pfx
+    local arch=$1 dver=$2 image boost_src docker_pfx
+    local rbuild="build/duck/$dver/build" rsrc="build/duck/$dver/duckdb_src"
     if [[ "$arch" == "x86" ]]; then
         image="quay.io/pypa/manylinux_2_28_x86_64"
         boost_src="$X86_BOOST"
@@ -354,7 +384,7 @@ _build_duck_manylinux() {
     # 可复用 build/duck/build/ 的 .o + libduckdb_static.a, 改 vex 源码后 ~30s
     # 重 link 即可. 强制 clean: CLEAN_DUCK_BUILD=1 release.sh build.
     local clean_step_in_container=""
-    [[ "${CLEAN_DUCK_BUILD:-0}" == "1" ]] && clean_step_in_container="rm -rf build/duck/build"
+    [[ "${CLEAN_DUCK_BUILD:-0}" == "1" ]] && clean_step_in_container="rm -rf $rbuild"
 
     # 容器以 root 跑（manylinux 镜像里 pip 走默认 PATH 需要 root；--user 改成
     # host UID 会让 pip 在 $PATH 里失踪）。产物会是 root-owned，容器内最后用
@@ -380,7 +410,7 @@ _build_duck_manylinux() {
             # regenerate extension_config_local.cmake with container paths (/work/...)
             # — host (macOS) 上 build_duck.sh setup 生成的版本写死了本地绝对路径
             # (/Users/Four/...), rsync 同步到容器后 cmake add_subdirectory 找不到.
-            cat > build/duck/duckdb_src/extension/extension_config_local.cmake <<CFGEOF
+            cat > $rsrc/extension/extension_config_local.cmake <<CFGEOF
 duckdb_extension_load(vexdb_lite
     SOURCE_DIR /work/vexdb_duckdb
     INCLUDE_DIR /work/vexdb_duckdb/include
@@ -388,10 +418,10 @@ duckdb_extension_load(vexdb_lite
 )
 CFGEOF
             ${clean_step_in_container}
-            bash build_duck.sh build
-            UNSTRIPPED_OUT=build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension.unstripped \
+            DUCKDB_VERSION=$dver bash build_duck.sh build
+            DUCKDB_VERSION=$dver UNSTRIPPED_OUT=$rbuild/extension/vexdb_lite/vexdb_lite.duckdb_extension.unstripped \
               bash build_duck.sh strip
-            chown -R $host_uid:$host_gid build/duck/build build_duck.sh
+            chown -R $host_uid:$host_gid $rbuild build_duck.sh
         '" || return 1
 }
 
@@ -403,9 +433,9 @@ CFGEOF
 # ELF + 大小，放过了缺 footer 的产物。现在直接 grep "duckdb_signature"
 # magic（append_metadata.cmake 写入的 custom-section 名字），并跑一次真 LOAD。
 validate_duck() {
-    local arch=$1
-    info "$arch DuckDB smoke 验证（ELF + 入口符号 + footer + LOAD）"
-    local ext_path="~/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension"
+    local arch=$1 dver=$2
+    info "$arch DuckDB smoke 验证 $dver（ELF + 入口符号 + footer + LOAD）"
+    local ext_path="~/$REMOTE_DIR/vexdb_lite/build/duck/$dver/build/extension/vexdb_lite/vexdb_lite.duckdb_extension"
     rssh "$arch" "set -e
         test -f $ext_path
         file $ext_path | grep -q ELF
@@ -416,11 +446,12 @@ validate_duck() {
         || { echo "smoke 失败"; return 1; }
     info "  ELF + 入口符号 + footer 通过"
 
-    # 真 LOAD：按优先级尝试三个 CLI 路径
-    #   1. build/duck/build/duckdb     ─ BUILD_SHELL=ON 时由 build_duck.sh 自己编的，最贴合
-    #   2. ~/duckdb_cli_1_5_2 (x86)    ─ 官方 v1.5.2 amd64，[[reference_test_machines]] 备
-    #      /tmp/duckdb (ARM)            ─ 官方 v1.5.2 aarch64
-    #   3. 都没有 → soft skip（footer canary 已是 hard gate，LOAD 只是 defense-in-depth）
+    # 真 LOAD：CLI 必须与 $dver 版本一致——否则 DuckDB 原生 footer 版本校验会拒绝加载
+    # (报 "built specifically for DuckDB version ...")，正好反向验证 footer 版本戳正确。
+    # 候选(全须是 $dver 版):
+    #   1. build/duck/$dver/build/duckdb       ─ BUILD_SHELL=ON 时 build_duck.sh 自编
+    #   2. ~/duckdb_cli_<下划线版本> (v1.5.2→1_5_2) ─ 远程预置的官方对应版本 CLI
+    #   都没有 → soft skip（footer canary 已是 hard gate，LOAD 是 defense-in-depth）。
     #
     # LD_LIBRARY_PATH 只在 host gcc 路径下需要（产物链 GLIBCXX_3.4.26，要 GCC 10.3 的
     # libstdc++）；manylinux 路径产物本身只要 GLIBCXX≤3.4.22，系统 libstdc++ 就够。
@@ -428,18 +459,19 @@ validate_duck() {
     if [[ "${MANYLINUX:-1}" != "1" && "$arch" == "x86" ]]; then
         ld_setup="export LD_LIBRARY_PATH=$X86_GCC_DIR/lib64:\${LD_LIBRARY_PATH:-};"
     fi
+    local cli_us; cli_us=$(echo "$dver" | sed 's/^v//; s/\./_/g')   # v1.5.2 → 1_5_2 (兼容旧命名)
     rssh "$arch" "set -e
         $ld_setup
-        EXT=\$HOME/$REMOTE_DIR/vexdb_lite/build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension
+        EXT=\$HOME/$REMOTE_DIR/vexdb_lite/build/duck/$dver/build/extension/vexdb_lite/vexdb_lite.duckdb_extension
         CLI=
-        for cand in \$HOME/$REMOTE_DIR/vexdb_lite/build/duck/build/duckdb \$HOME/duckdb_cli_1_5_2 /tmp/duckdb; do
+        for cand in \$HOME/$REMOTE_DIR/vexdb_lite/build/duck/$dver/build/duckdb \$HOME/duckdb_cli_$cli_us; do
             [ -x \"\$cand\" ] && { CLI=\$cand; break; }
         done
         if [ -n \"\$CLI\" ]; then
             echo \"  using CLI: \$CLI\"
             \"\$CLI\" -unsigned -c \"LOAD '\$EXT'; SELECT vexdb_version();\" 2>&1 | tail -3
         else
-            echo '  (skip LOAD smoke: 找不到任何 duckdb CLI)'
+            echo '  (skip LOAD smoke: 找不到 $dver 版 duckdb CLI)'
         fi" \
         || { echo "LOAD smoke 失败"; return 1; }
     info "  LOAD smoke 通过"
@@ -582,9 +614,13 @@ cmd_build() {
 
     for arch in "${ARCHES[@]}"; do stage "$arch"; done
 
-    for arch in "${ARCHES[@]}"; do
-        [[ "$TARGET" == "duck" || "$TARGET" == "all" ]] && build_duck "$arch"
-    done
+    # DuckDB：按 DUCKDB_VERSIONS 逐版本构建（C++ 扩展版本锁定，每版各编一份）。
+    if [[ "$TARGET" == "duck" || "$TARGET" == "all" ]]; then
+        for dver in $DUCKDB_VERSIONS; do
+            section "DuckDB 版本 $dver"
+            for arch in "${ARCHES[@]}"; do build_duck "$arch" "$dver"; done
+        done
+    fi
 
     # PG：按 PG_VERSIONS 逐版本构建（每条覆盖 PG_VERSION + 该版本的 x86/arm pg_config）。
     if [[ "$TARGET" == "pg" || "$TARGET" == "all" ]]; then
@@ -596,7 +632,7 @@ cmd_build() {
     fi
 
     section "build 完成"
-    find "$DIST_DIR" -maxdepth 2 -type f \( -name "*.duckdb_extension" -o -name "vexdb_lite.so" \
+    find "$DIST_DIR" -maxdepth 3 -type f \( -name "*.duckdb_extension" -o -name "vexdb_lite.so" \
         -o -name "*.control" -o -name "*.sql" \) -exec ls -lh {} \;
 }
 
@@ -654,18 +690,21 @@ cmd_package() {
         # 打包前清掉源目录里残留的 AppleDouble (防御性,正常情况下不该有)
         find "$archdir" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null
 
-        if [[ -f "$archdir/vexdb_lite.duckdb_extension" ]]; then
-            pkg_tar "$RELEASE_DIR/vexdb-lite-duckdb-linux-${arch}.tar.gz" "$archdir" \
-                vexdb_lite.duckdb_extension
-        fi
-
-        # Duck debug symbols 单独 ship,跟 PG 对齐(参 line 483 注释)。Duck 走
-        # unstripped 全量(没做 objcopy split-debug),比 PG 的 .so.debug 大但
-        # 客户没出 crash 用不到;命名跟 PG 对齐用 -debugsymbols- 后缀。
-        if [[ -f "$archdir/vexdb_lite.duckdb_extension.unstripped" ]]; then
-            pkg_tar "$RELEASE_DIR/vexdb-lite-duckdb-debugsymbols-linux-${arch}.tar.gz" "$archdir" \
-                vexdb_lite.duckdb_extension.unstripped
-        fi
+        # DuckDB：每个版本从 $archdir/<dver> 子目录打包（build_duck 已按版本下载）。
+        # C++ 扩展版本锁定，tarball 命名带 DuckDB 版本，客户按自己的 DuckDB 版本下对应包。
+        # Duck debug symbols 单独 ship,跟 PG 对齐。Duck 走 unstripped 全量(没做
+        # objcopy split-debug),比 PG 的 .so.debug 大但客户没出 crash 用不到。
+        for dver in $DUCKDB_VERSIONS; do
+            local ddir="$archdir/$dver"
+            if [[ -f "$ddir/vexdb_lite.duckdb_extension" ]]; then
+                pkg_tar "$RELEASE_DIR/vexdb-lite-duckdb-${dver}-linux-${arch}.tar.gz" "$ddir" \
+                    vexdb_lite.duckdb_extension
+            fi
+            if [[ -f "$ddir/vexdb_lite.duckdb_extension.unstripped" ]]; then
+                pkg_tar "$RELEASE_DIR/vexdb-lite-duckdb-${dver}-debugsymbols-linux-${arch}.tar.gz" "$ddir" \
+                    vexdb_lite.duckdb_extension.unstripped
+            fi
+        done
 
         # PG：每个版本从 $archdir/<版本> 子目录打包（build_pg 已按版本下载到子目录）。
         # PG debug symbols ship as a separate asset (Fedora/Debian convention):
@@ -740,15 +779,19 @@ cmd_test() {
     [[ "$arch_arg" == "all" || "$arch_arg" == "x86" ]] && arches+=("x86")
     [[ "$arch_arg" == "all" || "$arch_arg" == "arm" ]] && arches+=("arm")
 
-    for arch in "${arches[@]}"; do
-        section "$arch spec test (manylinux container)"
-        _spec_test_manylinux "$arch" || fail "$arch spec test 失败"
+    # 每个 DuckDB 版本各跑一遍 spec（用对应版本的 build/duck/<ver>/build 树）。
+    for dver in $DUCKDB_VERSIONS; do
+        for arch in "${arches[@]}"; do
+            section "$arch spec test $dver (manylinux container)"
+            _spec_test_manylinux "$arch" "$dver" || fail "$arch $dver spec test 失败"
+        done
     done
     ok "spec test 全过"
 }
 
 _spec_test_manylinux() {
-    local arch=$1 image boost_src docker_pfx
+    local arch=$1 dver=$2 image boost_src docker_pfx
+    local rbuild="build/duck/$dver/build"
     if [[ "$arch" == "x86" ]]; then
         image="quay.io/pypa/manylinux_2_28_x86_64"
         boost_src="$X86_BOOST"
@@ -775,8 +818,8 @@ _spec_test_manylinux() {
               \$PY -m pip install --quiet cmake==3.29.6
             export PATH=\$(dirname \$PY):\$PATH
             find vexdb_duckdb/test -name \"._*\" -delete 2>/dev/null || true
-            cmake --build build/duck/build --target unittest -j 8 2>&1 | tail -5
-            ./build/duck/build/test/unittest \"[spec_run]\"
+            cmake --build $rbuild --target unittest -j 8 2>&1 | tail -5
+            ./$rbuild/test/unittest \"[spec_run]\"
         '" || return 1
 }
 

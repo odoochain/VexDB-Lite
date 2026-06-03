@@ -34,6 +34,11 @@ static void RegisterIndexTypes(DBConfig &config) {
     config.GetIndexTypes().RegisterIndexType(std::move(graph_index_type));
 }
 
+// Version locking note: C++ extensions have no stable ABI, so a binary built for
+// one DuckDB version must not be loaded into another. DuckDB enforces this natively
+// from the extension's footer (the VERSION_FIELD stamped by build_duck.sh strip /
+// fix_duckdb_footer.py): the loader rejects a version mismatch with a clear error
+// before dlopen — even under allow_unsigned_extensions. No in-init guard is needed.
 void LoadInternal(ExtensionLoader &loader) {
     VexFunctions::Register(loader);
     loader.RegisterFunction(ScalarFunction("vexdb_version", {}, LogicalType::VARCHAR, VexVersionFunction));

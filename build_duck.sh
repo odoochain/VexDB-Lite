@@ -2,7 +2,13 @@
 # build_duck.sh — manage the vexdb_duckdb DuckDB extension build under build/duck/
 #
 # Usage:
-#   ./build_duck.sh setup          # clone DuckDB v1.5.2 + cmake configure
+#   ./build_duck.sh setup          # clone DuckDB ($DUCKDB_VERSION) + cmake configure
+#
+# Target DuckDB version is set via the DUCKDB_VERSION env var (default v1.5.2).
+# C++ extensions are version-locked, so build one per target version, e.g.:
+#   DUCKDB_VERSION=v1.5.0 ./build_duck.sh setup build strip
+#   DUCKDB_VERSION=v1.5.2 ./build_duck.sh setup build strip
+# Each version gets its own build/duck/<version>/ tree; datasets are shared.
 #   ./build_duck.sh build          # incremental build of vex extension + static libs
 #   ./build_duck.sh bin            # compile smoke + benchmark binaries
 #   ./build_duck.sh data           # convert SIFT HDF5 → fbin (one-time)
@@ -21,11 +27,20 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DUCK_ROOT="$PROJECT_DIR/build/duck"
+
+# Target DuckDB version. C++ extensions have no stable ABI, so one build only
+# works against the exact DuckDB version it was compiled for. Override to build
+# for another release, e.g.:  DUCKDB_VERSION=v1.5.0 ./build_duck.sh setup build
+DUCKDB_VERSION="${DUCKDB_VERSION:-v1.5.2}"
+# Each target version gets its own source + build tree under build/duck/<version>/
+# so multiple DuckDB versions can be built and cached side by side (full matrix).
+DUCK_BASE="$PROJECT_DIR/build/duck"
+DUCK_ROOT="$DUCK_BASE/$DUCKDB_VERSION"
 DUCK_SRC="$DUCK_ROOT/duckdb_src"
 DUCK_BUILD="$DUCK_ROOT/build"
 DUCK_BIN="$DUCK_ROOT/bin"
-DUCK_DATA="$DUCK_ROOT/data"
+# Benchmark datasets are version-independent — share one copy across versions.
+DUCK_DATA="$DUCK_BASE/data"
 
 VEX_SRC="$PROJECT_DIR/vexdb_duckdb"
 VEX_INCLUDE="$VEX_SRC/include"
@@ -47,11 +62,26 @@ fail()  { printf '%b[duck]%b %s\n' "$RED" "$NC" "$*" >&2; exit 1; }
 
 cmd_setup() {
     mkdir -p "$DUCK_ROOT" "$DUCK_BIN" "$DUCK_DATA"
-    if [[ ! -d "$DUCK_SRC/.git" ]]; then
-        info "shallow-cloning DuckDB v1.5.2 → $DUCK_SRC"
-        git clone --depth=1 --branch=v1.5.2 https://github.com/duckdb/duckdb.git "$DUCK_SRC"
+    # Version stamp written by us — git is unreliable here: release.sh leaves an
+    # empty .git placeholder and rsync'd trees have no tag, so `git describe`
+    # silently resolves to the PARENT repo's tag. A plain file is the source of
+    # truth for "which DuckDB tag this src tree is".
+    local stamp="$DUCK_SRC/.vexdb_target_version"
+    if [[ ! -e "$DUCK_SRC/CMakeLists.txt" ]]; then
+        info "shallow-cloning DuckDB $DUCKDB_VERSION → $DUCK_SRC"
+        rm -rf "$DUCK_SRC"
+        git clone --depth=1 --branch="$DUCKDB_VERSION" https://github.com/duckdb/duckdb.git "$DUCK_SRC"
+        echo "$DUCKDB_VERSION" > "$stamp"
     else
-        info "DuckDB source already at $DUCK_SRC ($(git -C "$DUCK_SRC" describe --tags 2>/dev/null || echo unknown))"
+        local have_ver
+        have_ver="$(cat "$stamp" 2>/dev/null || echo unknown)"
+        info "DuckDB source already at $DUCK_SRC (stamp: $have_ver)"
+        # Guard against the "thought I built v1.5.0 but it's still v1.5.2" trap.
+        # Unstamped legacy/rsync'd trees pass through (assumed correct); stamped
+        # trees that disagree with DUCKDB_VERSION abort and ask for a purge.
+        if [[ "$have_ver" != "unknown" && "$have_ver" != "$DUCKDB_VERSION" ]]; then
+            fail "existing DuckDB src is '$have_ver' but DUCKDB_VERSION=$DUCKDB_VERSION. Run: $0 purge  (then setup again)"
+        fi
     fi
 
     cat > "$DUCK_SRC/extension/extension_config_local.cmake" <<EOF
@@ -69,7 +99,7 @@ EOF
         -DBUILD_UNITTESTS=ON \
         -DENABLE_EXTENSION_AUTOLOADING=OFF \
         -DENABLE_EXTENSION_AUTOINSTALL=OFF \
-        -DOVERRIDE_GIT_DESCRIBE=v1.5.2 \
+        -DOVERRIDE_GIT_DESCRIBE="$DUCKDB_VERSION" \
         -DDUCKDB_EXTENSION_CONFIGS="$DUCK_SRC/extension/extension_config_local.cmake"
     ok "setup complete"
 }
@@ -136,7 +166,7 @@ cmd_strip() {
         -DABI_TYPE=CPP \
         -DEXTENSION="$EXTENSION_PATH" \
         -DPLATFORM_FILE="$platform_file" \
-        -DVERSION_FIELD="v1.5.2" \
+        -DVERSION_FIELD="$DUCKDB_VERSION" \
         -DEXTENSION_VERSION="" \
         -DNULL_FILE="$null_file" \
         -P "$append_cmake"
@@ -152,7 +182,7 @@ cmd_strip() {
     local fix_script="$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/scripts/fix_duckdb_footer.py"
     [[ -f "$fix_script" ]] || fail "fix_duckdb_footer.py missing: $fix_script"
     info "post-fix footer padding (DuckDB cmake bug workaround)"
-    python3 "$fix_script" "$EXTENSION_PATH" "$(cat "$platform_file")" v1.5.2 CPP ""
+    python3 "$fix_script" "$EXTENSION_PATH" "$(cat "$platform_file")" "$DUCKDB_VERSION" CPP ""
     local final_size
     final_size=$(stat -c%s "$EXTENSION_PATH" 2>/dev/null || stat -f%z "$EXTENSION_PATH")
     ok "strip+reseal done: $EXTENSION_PATH ($((final_size/1024/1024)) MB, footer present)"
@@ -204,7 +234,7 @@ cmd_data() {
     fi
     [[ -f "$ANN_HDF5_SRC" ]] || fail "missing source HDF5: $ANN_HDF5_SRC (override with ANN_HDF5_SRC=...)"
     info "converting SIFT HDF5 → fbin"
-    python3 "$DUCK_ROOT/convert_sift.py"
+    python3 "$DUCK_BASE/convert_sift.py"
     ok "data ready under $DUCK_DATA/"
 }
 
@@ -269,7 +299,7 @@ cmd_status() {
 }
 
 usage() {
-    sed -n '2,21p' "$0"
+    sed -n '2,26p' "$0"
 }
 
 CMD="${1:-}"; shift 2>/dev/null || true
