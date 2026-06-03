@@ -49,9 +49,9 @@ Current functionality:
 ---
 
 ## 2. Capability Matrix
-### 2.1 PG Extension Comparison (pgvector vs vexdb-lite vs VexDB)
+### 2.1 PG Extension Comparison (PGVector vs VexDB-Lite vs VexDB)
 
-| Category | Feature | Description | pgvector | vexdb-lite (open-source) | VexDB (commercial) |
+| Category | Feature | Description | PGVector | VexDB-Lite (open-source) | VexDB (commercial) |
 |---|---|---|:---:|:---:|:---:|
 | Graph Index | graph_index | A fully self-developed high-performance graph index that merges the advantages of various graph indexes and works seamlessly across all scenarios.| ❌ | ✅ | ✅ |
 | Distance | Distance function dispatch | Inlined distance functions, compile-time optimized | ❌ | ✅ | ✅ |
