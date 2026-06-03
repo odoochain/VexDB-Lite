@@ -409,7 +409,7 @@ validate_duck() {
     rssh "$arch" "set -e
         test -f $ext_path
         file $ext_path | grep -q ELF
-        nm -D $ext_path 2>/dev/null | grep -qE 'vex_duckdb.*init|vex_init|duckdb_init'
+        nm -D $ext_path 2>/dev/null | grep -qE 'vexdb_lite.*init|vex_duckdb.*init|duckdb_cpp_init'
         test \$(stat -c %s $ext_path) -gt 1048576
         # footer canary — append_metadata.cmake 写入的 custom-section 名字
         grep -aq duckdb_signature $ext_path || { echo 'missing footer'; exit 1; }" \
