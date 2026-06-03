@@ -135,7 +135,7 @@ LIMIT 10;
 ```sql
 SELECT id
 FROM items
-ORDER BY vec <#> '[0.15, 0.25, 0.35]'
+ORDER BY vec <~> '[0.15, 0.25, 0.35]'
 LIMIT 10;
 
 SELECT id

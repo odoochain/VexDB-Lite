@@ -249,7 +249,11 @@ CREATE OPERATOR CLASS floatvector_l2_ops
 
 CREATE OPERATOR CLASS floatvector_ip_ops
     FOR TYPE floatvector USING vexdb_graph AS
+    -- <#> (strategy 1): pgvector 兼容写法。
+    -- <~> (strategy 2): 跨引擎统一写法，与 DuckDB 的 <~> 负内积一致。
+    -- 两者同为负内积；metric 来自索引元数据(FUNCTION 1)，与查询用哪个算符无关。
     OPERATOR 1 <#> (floatvector, floatvector) FOR ORDER BY float_ops,
+    OPERATOR 2 <~> (floatvector, floatvector) FOR ORDER BY float_ops,
     FUNCTION 1 floatvector_negative_inner_product(floatvector, floatvector);
 
 CREATE OPERATOR CLASS floatvector_cosine_ops
