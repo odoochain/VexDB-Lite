@@ -30,7 +30,7 @@ DUCK_DATA="$DUCK_ROOT/data"
 VEX_SRC="$PROJECT_DIR/vexdb_duckdb"
 VEX_INCLUDE="$VEX_SRC/include"
 VEX_TEST="$VEX_SRC/test"
-EXTENSION_PATH="$DUCK_BUILD/extension/vex/vex.duckdb_extension"
+EXTENSION_PATH="$DUCK_BUILD/extension/vexdb_lite/vexdb_lite.duckdb_extension"
 LIBDUCKDB="$DUCK_BUILD/src/libduckdb_static.a"
 LIBLOADER="$DUCK_BUILD/extension/libdummy_static_extension_loader.a"
 LIBCORE="$DUCK_BUILD/extension/core_functions/libcore_functions_extension.a"
@@ -55,7 +55,7 @@ cmd_setup() {
     fi
 
     cat > "$DUCK_SRC/extension/extension_config_local.cmake" <<EOF
-duckdb_extension_load(vex
+duckdb_extension_load(vexdb_lite
     SOURCE_DIR $VEX_SRC
     INCLUDE_DIR $VEX_INCLUDE
     LOAD_TESTS
@@ -76,15 +76,15 @@ EOF
 
 cmd_build() {
     [[ -f "$DUCK_BUILD/CMakeCache.txt" ]] || cmd_setup
-    info "building vex_loadable_extension + core_functions + duckdb_static + dummy_loader (j=$NCPU)"
+    info "building vexdb_lite_loadable_extension + core_functions + duckdb_static + dummy_loader (j=$NCPU)"
     cmake --build "$DUCK_BUILD" \
-        --target vex_loadable_extension core_functions_extension duckdb_static dummy_static_extension_loader \
+        --target vexdb_lite_loadable_extension core_functions_extension duckdb_static dummy_static_extension_loader \
         -j "$NCPU"
     [[ -f "$EXTENSION_PATH" ]] || fail "build finished but extension missing: $EXTENSION_PATH"
     ok "build done: $EXTENSION_PATH ($(du -h "$EXTENSION_PATH" | cut -f1))"
 }
 
-# strip vex.duckdb_extension and re-append metadata footer.
+# strip vexdb_lite.duckdb_extension and re-append metadata footer.
 #
 # DuckDB extension metadata is a 534-byte raw-bytes footer appended after the
 # ELF tables by append_metadata.cmake (POST_BUILD). `strip` rewrites the ELF

@@ -13,17 +13,17 @@ steps:
     \ || ']')::floatvector\nFROM generate_series(0, 499) AS t(i);"
 - statement: CREATE INDEX idx_plain ON pq_t USING vexdb_graph (vec);
 - statement: CREATE INDEX idx_pq ON pq_t USING vexdb_graph (vec) WITH (quantizer = 'pq', pq_m = 4);
-- query: SELECT use_pq FROM vex_index_info() WHERE indexname = 'idx_plain';
+- query: SELECT use_pq FROM vexdb_index_info() WHERE indexname = 'idx_plain';
   expect: []
-- query: SELECT use_pq FROM vex_index_info() WHERE indexname = 'idx_pq';
+- query: SELECT use_pq FROM vexdb_index_info() WHERE indexname = 'idx_pq';
   expect: []
-- query: SELECT pq_m FROM vex_index_info() WHERE indexname = 'idx_pq';
+- query: SELECT pq_m FROM vexdb_index_info() WHERE indexname = 'idx_pq';
   expect: []
-- query: SELECT pq_codebook_bytes FROM vex_index_info() WHERE indexname = 'idx_pq';
+- query: SELECT pq_codebook_bytes FROM vexdb_index_info() WHERE indexname = 'idx_pq';
   expect: []
-- query: SELECT pq_codes_bytes FROM vex_index_info() WHERE indexname = 'idx_pq';
+- query: SELECT pq_codes_bytes FROM vexdb_index_info() WHERE indexname = 'idx_pq';
   expect: []
-- query: SELECT pq_codebook_bytes, pq_codes_bytes FROM vex_index_info() WHERE indexname = 'idx_plain';
+- query: SELECT pq_codebook_bytes, pq_codes_bytes FROM vexdb_index_info() WHERE indexname = 'idx_plain';
   expect: []
 - query: SELECT id FROM pq_t ORDER BY l2_distance(vec, '[1,2,3,4,5,6,7,8]'::floatvector) LIMIT 1;
   expect: []
@@ -31,13 +31,13 @@ steps:
 - statement: '\echo "TODO: pg_ctl restart here"
 
     '
-- query: SELECT use_pq FROM vex_index_info() WHERE indexname = 'idx_pq';
+- query: SELECT use_pq FROM vexdb_index_info() WHERE indexname = 'idx_pq';
   expect: []
-- query: SELECT pq_m FROM vex_index_info() WHERE indexname = 'idx_pq';
+- query: SELECT pq_m FROM vexdb_index_info() WHERE indexname = 'idx_pq';
   expect: []
-- query: SELECT pq_codebook_bytes FROM vex_index_info() WHERE indexname = 'idx_pq';
+- query: SELECT pq_codebook_bytes FROM vexdb_index_info() WHERE indexname = 'idx_pq';
   expect: []
-- query: SELECT pq_codes_bytes FROM vex_index_info() WHERE indexname = 'idx_pq';
+- query: SELECT pq_codes_bytes FROM vexdb_index_info() WHERE indexname = 'idx_pq';
   expect: []
 - query: SELECT id FROM pq_t ORDER BY l2_distance(vec, '[1,2,3,4,5,6,7,8]'::floatvector) LIMIT 1;
   expect: []

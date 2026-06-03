@@ -19,7 +19,7 @@ steps:
 - statement: CHECKPOINT;
 - raw_directive: restart
 - statement: DELETE FROM t1 WHERE id = -999;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
   _field_types: I
   expect:
   - - 'true'
@@ -32,7 +32,7 @@ steps:
   _field_types: I
   expect:
   - - 20
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx1';
   _field_types: I
   expect:
   - - 'true'
@@ -64,16 +64,16 @@ steps:
 - statement: CHECKPOINT;
 - raw_directive: restart
 - statement: DELETE FROM t2 WHERE id = -999;
-- query: SELECT node_count > 0 FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
+- query: SELECT node_count > 0 FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
   _field_types: I
   expect:
   - - 'true'
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
   _field_types: I
   expect:
   - - 'true'
 - statement: DELETE FROM t2 WHERE id IN (1, 25, 50, 75, 100);
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx2';
   _field_types: I
   expect:
   - - 'true'
@@ -98,7 +98,7 @@ steps:
 - statement: 'INSERT INTO t3 SELECT i, list_value(sin(i)::FLOAT, cos(i)::FLOAT, 0.3, 0.4)::${VECTOR(4)}
 
     FROM ${RANGE2(81, 101)} t(i);'
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx3';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx3';
   _field_types: I
   expect:
   - - 'true'
@@ -106,7 +106,7 @@ steps:
 - statement: 'INSERT INTO t3 SELECT i, list_value(cos(i)::FLOAT, sin(i)::FLOAT, 0.5, 0.6)::${VECTOR(4)}
 
     FROM ${RANGE2(101, 121)} t(i);'
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx3';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx3';
   _field_types: I
   expect:
   - - 'true'

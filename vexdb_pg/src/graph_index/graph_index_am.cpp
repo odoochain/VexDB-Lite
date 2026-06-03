@@ -207,7 +207,7 @@ graph_index_amgettuple(IndexScanDesc scan, ScanDirection direction)
     (void)direction;
     float dist_out;
     return graph_index_gettuple_internal(scan, scan->opaque, GRAPH_INDEX_METAPAGE_BLKNO,
-                                         vexdb_vector_get_ef_search(), &dist_out);
+                                         vexdb_lite_get_ef_search(), &dist_out);
 }
 
 static void

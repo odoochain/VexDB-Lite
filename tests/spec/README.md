@@ -45,8 +45,8 @@ tests/spec/
 │   ├── functions/  (3)
 │   └── index/      (20)
 ├── duckdb/                        ✅ DuckDB 独有 (~80 个)
-│   ├── functions/                 含 list_transform / vex_index_info / 表达式数组等 DuckDB-only
-│   └── index/                     含 ATTACH / restart / optimizer_explain / vex_simd_arch 等
+│   ├── functions/                 含 list_transform / vexdb_index_info / 表达式数组等 DuckDB-only
+│   └── index/                     含 ATTACH / restart / optimizer_explain / vexdb_simd_arch 等
 ├── pg/                            🟡 PG 独有 (待补; 13 个 PG 专属用例)
 └── opengauss/                     🟡 openGauss 独有 (待补; ivfpq_basic_hnsw_adapted 等)
 ```

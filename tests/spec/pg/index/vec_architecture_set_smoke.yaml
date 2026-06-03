@@ -7,7 +7,7 @@ description: |
   GUC-syntax surface smoke.
 engines: [pg]
 skip:
-  pg: "GUC token 集合 'all:scalar' / 'l2:scalar, ip:scalar' 被 vexdb_vector check_hook 拒绝, 待与主库 openGauss-vector-main vec_architecture 校验器对齐"
+  pg: "GUC token 集合 'all:scalar' / 'l2:scalar, ip:scalar' 被 vexdb_lite check_hook 拒绝, 待与主库 openGauss-vector-main vec_architecture 校验器对齐"
 steps:
   - statement: DROP TABLE IF EXISTS t_va_rule;
   - statement: CREATE TABLE t_va_rule (id int, v floatvector(8));

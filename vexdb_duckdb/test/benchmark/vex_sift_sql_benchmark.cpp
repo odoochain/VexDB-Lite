@@ -196,7 +196,7 @@ static void RunOne(const string &data_dir, bool use_100k, const string &extensio
     const string first_query_vec = MakeQueryArrayLiteral(queries.data(), D);
     const string first_query = "SELECT id FROM sift ORDER BY l2_distance(vec, " + first_query_vec + ") LIMIT 10";
     const string explain_plan = ReadExplain(con, "EXPLAIN " + first_query);
-    const bool uses_index = explain_plan.find("VEX_INDEX_SCAN") != string::npos;
+    const bool uses_index = explain_plan.find("VEXDB_INDEX_SCAN") != string::npos;
 
     double recall10 = 0.0;
     double recall100 = 0.0;
@@ -229,7 +229,7 @@ static void RunOne(const string &data_dir, bool use_100k, const string &extensio
 
 int main(int argc, char **argv) {
     string data_dir = "vexdb_duckdb/test/benchmark/data";
-    string extension_path = "/tmp/vexdb_duckdb-build/extension/vex/vex.duckdb_extension";
+    string extension_path = "/tmp/vexdb_duckdb-build/extension/vexdb_lite/vexdb_lite.duckdb_extension";
     string dataset = "both";
 
     if (argc > 1) {

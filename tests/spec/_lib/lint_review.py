@@ -24,7 +24,7 @@ DUCKDB_ONLY_PATTERNS = [
     (re.compile(r"\bATTACH\s"), "ATTACH (DuckDB only) - 标 skip:pg"),
     (re.compile(r"\bDETACH\s"), "DETACH (DuckDB only) - 标 skip:pg"),
     (re.compile(r"\bduckdb_\w+\("), "duckdb_xxx() 系统函数 - 字典补全或 skip:pg"),
-    (re.compile(r"\bvex_index_info\b"), "vex_index_info() (DuckDB only) - 标 skip:pg"),
+    (re.compile(r"\bvexdb_index_info\b"), "vexdb_index_info() (DuckDB only) - 标 skip:pg"),
     (re.compile(r"\bvex_inspect\w*\b"), "vex_inspect_*() (DuckDB only) - 标 skip:pg"),
     (re.compile(r"::FLOAT\["), "DuckDB-only ::FLOAT[N] cast 残留 (含表达式) - 标 skip:pg"),
     (re.compile(r"\bEXPLAIN\s+ANALYZE\b", re.I), "EXPLAIN ANALYZE - output 引擎差异大, 标 skip:pg"),

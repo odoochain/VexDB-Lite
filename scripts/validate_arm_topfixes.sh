@@ -4,7 +4,7 @@
 # Drive the full Top 3 ROI matrix (Marina protocol) across multiple git refs.
 # Each matrix row = (label, arch, git_ref). For every row:
 #   1. ssh to ARM host, fetch + checkout ref
-#   2. rebuild vexdb_vector extension
+#   2. rebuild vexdb_lite extension
 #   3. invoke validate_arm_perf.sh
 # After all rows complete, aggregate per-label summaries into results/REPORT.md
 # with A/B comparisons referenced back to baseline-general.

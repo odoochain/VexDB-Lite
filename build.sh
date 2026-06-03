@@ -258,7 +258,7 @@ case "$CMD" in
         mkdir -p "$LIBVEXDB_DIR"
         echo -e "${YELLOW}[Package] Merging into libvexdb.a...${NC}"
         xcrun libtool -static -o "$LIBVEXDB_DIR/libvexdb.a" \
-            "$BUILD_DIR/extension/vex/libvex_extension.a" \
+            "$BUILD_DIR/extension/vexdb_lite/libvex_extension.a" \
             "$BUILD_DIR/extension/core_functions/libcore_functions_extension.a" \
             "$BUILD_DIR/extension/libduckdb_generated_extension_loader.a" \
             "$BUILD_DIR/src/libduckdb_static.a" \
@@ -307,7 +307,7 @@ case "$CMD" in
         # Create MRI script for proper thin archive merge
         MRI_SCRIPT="$LIBVEXDB_DIR/merge.mri"
         echo "create $LIBVEXDB_DIR/libvexdb.a" > "$MRI_SCRIPT"
-        echo "addlib $BUILD_DIR/extension/vex/libvex_extension.a" >> "$MRI_SCRIPT"
+        echo "addlib $BUILD_DIR/extension/vexdb_lite/libvex_extension.a" >> "$MRI_SCRIPT"
         echo "addlib $BUILD_DIR/extension/core_functions/libcore_functions_extension.a" >> "$MRI_SCRIPT"
         echo "addlib $BUILD_DIR/extension/libduckdb_generated_extension_loader.a" >> "$MRI_SCRIPT"
         echo "addlib $BUILD_DIR/src/libduckdb_static.a" >> "$MRI_SCRIPT"

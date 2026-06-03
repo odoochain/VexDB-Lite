@@ -21,7 +21,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT id FROM t_l2 ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 0.0, 0.0], 3)})}, id LIMIT 3;
   _field_types: I
   expect:
@@ -32,12 +32,12 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: EXPLAIN SELECT id FROM t_l2 ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 0.0, 0.0], 3)})} LIMIT 3;
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - statement: CREATE TABLE t_cos (id INTEGER, vec ${VECTOR(3)});
 - statement: "INSERT INTO t_cos VALUES\n  (1, [1.0, 0.0, 0.0]),\n  (2, [0.0, 1.0, 0.0]),\n  (3, [0.0, 0.0, 1.0]),\n  (4, [0.7, 0.7, 0.0]),\n  (5, [0.0, 0.7, 0.7]),\n  (6, [0.7, 0.0, 0.7]),\n  (7, [0.5,\
     \ 0.5, 0.5]),\n  (8, [0.95, 0.05, 0.0]),\n  (9, [0.05, 0.95, 0.0]),\n  (10, [0.0, 0.05, 0.95]);"
@@ -46,7 +46,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT id FROM t_cos ORDER BY ${COSINE(vec, ${VEC_LITERAL([1.0, 0.0, 0.0], 3)})}, id LIMIT 3;
   _field_types: I
   expect:
@@ -57,12 +57,12 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: EXPLAIN SELECT id FROM t_cos ORDER BY ${COSINE(vec, ${VEC_LITERAL([1.0, 0.0, 0.0], 3)})} LIMIT 3;
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: EXPLAIN SELECT id FROM t_cos ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 0.0, 0.0], 3)})} LIMIT 3;
   _field_types: II
   expect:
@@ -76,7 +76,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT id FROM t_ip ORDER BY ${IP(vec, ${VEC_LITERAL([1.0, 0.0, 0.0], 3)})} DESC, id LIMIT 3;
   _field_types: I
   expect:
@@ -95,7 +95,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT id FROM t_alias ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 0.0, 0.0], 3)})} LIMIT 1;
   _field_types: I
   expect:
@@ -117,7 +117,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT id FROM (SELECT * FROM t_l2 ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 0.0, 0.0], 3)})} LIMIT 2);
   _field_types: I
   expect:
@@ -127,7 +127,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT id FROM t_l2 ORDER BY ${L2(vec, '[1.0, 0.0, 0.0]'::${VECTOR(3)})}, id LIMIT 3;
   _field_types: I
   expect:
@@ -138,7 +138,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT id FROM t_l2 ORDER BY ${L2(vec, '[1.0, 0.0, 0.0]'::${VECTOR(3)})} , id LIMIT 3;
   _field_types: I
   expect:
@@ -149,7 +149,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT id FROM t_l2 ORDER BY ${L2(vec, '[1.0, 0.0, 0.0]')} , id LIMIT 3;
   _field_types: I
   expect:
@@ -160,7 +160,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT id FROM t_cos ORDER BY ${COSINE(vec, '[1.0, 0.0, 0.0]'::${VECTOR(3)})} , id LIMIT 3;
   _field_types: I
   expect:
@@ -171,12 +171,12 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: EXPLAIN SELECT id FROM t_ip ORDER BY ${IP(vec, '[1.0, 0.0, 0.0]'::${VECTOR(3)})} DESC LIMIT 3;
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: SELECT id FROM t_ip ORDER BY ${IP(vec, '[1.0, 0.0, 0.0]'::${VECTOR(3)})} DESC, id LIMIT 3;
   _field_types: I
   expect:
@@ -192,17 +192,17 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: EXPLAIN SELECT id FROM t_multi ORDER BY ${COSINE(vec, '[1.0, 0.0, 0.0]'::${VECTOR(3)})} LIMIT 3;
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: EXPLAIN SELECT id FROM t_multi ORDER BY ${IP(vec, '[1.0, 0.0, 0.0]'::${VECTOR(3)})} DESC LIMIT 3;
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: EXPLAIN SELECT id FROM t_l2 ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 0.0, 0.0], 3)})};
   _field_types: II
   expect:
@@ -236,7 +236,7 @@ steps:
   _field_types: II
   expect:
   - - physical_plan
-    - <REGEX>:.*VEX_INDEX_SCAN.*
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: EXPLAIN SELECT id FROM t_recall ORDER BY ${L2(vec, ${VEC_LITERAL([0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5], 8)})} LIMIT 10;
   _field_types: II
   expect:

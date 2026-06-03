@@ -2,7 +2,7 @@
 
 **[English](README.md)** | **中文**
 
-`VexDB-Lite` 是一个高性能向量检索系统，提供 PostgreSQL（`vexdb_vector` 扩展）和 DuckDB（`vex` 扩展）两种适配形式，共享同一套 graph_index 图索引算法、SIMD 距离分发和量化器内核。
+`VexDB-Lite` 是一个高性能向量检索系统，提供 PostgreSQL（`vexdb_lite` 扩展）和 DuckDB（`vexdb_lite` 扩展）两种适配形式，共享同一套 graph_index 图索引算法、SIMD 距离分发和量化器内核。
 
 > DuckDB 扩展详见 [vexdb_duckdb/README.md](vexdb_duckdb/README.md)。  
 > 本根 README 只做项目级综述与构建总览。
@@ -11,7 +11,7 @@
 
 ## 1. 组件概览
 
-### 1.1 PostgreSQL：`vexdb_vector`
+### 1.1 PostgreSQL：`vexdb_lite`
 
 当前能力：
 
@@ -20,7 +20,7 @@
   - `l2_distance`（`<->`）
   - `cosine_distance`（`<=>`）
   - `inner_product`（负内积/最大内积检索用 `<~>`）
-- 标量工具：`vector_dims()`、`vector_norm()`、`l2_normalize()`、`vex_index_info()`
+- 标量工具：`vector_dims()`、`vector_norm()`、`l2_normalize()`、`vexdb_index_info()`
 - `CREATE INDEX ... USING vexdb_graph`
 - 索引参数：`m`、`ef_construction`、`parallel_workers`（并行构建）、`quantizer` / `pq_m`（PQ）
 - 产品量化 PQ + compact 模式
@@ -28,7 +28,7 @@
 - 共享内存向量缓存、并行建索引
 - 运行参数：`vexdb.ef_search`、`vexdb.vec_architecture`
 
-### 1.2 DuckDB：`vexdb_vector`
+### 1.2 DuckDB：`vexdb_lite`
 
 详见 [vexdb_duckdb/README.md](vexdb_duckdb/README.md)。当前能力：
 
@@ -37,11 +37,11 @@
   - `l2_distance`（`<->`）
   - `cosine_distance`（`<=>`）
   - `inner_product`（负内积/最大内积检索用 `<~>`）
-- 标量工具：`vector_dims()`、`l2_normalize()`、`vex_version()`、`vex_index_info()`
+- 标量工具：`vector_dims()`、`l2_normalize()`、`vexdb_version()`、`vexdb_index_info()`
 - `CREATE INDEX ... USING GRAPH_INDEX (vec [, metadata...])`，支持元数据过滤
 - 索引参数：`m`、`ef_construction`、`parallel_workers`（并行构建）、`quantizer` / `pq_m`（PQ）
 - 产品量化 PQ + compact 模式（百亿级内存优化）
-- 优化器生成 `VEX_INDEX_SCAN`
+- 优化器生成 `VEXDB_INDEX_SCAN`
 - 向量缓存、并行建索引
 - 运行参数：`vexdb_ef_search`、`vexdb_brute_force_threshold`、`vexdb_pq_search_mode`、`vexdb_pq_refine_k_factor`
 
@@ -70,7 +70,7 @@
 
 ### 2.2 DuckDB 扩展对比（DuckDB VSS vs VexDB-Lite）
 
-| 分类 | 功能 | 描述 | DuckDB VSS | VexDB-Lite (`vex`) |
+| 分类 | 功能 | 描述 | DuckDB VSS | VexDB-Lite (`vexdb_lite`) |
 |---|---|---|:---:|:---:|
 | 索引 | 图索引 | VSS：HNSW；VexDB：graph_index（自研融合图索引） | ✅ | ✅ |
 | 距离计算 | SIMD 分发 | 内联距离计算函数，编译时优化 | ❌ | ✅ |
@@ -92,7 +92,7 @@
 ### 3.1 安装与建表
 
 ```sql
-CREATE EXTENSION vexdb_vector;
+CREATE EXTENSION vexdb_lite;
 
 CREATE TABLE items (
     id  BIGSERIAL PRIMARY KEY,
@@ -142,7 +142,7 @@ WITH (quantizer = 'pq', pq_m = 4);
 **核对索引状态**：
 
 ```sql
-SELECT indexname, use_pq, pq_m FROM vex_index_info()
+SELECT indexname, use_pq, pq_m FROM vexdb_index_info()
 WHERE indexname = 'idx_pq';
 ```
 
@@ -179,8 +179,8 @@ LIMIT 10;
 ### 4.1 加载扩展
 
 ```sql
-LOAD '/path/to/vex.duckdb_extension';
-SELECT vex_version();
+LOAD '/path/to/vexdb_lite.duckdb_extension';
+SELECT vexdb_version();
 ```
 
 Python 侧常见用法：
@@ -189,7 +189,7 @@ Python 侧常见用法：
 import duckdb
 
 con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
-con.execute("LOAD '/path/to/vex.duckdb_extension'")
+con.execute("LOAD '/path/to/vexdb_lite.duckdb_extension'")
 ```
 
 ### 4.2 建表与建索引
@@ -243,14 +243,14 @@ SELECT inner_product([1.0, 0.0]::FLOAT[2], [0.5, 0.5]::FLOAT[2]);
 SELECT cosine_distance([1.0, 0.0]::FLOAT[2], [0.5, 0.5]::FLOAT[2]);
 SELECT vector_dims([1.0, 2.0, 3.0]::FLOAT[3]);
 SELECT l2_normalize([3.0, 4.0]::FLOAT[2]);
-SELECT * FROM vex_index_info();
+SELECT * FROM vexdb_index_info();
 ```
 
 ---
 
 ## 5. 构建方法
 
-> **预编译产物（推荐）**：见 [GitHub Releases](https://github.com/VexDB-THU/vexdb_lite/releases) 下载 `vex-duckdb-linux-<arch>.tar.gz` / `vexdb_vector-linux-<arch>-pg19.tar.gz`，无需本地编译。
+> **预编译产物（推荐）**：见 [GitHub Releases](https://github.com/VexDB-THU/vexdb_lite/releases) 下载 `vex-duckdb-linux-<arch>.tar.gz` / `vexdb_lite-linux-<arch>-pg19.tar.gz`，无需本地编译。
 >
 > **从源码构建**：每个子项目的 README 有详细步骤：
 > - DuckDB 扩展：[vexdb_duckdb/README.md#构建](vexdb_duckdb/README.md#构建)
@@ -285,7 +285,7 @@ make -j$(nproc)
 make install
 ```
 
-#### 编译 `vexdb_vector`
+#### 编译 `vexdb_lite`
 
 ```bash
 cd /path/to/VexDB
@@ -304,13 +304,13 @@ make install
 `postgresql.conf` 至少需要：
 
 ```conf
-shared_preload_libraries = 'vexdb_vector'
+shared_preload_libraries = 'vexdb_lite'
 ```
 
 重启实例后：
 
 ```sql
-CREATE EXTENSION vexdb_vector;
+CREATE EXTENSION vexdb_lite;
 ```
 
 ---
@@ -324,7 +324,7 @@ bash build_duck.sh setup   # 首次：clone DuckDB v1.5.2 并 cmake configure
 bash build_duck.sh build   # 编译扩展（增量）
 ```
 
-生成物：`build/duck/build/extension/vex/vex.duckdb_extension`
+生成物：`build/duck/build/extension/vexdb_lite/vexdb_lite.duckdb_extension`
 
 #### 依赖
 
@@ -336,7 +336,7 @@ bash build_duck.sh build   # 编译扩展（增量）
 
 DuckDB 扩展需嵌入 DuckDB 源码树编译，无法单独 `cmake -B build vexdb_duckdb/`。`build_duck.sh` 自动处理以下步骤：
 1. clone DuckDB v1.5.2 源码
-2. 写入 `extension_config_local.cmake` 注册 vex 扩展
+2. 写入 `extension_config_local.cmake` 注册 vexdb_lite 扩展
 3. 运行 `cmake` + `cmake --build`
 4. 处理扩展元数据 footer（DuckDB 发版格式要求）
 
@@ -374,8 +374,8 @@ bash tests/spec/_lib/docker/run_pg.sh test      # 运行 PG spec 测试（需 Do
 | 系统 | QPS (r=1) | QPS (r=16) | Recall@10 |
 |---|---:|---:|---:|
 | pgvector | 507.9 | 7153.5 | 96.22% |
-| **vexdb_vector (PostgreSQL)** | **994.7** | **12084.6** | 95.97% |
-| **vexdb_vector (DuckDB)** | **717.5** | **8667.8** | 95.06% |
+| **vexdb_lite (PostgreSQL)** | **994.7** | **12084.6** | 95.97% |
+| **vexdb_lite (DuckDB)** | **717.5** | **8667.8** | 95.06% |
 | duckdb-vss | 496.1 | 5360.9 | 94.07% |
 
 **ef_search = 100**
@@ -383,8 +383,8 @@ bash tests/spec/_lib/docker/run_pg.sh test      # 运行 PG spec 测试（需 Do
 | 系统 | QPS (r=1) | QPS (r=16) | Recall@10 |
 |---|---:|---:|---:|
 | pgvector | 313.4 | 4272.5 | 98.82% |
-| **vexdb_vector (PostgreSQL)** | **618.5** | **7883.1** | 98.62% |
-| **vexdb_vector (DuckDB)** | **547.2** | **5379.1** | 98.40% |
+| **vexdb_lite (PostgreSQL)** | **618.5** | **7883.1** | 98.62% |
+| **vexdb_lite (DuckDB)** | **547.2** | **5379.1** | 98.40% |
 | duckdb-vss | 405.2 | 4433.3 | 98.04% |
 
 **ef_search = 200**
@@ -392,8 +392,8 @@ bash tests/spec/_lib/docker/run_pg.sh test      # 运行 PG spec 测试（需 Do
 | 系统 | QPS (r=1) | QPS (r=16) | Recall@10 |
 |---|---:|---:|---:|
 | pgvector | 193.1 | 2694.1 | 99.66% |
-| **vexdb_vector (PostgreSQL)** | **421.3** | **5038.0** | 99.58% |
-| **vexdb_vector (DuckDB)** | **383.6** | **4298.8** | 99.53% |
+| **vexdb_lite (PostgreSQL)** | **421.3** | **5038.0** | 99.58% |
+| **vexdb_lite (DuckDB)** | **383.6** | **4298.8** | 99.53% |
 | duckdb-vss | 321.9 | 3809.3 | 99.42% |
 
 ---

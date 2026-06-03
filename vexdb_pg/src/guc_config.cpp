@@ -1,5 +1,5 @@
 /*
- * guc_config.cpp - GUC parameter definitions for vexdb_vector
+ * guc_config.cpp - GUC parameter definitions for vexdb_lite
  */
 
 #include "pg_compat.h"
@@ -7,42 +7,42 @@
 #include "distance/distance_guc.h"
 
 /* GUC variables */
-static int vexdb_vector_ef_search = 64;
-static bool vexdb_vector_enable_vec_buffer_manager = true;
-static int vexdb_vector_vector_buffers = 2097152;  /* 2GB in KB */
-static int vexdb_vector_vector_buffer_workers = 1;
-static char *vexdb_vector_vec_architecture = NULL;
+static int vexdb_lite_ef_search = 64;
+static bool vexdb_lite_enable_vec_buffer_manager = true;
+static int vexdb_lite_vector_buffers = 2097152;  /* 2GB in KB */
+static int vexdb_lite_vector_buffer_workers = 1;
+static char *vexdb_lite_vec_architecture = NULL;
 
 
 /* Reloption kind - initialized at startup */
-relopt_kind vexdb_vector_relopt_kind;
+relopt_kind vexdb_lite_relopt_kind;
 
 /* Session struct pointer for assign hooks */
-extern PgVexdbSessionAttrs vexdb_vector_session;
+extern PgVexdbSessionAttrs vexdb_lite_session;
 
 extern "C" {
 
 /* Accessor functions */
-int vexdb_vector_get_ef_search(void) { return vexdb_vector_ef_search; }
-bool vexdb_vector_get_enable_vec_buffer_manager(void) { return vexdb_vector_enable_vec_buffer_manager; }
-int vexdb_vector_get_vector_buffers(void) { return vexdb_vector_vector_buffers; }
-int vexdb_vector_get_vector_buffer_workers(void) { return vexdb_vector_vector_buffer_workers; }
+int vexdb_lite_get_ef_search(void) { return vexdb_lite_ef_search; }
+bool vexdb_lite_get_enable_vec_buffer_manager(void) { return vexdb_lite_enable_vec_buffer_manager; }
+int vexdb_lite_get_vector_buffers(void) { return vexdb_lite_vector_buffers; }
+int vexdb_lite_get_vector_buffer_workers(void) { return vexdb_lite_vector_buffer_workers; }
 
 /* Assign hook for ef_search - syncs GUC to session struct */
 static void assign_ef_search(int newval, void *extra)
 {
     (void)extra;
-    vexdb_vector_session.attr_storage.ef_search = newval;
+    vexdb_lite_session.attr_storage.ef_search = newval;
 }
 
 /*
  * Initialize GUC parameters and reloptions
  */
 void
-vexdb_vector_init_guc(void)
+vexdb_lite_init_guc(void)
 {
     /* Register custom reloption kind */
-    vexdb_vector_relopt_kind = add_reloption_kind();
+    vexdb_lite_relopt_kind = add_reloption_kind();
 
     /* Register index reloptions */
     add_int_reloption(RELOPT_KIND_GRAPH_INDEX, "m",
@@ -91,7 +91,7 @@ vexdb_vector_init_guc(void)
                             "Search list size for HNSW index search.",
                             "Controls the size of the dynamic candidate list during search. "
                             "Higher values improve recall at the cost of speed.",
-                            &vexdb_vector_ef_search,
+                            &vexdb_lite_ef_search,
                             64,
                             1, 65535,
                             PGC_USERSET,
@@ -101,7 +101,7 @@ vexdb_vector_init_guc(void)
     DefineCustomBoolVariable("vexdb.enable_vec_buffer_manager",
                               "Enable the vector buffer manager.",
                               "When enabled, uses a shared buffer pool for vector data.",
-                              &vexdb_vector_enable_vec_buffer_manager,
+                              &vexdb_lite_enable_vec_buffer_manager,
                               true,
                               PGC_POSTMASTER,
                               GUC_NOT_IN_SAMPLE,
@@ -110,7 +110,7 @@ vexdb_vector_init_guc(void)
     DefineCustomIntVariable("vexdb.vector_buffers",
                             "Memory size for vector buffers in KB.",
                             "Total memory for vector buffer manager. Each block is 1MB.",
-                            &vexdb_vector_vector_buffers,
+                            &vexdb_lite_vector_buffers,
                             2097152,  /* 2GB in KB */
                             64 * 1024, INT_MAX / 2,
                             PGC_POSTMASTER,
@@ -120,7 +120,7 @@ vexdb_vector_init_guc(void)
     DefineCustomIntVariable("vexdb.vector_buffer_workers",
                             "Number of background workers for vector buffer management.",
                             "Workers handle buffer expansion and eviction. Set to 0 to disable.",
-                            &vexdb_vector_vector_buffer_workers,
+                            &vexdb_lite_vector_buffer_workers,
                             1, 0, 16,
                             PGC_POSTMASTER,
                             GUC_NOT_IN_SAMPLE,
@@ -131,14 +131,14 @@ vexdb_vector_init_guc(void)
                                "Format: 'usage:arch[, usage:arch, ...]'. "
                                "Usage: all, float, half, int8, l2, ip, cos, or combinations like float_l2. "
                                "Arch: scalar, sse, avx, avx512, etc. Empty string means auto-detect.",
-                               &vexdb_vector_vec_architecture,
+                               &vexdb_lite_vec_architecture,
                                "",
                                PGC_SUSET,
                                GUC_NOT_IN_SAMPLE,
                                check_vec_arch_str, assign_vec_arch, NULL);
 
     /* Initialize session struct from GUC defaults */
-    vexdb_vector_session.attr_storage.ef_search = vexdb_vector_ef_search;
+    vexdb_lite_session.attr_storage.ef_search = vexdb_lite_ef_search;
 }
 
 } /* extern "C" */

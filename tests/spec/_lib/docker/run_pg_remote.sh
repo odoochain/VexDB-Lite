@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# PG spec runner — 连远程已部署的 PG 19 + vexdb_vector (无 Docker)
+# PG spec runner — 连远程已部署的 PG 19 + vexdb_lite (无 Docker)
 #
-# 适用: 已经在远程机器上跑着 PG 19 + 装好 vexdb_vector 扩展, 仅需把 spec 推过去跑.
+# 适用: 已经在远程机器上跑着 PG 19 + 装好 vexdb_lite 扩展, 仅需把 spec 推过去跑.
 # 与 run_pg.sh (Docker 自包含) 互补.
 #
 # 环境变量:

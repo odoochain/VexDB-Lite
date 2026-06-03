@@ -1,4 +1,4 @@
-#include "vex_extension.hpp"
+#include "vexdb_lite_extension.hpp"
 
 #include "vex_functions.hpp"
 #include "vex_graph_index.hpp"
@@ -22,7 +22,7 @@ namespace duckdb {
 
 static void VexVersionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     result.SetValue(0, StringVector::AddString(
-                           result, "vexdb_vector duck extension " VEXDB_DUCK_GIT_HASH " (" VEXDB_DUCK_BUILD_TIME ")"));
+                           result, "vexdb_lite duck extension " VEXDB_DUCK_GIT_HASH " (" VEXDB_DUCK_BUILD_TIME ")"));
     result.SetVectorType(VectorType::CONSTANT_VECTOR);
 }
 
@@ -36,7 +36,7 @@ static void RegisterIndexTypes(DBConfig &config) {
 
 void LoadInternal(ExtensionLoader &loader) {
     VexFunctions::Register(loader);
-    loader.RegisterFunction(ScalarFunction("vex_version", {}, LogicalType::VARCHAR, VexVersionFunction));
+    loader.RegisterFunction(ScalarFunction("vexdb_version", {}, LogicalType::VARCHAR, VexVersionFunction));
 
     auto &db = loader.GetDatabaseInstance();
     auto &config = DBConfig::GetConfig(db);
@@ -69,22 +69,22 @@ void LoadInternal(ExtensionLoader &loader) {
 
 }
 
-void VexExtension::Load(ExtensionLoader &loader) {
+void VexdbLiteExtension::Load(ExtensionLoader &loader) {
     LoadInternal(loader);
 }
 
-std::string VexExtension::Name() {
-    return "vex";
+std::string VexdbLiteExtension::Name() {
+    return "vexdb_lite";
 }
 
-std::string VexExtension::Version() const {
+std::string VexdbLiteExtension::Version() const {
     return "0.1.0";
 }
 
 } // namespace duckdb
 
 extern "C" {
-DUCKDB_CPP_EXTENSION_ENTRY(vex, loader) {
+DUCKDB_CPP_EXTENSION_ENTRY(vexdb_lite, loader) {
     duckdb::LoadInternal(loader);
 }
 }

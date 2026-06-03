@@ -441,7 +441,7 @@ private:
 
         EnterParallelMode();
 
-        parallel_pcxt = CreateParallelContext("vexdb_vector",
+        parallel_pcxt = CreateParallelContext("vexdb_lite",
             "graph_index_parallel_build_main", parallel_workers);
 
         Size dsm_size = MAXALIGN(sizeof(GraphIndexShared))

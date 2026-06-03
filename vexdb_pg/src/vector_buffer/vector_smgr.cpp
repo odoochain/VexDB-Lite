@@ -860,11 +860,11 @@ void VecBufferPool::wait_locmap_freeze(uint32 pool_max_offset)
 }
 
 /* Initialization */
-bool enable_vec_buffer_manager() { return vexdb_vector_is_preloaded() && vecbuf_shared_state && vecbuf_shared_state->enable_buffer_manager; }
+bool enable_vec_buffer_manager() { return vexdb_lite_is_preloaded() && vecbuf_shared_state && vecbuf_shared_state->enable_buffer_manager; }
 
 void init_vector_smgr()
 {
-    if (!vexdb_vector_is_preloaded()) {
+    if (!vexdb_lite_is_preloaded()) {
         return;
     }
     VectorBufferLock = &(GetNamedLWLockTranche("vector_buffer")->lock);

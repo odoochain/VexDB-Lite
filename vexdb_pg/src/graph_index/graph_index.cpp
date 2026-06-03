@@ -106,7 +106,7 @@ void graph_index_costestimate_internal(PlannerInfo *root, IndexPath *path, doubl
     }
     constexpr uint32 default_nlimit = 10;
     const uint32 nlimit = nlimit_temp <= 0 ? default_nlimit : nlimit_temp + 1;
-    uint32 search_list_size = uint32(vexdb_vector_get_ef_search());
+    uint32 search_list_size = uint32(vexdb_lite_get_ef_search());
     if (search_list_size < nlimit) {
         search_list_size = nlimit;
     }
@@ -370,7 +370,7 @@ Datum graph_index_gettuple(PG_FUNCTION_ARGS)
                         errmsg("Invalid arguments for function graph_indexgettuple")));
     }
     GraphIndexScanState *state = (GraphIndexScanState *)scan->opaque;
-    size_t ef = vexdb_vector_get_ef_search();
+    size_t ef = vexdb_lite_get_ef_search();
     if (state && state->linfo.has_limit() && ef < state->linfo.get_noffset()) {
         ef = state->linfo.get_noffset();
     }

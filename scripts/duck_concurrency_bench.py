@@ -8,7 +8,7 @@ import duckdb, h5py, numpy as np, pyarrow as pa
 import time, threading, argparse, statistics
 
 DATA = "/home/ecs-user/ann-bench-data/sift-128-euclidean.hdf5"
-VEX_EXT = "/home/ecs-user/.duckdb_vex/vex.duckdb_extension"
+VEX_EXT = "/home/ecs-user/.duckdb_vex/vexdb_lite.duckdb_extension"
 DIM = 128
 K = 10
 M = 16

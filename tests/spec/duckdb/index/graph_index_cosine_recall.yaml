@@ -44,7 +44,7 @@ steps:
 - statement: CREATE TABLE t_cos_self2 (id INTEGER, vec ${VECTOR(4)});
 - statement: "INSERT INTO t_cos_self2 SELECT i, list_value(\n  cos(i * 0.1)::FLOAT,\n  sin(i * 0.1)::FLOAT,\n  cos(i * 0.3)::FLOAT,\n  sin(i * 0.3)::FLOAT\n)::${VECTOR(4)}\nFROM ${RANGE2(1, 101)} t(i);"
 - statement: CREATE INDEX idx_cos_self2 ON t_cos_self2 USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_OPTS_L2};
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_self2';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_self2';
   _field_types: I
   expect:
   - - 'true'
@@ -86,7 +86,7 @@ steps:
   _field_types: I
   expect:
   - - 0
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_cycle';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_cos_cycle';
   _field_types: I
   expect:
   - - 'true'

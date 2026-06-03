@@ -1,5 +1,5 @@
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
-\echo Use "CREATE EXTENSION vexdb_vector" to load this file. \quit
+\echo Use "CREATE EXTENSION vexdb_lite" to load this file. \quit
 
 -- floatvector type
 

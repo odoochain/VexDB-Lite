@@ -22,7 +22,7 @@ steps:
   - - 1
   - - 2
   - - 3
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_neg';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_neg';
   _field_types: I
   expect:
   - - 'true'
@@ -45,7 +45,7 @@ steps:
   _field_types: I
   expect:
   - - 3
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_zero';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_zero';
   _field_types: I
   expect:
   - - 'true'
@@ -54,7 +54,7 @@ steps:
 - statement: "INSERT INTO t_ip_scale SELECT i, list_value(\n  (i * sin(i * 0.5))::FLOAT,\n  (i * cos(i * 0.5))::FLOAT,\n  (i * sin(i * 1.3))::FLOAT,\n  (i * cos(i * 1.3))::FLOAT\n)::${VECTOR(4)}\nFROM ${RANGE2(1,\
     \ 201)} t(i);"
 - statement: CREATE INDEX idx_ip_scale ON t_ip_scale USING ${VEX_INDEX} (vec${OPS_IP_COL})${IDX_OPTS_IP};
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_scale';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_scale';
   _field_types: I
   expect:
   - - 'true'
@@ -97,17 +97,17 @@ steps:
 - statement: "INSERT INTO t_ip_mut SELECT i, list_value(\n  sin(i*0.1)::FLOAT, cos(i*0.1)::FLOAT,\n  sin(i*0.2)::FLOAT, cos(i*0.2)::FLOAT\n)::${VECTOR(4)}\nFROM ${RANGE2(1, 101)} t(i);"
 - statement: CREATE INDEX idx_ip_mut ON t_ip_mut USING ${VEX_INDEX} (vec${OPS_IP_COL})${IDX_OPTS_IP};
 - statement: DELETE FROM t_ip_mut WHERE id <= 30;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_mut';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_mut';
   _field_types: I
   expect:
   - - 'true'
 - statement: UPDATE t_ip_mut SET vec = ${VEC_LITERAL([100.0, 0.0, 0.0, 0.0], 4)} WHERE id BETWEEN 31 AND 50;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_mut';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_mut';
   _field_types: I
   expect:
   - - 'true'
 - statement: "INSERT INTO t_ip_mut SELECT i, list_value(\n  (i * 50.0)::FLOAT, 0.0, 0.0, 0.0\n)::${VECTOR(4)}\nFROM ${RANGE2(101, 151)} t(i);"
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_mut';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_mut';
   _field_types: I
   expect:
   - - 'true'
@@ -131,19 +131,19 @@ steps:
   expect:
   - - 10
 - statement: "INSERT INTO t_ip_r SELECT i, list_value(\n  (i * 1000.0)::FLOAT, 0.0, 0.0, 0.0\n)::${VECTOR(4)}\nFROM ${RANGE2(101, 121)} t(i);"
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_r';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_r';
   _field_types: I
   expect:
   - - 'true'
 - statement: DELETE FROM t_ip_r WHERE id <= 20;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_r';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_r';
   _field_types: I
   expect:
   - - 'true'
 - statement: CHECKPOINT;
 - raw_directive: restart
 - statement: DELETE FROM t_ip_r WHERE id = -999;
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_r';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_ip_r';
   _field_types: I
   expect:
   - - 'true'

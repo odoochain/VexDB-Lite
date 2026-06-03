@@ -216,7 +216,7 @@ static void VexIndexInfoExecute(ClientContext &context, TableFunctionInput &data
 }
 
 void VexFunctions::RegisterIndexInfoFunction(ExtensionLoader &loader) {
-    TableFunction func("vex_index_info", {}, VexIndexInfoExecute, VexIndexInfoBind, VexIndexInfoInit);
+    TableFunction func("vexdb_index_info", {}, VexIndexInfoExecute, VexIndexInfoBind, VexIndexInfoInit);
     loader.RegisterFunction(func);
 }
 

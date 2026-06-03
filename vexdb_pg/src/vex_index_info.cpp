@@ -22,7 +22,7 @@ extern "C" {
 #include "ann_utils.h"
 
 extern "C" {
-PG_FUNCTION_INFO_V1(vex_index_info);
+PG_FUNCTION_INFO_V1(vexdb_index_info);
 }
 
 #define VEX_INDEX_INFO_NCOLS 18
@@ -38,7 +38,7 @@ static const char *metric_name(Metric m)
     }
 }
 
-Datum vex_index_info(PG_FUNCTION_ARGS)
+Datum vexdb_index_info(PG_FUNCTION_ARGS)
 {
     FuncCallContext *funcctx;
 
@@ -52,7 +52,7 @@ Datum vex_index_info(PG_FUNCTION_ARGS)
         TupleDesc tupdesc;
         if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE) {
             ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                errmsg("vex_index_info() must be called in a context that "
+                errmsg("vexdb_index_info() must be called in a context that "
                        "expects a record type")));
         }
         funcctx->tuple_desc = BlessTupleDesc(tupdesc);

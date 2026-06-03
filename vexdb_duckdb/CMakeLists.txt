@@ -70,12 +70,12 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     )
 endif()
 
-build_static_extension(vex ${VEXDB_DUCK_EXTENSION_FILES})
+build_static_extension(vexdb_lite ${VEXDB_DUCK_EXTENSION_FILES})
 set(PARAMETERS "-warnings")
-build_loadable_extension(vex ${PARAMETERS} ${VEXDB_DUCK_EXTENSION_FILES})
+build_loadable_extension(vexdb_lite ${PARAMETERS} ${VEXDB_DUCK_EXTENSION_FILES})
 
-target_compile_features(vex_extension PRIVATE cxx_std_17)
-target_compile_features(vex_loadable_extension PRIVATE cxx_std_17)
+target_compile_features(vexdb_lite_extension PRIVATE cxx_std_17)
+target_compile_features(vexdb_lite_loadable_extension PRIVATE cxx_std_17)
 
 set(SIMD_COMMON_FLAGS "-ftree-vectorize -fassociative-math -fno-signed-zeros -fno-trapping-math -floop-interchange -fno-exceptions -funroll-loops -g1")
 set(SIMD_WARN_FLAGS "-Wno-ignored-attributes")

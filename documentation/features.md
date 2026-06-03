@@ -2,8 +2,8 @@
 
 VexDB 提供两种适配形式，共享同一套 HNSW 图索引算法内核：
 
-- **PostgreSQL 插件**（`vexdb_vector`）：作为 PostgreSQL 扩展提供 `vexdb_graph` 访问方法
-- **DuckDB 扩展**（`vex`）：作为 DuckDB out-of-tree extension 提供 `GRAPH_INDEX`
+- **PostgreSQL 插件**（`vexdb_lite`）：作为 PostgreSQL 扩展提供 `vexdb_graph` 访问方法
+- **DuckDB 扩展**（`vexdb_lite`）：作为 DuckDB out-of-tree extension 提供 `GRAPH_INDEX`
 
 ---
 
@@ -12,7 +12,7 @@ VexDB 提供两种适配形式，共享同一套 HNSW 图索引算法内核：
 ### 快速上手
 
 ```sql
-CREATE EXTENSION vexdb_vector;
+CREATE EXTENSION vexdb_lite;
 
 CREATE TABLE items (
     id  BIGSERIAL PRIMARY KEY,
@@ -118,7 +118,7 @@ WITH (m = 16, ef_construction = 64, parallel_workers = 8);
 ```sql
 -- 加载扩展（每次连接都需要）
 SET allow_unsigned_extensions = true;
-LOAD '/path/to/vex.duckdb_extension';
+LOAD '/path/to/vexdb_lite.duckdb_extension';
 
 CREATE TABLE items (id INTEGER, vec FLOAT[128]);
 -- 示意：实际插入时需提供完整 128 维向量
@@ -211,7 +211,7 @@ SET vexdb_pq_refine_k_factor = 1.0;
 -- 只在 vec 列建索引
 CREATE INDEX idx_vec ON items USING GRAPH_INDEX (vec);
 
--- 查询时 WHERE 会被优化器处理为 VEX_INDEX_SCAN + 过滤
+-- 查询时 WHERE 会被优化器处理为 VEXDB_INDEX_SCAN + 过滤
 SELECT id
 FROM items
 WHERE category = 'image'
@@ -243,7 +243,7 @@ WITH (quantizer = 'pq', pq_m = 32, memory_mode = 'compact');
 
 ```sql
 -- 查看扩展版本
-SELECT vex_version();
+SELECT vexdb_version();
 
 -- 查看向量维度
 SELECT vector_dims([1.0, 2.0, 3.0]::FLOAT[3]);
@@ -252,9 +252,9 @@ SELECT vector_dims([1.0, 2.0, 3.0]::FLOAT[3]);
 SELECT l2_normalize([3.0, 4.0]::FLOAT[2]);  -- [0.6, 0.8]
 
 -- 查看所有 GRAPH_INDEX 详情（无参数，返回每个索引一行）
-SELECT * FROM vex_index_info();
+SELECT * FROM vexdb_index_info();
 -- 过滤特定索引
-SELECT * FROM vex_index_info() WHERE index_name = 'idx_vec';
+SELECT * FROM vexdb_index_info() WHERE index_name = 'idx_vec';
 ```
 
 ### Python 接口
@@ -263,7 +263,7 @@ SELECT * FROM vex_index_info() WHERE index_name = 'idx_vec';
 import duckdb
 
 con = duckdb.connect(config={"allow_unsigned_extensions": "true"})
-con.execute("LOAD '/path/to/vex.duckdb_extension'")
+con.execute("LOAD '/path/to/vexdb_lite.duckdb_extension'")
 
 con.execute("CREATE TABLE items (id INTEGER, vec FLOAT[128])")
 con.execute("CREATE INDEX idx ON items USING GRAPH_INDEX (vec) WITH (m=16)")

@@ -247,7 +247,7 @@ def emit_duckdb(spec: dict, dialect: dict) -> str:
         f"# description: {spec.get('description', spec['name'])}",
         f"# group: [vex]",
         "",
-        "require vex",
+        "require vexdb_lite",
         "",
     ]
     if spec.get("setup"):
@@ -361,7 +361,7 @@ def emit_python(spec: dict, dialect: dict) -> str:
         "",
         f"def test_{name}():",
         "    con = duckdb.connect()",
-        "    con.execute(\"INSTALL vex; LOAD vex;\")",
+        "    con.execute(\"INSTALL vexdb_lite; LOAD vexdb_lite;\")",
     ]
     if spec.get("setup"):
         for stmt in split_sql(render_template(spec["setup"], dialect)):

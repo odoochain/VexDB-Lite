@@ -26,7 +26,7 @@ steps:
 # fill DSM with raw vectors, finalize_parallel copies chunks out,
 # flush_graph encodes to PQ codes and flips set_enable.
 - statement: CREATE INDEX idx_pq_par ON pq_par USING vexdb_graph (vec) WITH (quantizer='pq', pq_m=4, parallel_workers=2);
-- query: SELECT use_pq FROM vex_index_info() WHERE indexname='idx_pq_par';
+- query: SELECT use_pq FROM vexdb_index_info() WHERE indexname='idx_pq_par';
   expect:
     - "t"
 - query: SELECT id FROM pq_par ORDER BY vec <-> '[100,100,100,100,100,100,100,100]'::floatvector LIMIT 3;

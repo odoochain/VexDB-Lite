@@ -6,14 +6,14 @@
 
 ## 支持矩阵
 
-### PostgreSQL 插件（`vexdb_vector.so`）
+### PostgreSQL 插件（`vexdb_lite.so`）
 
 | 数据库 | 支持版本 | 说明 |
 |--------|----------|------|
 | PostgreSQL | **16 / 17 / 18 / 19** | 已适配，主验证平台为 PG 19 |
 | openGauss | — | 参见 VexDB 主库 |
 
-### DuckDB 扩展（`vex.duckdb_extension`）
+### DuckDB 扩展（`vexdb_lite.duckdb_extension`）
 
 | 数据库 | 支持版本 | 说明 |
 |--------|----------|------|
@@ -75,9 +75,9 @@
 
 | 产物 | GLIBCXX 依赖上限 | 编译工具链 |
 |------|-----------------|------------|
-| `vex.duckdb_extension` | `GLIBCXX_3.4.22` | manylinux_2_28 容器 GCC；硬校验，超出即拦截 |
-| `vexdb_vector.so`（x86） | `GLIBCXX_3.4.26` | x86 host GCC 10.3 |
-| `vexdb_vector.so`（ARM） | `GLIBCXX_3.4.26`（或更低） | ARM host GCC 9.3（Kylin V10 SP1 系统） |
+| `vexdb_lite.duckdb_extension` | `GLIBCXX_3.4.22` | manylinux_2_28 容器 GCC；硬校验，超出即拦截 |
+| `vexdb_lite.so`（x86） | `GLIBCXX_3.4.26` | x86 host GCC 10.3 |
+| `vexdb_lite.so`（ARM） | `GLIBCXX_3.4.26`（或更低） | ARM host GCC 9.3（Kylin V10 SP1 系统） |
 
 > DuckDB 扩展通过 manylinux_2_28 容器构建，GLIBCXX 上限有硬校验（`GLIBCXX_MAX=3.4.22`）；PG 插件走 host GCC，当前未做同等校验，实际依赖 GLIBCXX_3.4.26。
 

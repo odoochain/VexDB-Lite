@@ -17,7 +17,7 @@ steps:
   _field_types: II
   expect:
   - - analyzed_plan
-    - <!REGEX>:.*VEX_INDEX_SCAN.*
+    - <!REGEX>:.*VEXDB_INDEX_SCAN.*
 - statement: SET ${GUC_BF_THRESHOLD} = 10;
 - query: EXPLAIN ANALYZE WITH tmp AS (SELECT ${VEC_LITERAL([0.1,0.2,0.3,0.4], 4)} AS vec) SELECT id FROM t_bf ORDER BY ${COSINE(v, (SELECT vec FROM tmp))} LIMIT 5;
   _field_types: II

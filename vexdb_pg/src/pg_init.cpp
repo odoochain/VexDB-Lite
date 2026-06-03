@@ -21,10 +21,10 @@ PG_MODULE_MAGIC;
 }
 
 /* LWLock tranche ID for vector buffer operations */
-int vexdb_vector_lock_tranche_id;
+int vexdb_lite_lock_tranche_id;
 
 /* Track if extension was preloaded */
-static bool vexdb_vector_preloaded = false;
+static bool vexdb_lite_preloaded = false;
 
 /* Shared memory request hook for LWLock registration */
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
@@ -81,7 +81,7 @@ vecbuf_shmem_size(void)
 }
 
 static void
-vexdb_vector_shmem_request(void)
+vexdb_lite_shmem_request(void)
 {
     if (prev_shmem_request_hook)
         prev_shmem_request_hook();
@@ -91,14 +91,14 @@ vexdb_vector_shmem_request(void)
 }
 
 static void
-vexdb_vector_shmem_startup(void)
+vexdb_lite_shmem_startup(void)
 {
     bool found;
     
     if (prev_shmem_startup_hook)
         prev_shmem_startup_hook();
     
-    vexdb_vector_preloaded = true;
+    vexdb_lite_preloaded = true;
     
     /* Create or attach to shared state */
     vecbuf_shared_state = (VecBufSharedState *)ShmemInitStruct(
@@ -130,7 +130,7 @@ vexdb_vector_shmem_startup(void)
 static void
 register_vecbuf_workers(void)
 {
-    int nworkers = vexdb_vector_get_vector_buffer_workers();
+    int nworkers = vexdb_lite_get_vector_buffer_workers();
     
     if (nworkers <= 0)
         return;
@@ -141,7 +141,7 @@ register_vecbuf_workers(void)
         worker.bgw_flags = BGWORKER_SHMEM_ACCESS;
         worker.bgw_start_time = BgWorkerStart_ConsistentState;
         worker.bgw_restart_time = BGW_DEFAULT_RESTART_INTERVAL;
-        strcpy(worker.bgw_library_name, "vexdb_vector");
+        strcpy(worker.bgw_library_name, "vexdb_lite");
         strcpy(worker.bgw_function_name, "vecbuf_worker_main");
         snprintf(worker.bgw_name, BGW_MAXLEN, "vector buffer worker %d", i);
         strcpy(worker.bgw_type, "vector buffer worker");
@@ -156,7 +156,7 @@ void* mem_align_alloc(size_t alignment, size_t size)
     return palloc_aligned(size, alignment, 0);
 }
 
-bool vexdb_vector_is_preloaded(void) { return vexdb_vector_preloaded; }
+bool vexdb_lite_is_preloaded(void) { return vexdb_lite_preloaded; }
 
 extern "C" {
 void _PG_init(void);
@@ -165,11 +165,11 @@ void _PG_init(void);
 void _PG_init(void)
 {
     prev_shmem_request_hook = shmem_request_hook;
-    shmem_request_hook = vexdb_vector_shmem_request;
+    shmem_request_hook = vexdb_lite_shmem_request;
     prev_shmem_startup_hook = shmem_startup_hook;
-    shmem_startup_hook = vexdb_vector_shmem_startup;
+    shmem_startup_hook = vexdb_lite_shmem_startup;
 
-    vexdb_vector_init_guc();
+    vexdb_lite_init_guc();
 
     /* Initialize distance functions */
     g_instance.annvec_cxt.l2_squared_distance = ann_helper::get_general_distance_func(Metric::L2);
@@ -199,12 +199,12 @@ void _PG_init(void)
     g_instance.annvec_cxt.qt_update_cxt = nullptr;
     g_instance.annvec_cxt.qt_update_mgr = nullptr;
 
-    g_instance.diskann_cxt.vector_buffers = vexdb_vector_get_vector_buffers();
-    g_instance.diskann_cxt.enable_buffer_manager = vexdb_vector_get_enable_vec_buffer_manager();
-    g_instance.diskann_cxt.vector_buffer_workers = vexdb_vector_get_vector_buffer_workers();
+    g_instance.diskann_cxt.vector_buffers = vexdb_lite_get_vector_buffers();
+    g_instance.diskann_cxt.enable_buffer_manager = vexdb_lite_get_enable_vec_buffer_manager();
+    g_instance.diskann_cxt.vector_buffer_workers = vexdb_lite_get_vector_buffer_workers();
     
     /* Register background worker if enabled */
-    if (vexdb_vector_get_enable_vec_buffer_manager() &&
+    if (vexdb_lite_get_enable_vec_buffer_manager() &&
         process_shared_preload_libraries_in_progress) {
         register_vecbuf_workers();
     }

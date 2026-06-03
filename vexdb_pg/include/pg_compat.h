@@ -123,10 +123,10 @@ typedef BackendId ProcNumber;
 #define RM_GRAPH_INDEX_ID RM_XLOG_ID
 
 /* Reloption kind - will be initialized at runtime */
-extern "C" relopt_kind vexdb_vector_relopt_kind;
-#define RELOPT_KIND_GRAPH_INDEX vexdb_vector_relopt_kind
+extern "C" relopt_kind vexdb_lite_relopt_kind;
+#define RELOPT_KIND_GRAPH_INDEX vexdb_lite_relopt_kind
 
-/* Session attributes - only vexdb_vector specific settings */
+/* Session attributes - only vexdb_lite specific settings */
 typedef struct {
     int ef_search;
     uint16 float_l2_arch;
@@ -144,8 +144,8 @@ typedef struct {
     PgVexdbAttrStorage attr_storage;
 } PgVexdbSessionAttrs;
 
-extern PgVexdbSessionAttrs vexdb_vector_session;
-#define u_sess (&vexdb_vector_session)
+extern PgVexdbSessionAttrs vexdb_lite_session;
+#define u_sess (&vexdb_lite_session)
 
 /* Base object for palloc-based allocation */
 class BaseObject {
@@ -156,8 +156,8 @@ public:
 };
 
 /* LWLock tranches - initialized at runtime */
-extern "C" int vexdb_vector_lock_tranche_id;
-#define LWTRANCHE_EXTEND vexdb_vector_lock_tranche_id
+extern "C" int vexdb_lite_lock_tranche_id;
+#define LWTRANCHE_EXTEND vexdb_lite_lock_tranche_id
 
 /* Vector storage type */
 enum class VecStorageType : uint8 { PureVec, PureCode, VecWithCode, CodeWithVec };

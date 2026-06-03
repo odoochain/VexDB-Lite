@@ -21,7 +21,7 @@ steps:
   _field_types: I
   expect:
   - - 20
-- query: SELECT node_count <= row_id_map_size FROM vex_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq_cos';
+- query: SELECT node_count <= row_id_map_size FROM vexdb_index_info() WHERE ${SYS_INDEXES_NAME} = 'idx_pq_cos';
   _field_types: I
   expect:
   - - 'true'

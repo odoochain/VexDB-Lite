@@ -28,7 +28,7 @@ DUCKDB_ONLY_PATTERNS = [
     re.compile(r"\bATTACH\s"),
     re.compile(r"\bDETACH\s"),
     re.compile(r"\bduckdb_\w+\("),
-    re.compile(r"\bvex_index_info\b"),
+    re.compile(r"\bvexdb_index_info\b"),
     re.compile(r"\bvex_inspect\w*\b"),
     re.compile(r"::FLOAT\["),
     re.compile(r"\bEXPLAIN\s+ANALYZE\b", re.I),
@@ -57,7 +57,7 @@ DUCKDB_ONLY_PATTERNS = [
     # access method 不支持 multicolumn (PG_VEXDB 真不支持) → 标 duckdb-only
     re.compile(r"USING\s+(?:\$\{VEX_INDEX\}|@T@)\s*\([^)]*,\s*[^)]+\)", re.I),
     # vex_* 系统函数 (DuckDB only)
-    re.compile(r"\bvex_simd_arch\b"),
+    re.compile(r"\bvexdb_simd_arch\b"),
     re.compile(r"\bvex_pq_search_mode\b"),
     # sqllogictest <REGEX>: 比较 (only DuckDB sqllogictest 支持)
     re.compile(r"<REGEX>:"),

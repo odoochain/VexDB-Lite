@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(vexdb_vector CXX C)
+project(vexdb_lite CXX C)
 
 if(DEFINED ENV{PG_CONFIG} AND NOT "$ENV{PG_CONFIG}" STREQUAL "")
     set(PG_CONFIG_BIN "$ENV{PG_CONFIG}")
@@ -199,9 +199,9 @@ endif()
 
 find_package(Threads REQUIRED)
 
-add_library(vexdb_vector SHARED ${GRAPH_INDEX_SRCS} ${DISTANCE_SRCS} ${QUANTIZER_SRCS})
-set_target_properties(vexdb_vector PROPERTIES OUTPUT_NAME "vexdb_vector" PREFIX "")
-target_link_libraries(vexdb_vector PRIVATE stdc++ Threads::Threads)
+add_library(vexdb_lite SHARED ${GRAPH_INDEX_SRCS} ${DISTANCE_SRCS} ${QUANTIZER_SRCS})
+set_target_properties(vexdb_lite PROPERTIES OUTPUT_NAME "vexdb_lite" PREFIX "")
+target_link_libraries(vexdb_lite PRIVATE stdc++ Threads::Threads)
 
 set_source_files_properties(src/distance/sse.cpp ${REPO_ROOT}/common/distance/src/sse_dispatcher.cpp PROPERTIES COMPILE_FLAGS "${SSE_FLAGS}")
 set_source_files_properties(src/distance/avx.cpp ${REPO_ROOT}/common/distance/src/avx_dispatcher.cpp PROPERTIES COMPILE_FLAGS "${AVX_FLAGS}")
@@ -211,6 +211,6 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     set_source_files_properties(src/distance/neon.cpp ${REPO_ROOT}/common/distance/src/neon_dispatcher.cpp PROPERTIES COMPILE_FLAGS "${NEON_FLAGS}")
 endif()
 
-install(TARGETS vexdb_vector LIBRARY DESTINATION "${PG_PKGLIB_DIR}")
-install(FILES sql/vexdb_vector--1.0.sql DESTINATION "${PG_SHARE_DIR}/extension")
-install(FILES vexdb_vector.control DESTINATION "${PG_SHARE_DIR}/extension")
+install(TARGETS vexdb_lite LIBRARY DESTINATION "${PG_PKGLIB_DIR}")
+install(FILES sql/vexdb_lite--1.0.sql DESTINATION "${PG_SHARE_DIR}/extension")
+install(FILES vexdb_lite.control DESTINATION "${PG_SHARE_DIR}/extension")

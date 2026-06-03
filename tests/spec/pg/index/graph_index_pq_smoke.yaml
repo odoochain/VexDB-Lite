@@ -14,7 +14,7 @@ steps:
 - statement: CREATE TABLE pq_smoke (id INTEGER, vec floatvector(8));
 - statement: "INSERT INTO pq_smoke SELECT i,\n    ('[' || i || ',' || i || ',' || i || ',' || i || ','\n         || i || ',' || i || ',' || i || ',' || i || ']')::floatvector\nFROM generate_series(0, 499) AS t(i);"
 - statement: CREATE INDEX idx_pq ON pq_smoke USING vexdb_graph (vec) WITH (quantizer='pq', pq_m=4);
-- query: SELECT use_pq FROM vex_index_info() WHERE indexname='idx_pq';
+- query: SELECT use_pq FROM vexdb_index_info() WHERE indexname='idx_pq';
   expect:
     - "t"
 - query: SELECT id FROM pq_smoke ORDER BY vec <-> '[100,100,100,100,100,100,100,100]'::floatvector LIMIT 3;

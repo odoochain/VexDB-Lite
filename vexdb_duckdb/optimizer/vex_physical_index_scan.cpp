@@ -108,7 +108,7 @@ PhysicalVexIndexScan::PhysicalVexIndexScan(PhysicalPlan &physical_plan, vector<L
 }
 
 string PhysicalVexIndexScan::GetName() const {
-    return "VEX_INDEX_SCAN";
+    return "VEXDB_INDEX_SCAN";
 }
 
 InsertionOrderPreservingMap<string> PhysicalVexIndexScan::ParamsToString() const {
@@ -185,7 +185,7 @@ OperatorResultType PhysicalVexIndexScan::Execute(ExecutionContext &context, Data
 
         vector<float> query_vec;
         if (!ExtractFloatVector(query_val, query_vec)) {
-            throw InvalidInputException("VEX_INDEX_SCAN query vector expression did not evaluate to FLOAT[N]");
+            throw InvalidInputException("VEXDB_INDEX_SCAN query vector expression did not evaluate to FLOAT[N]");
         }
 
         int ef = 40;
