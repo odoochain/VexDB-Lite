@@ -245,7 +245,7 @@ def emit_duckdb(spec: dict, dialect: dict) -> str:
     lines = [
         f"# name: test/sql/vex/{spec['name']}.test",
         f"# description: {spec.get('description', spec['name'])}",
-        f"# group: [vex]",
+        f"# group: [vexdb_lite]",
         "",
         "require vexdb_lite",
         "",

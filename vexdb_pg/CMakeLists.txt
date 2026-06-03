@@ -200,7 +200,7 @@ endif()
 find_package(Threads REQUIRED)
 
 add_library(vexdb_lite SHARED ${GRAPH_INDEX_SRCS} ${DISTANCE_SRCS} ${QUANTIZER_SRCS})
-set_target_properties(vexdb_lite PROPERTIES OUTPUT_NAME "vexdb_lite" PREFIX "")
+set_target_properties(vexdb_lite PROPERTIES PREFIX "")
 target_link_libraries(vexdb_lite PRIVATE stdc++ Threads::Threads)
 
 set_source_files_properties(src/distance/sse.cpp ${REPO_ROOT}/common/distance/src/sse_dispatcher.cpp PROPERTIES COMPILE_FLAGS "${SSE_FLAGS}")
