@@ -202,6 +202,9 @@ VEXDB_RSYNC_EXCLUDES=(
 )
 DUCKDB_RSYNC_EXCLUDES=(
     --exclude='.git/' --exclude='.github/'
+    # 容器内 spec test 以 root 在 duckdb_src 下生成的临时目录, host UID rsync --delete
+    # 删不掉 → 整个 stage 失败 (exit 23). 与 VEXDB_RSYNC_EXCLUDES 同理排除.
+    --exclude='duckdb_unittest_tempdir/'
 )
 
 # arch 参数化：替代之前的 stage_x86 + stage_arm 两个几乎一样的函数
