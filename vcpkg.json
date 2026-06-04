@@ -1,0 +1,14 @@
+{
+    "$comment": "vexdb DuckDB 扩展唯一的外部依赖是 header-only boost/preprocessor(不需要全量/patched boost——那是 PG 版 vexdb_pg 的事)。仅供 community-extensions CI 使用。",
+    "dependencies": [
+        "boost-preprocessor"
+    ],
+    "vcpkg-configuration": {
+        "overlay-ports": [
+            "./extension-ci-tools/vcpkg_ports"
+        ],
+        "overlay-triplets": [
+            "./extension-ci-tools/toolchains"
+        ]
+    }
+}
