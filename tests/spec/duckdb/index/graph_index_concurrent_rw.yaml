@@ -10,7 +10,16 @@ engines:
 - duckdb
 - pg
 - opengauss
-description: Test concurrent read/write operations on graph index
+description: >-
+  Test concurrent read/write operations on graph index. Also the regression for the
+  deleted_rids_ unlocked-read use-after-free (2026-06-04): GetNodeCount (optimizer
+  path) / GetRowIdCount / SearchANN read the graph_rwlock_-guarded deleted_rids_
+  unordered_set without holding graph_rwlock_, racing concurrent INSERT/DELETE
+  (Append/Delete rehash deleted_rids_ under exclusive) -> use-after-free SEGV. The
+  concurrent DELETE+SELECT blocks below exercise the optimizer GetNodeCount path on
+  a non-empty deleted_rids_, which is what surfaces the race -- do NOT weaken them.
+  Deterministic detection needs ASAN/TSan; bare repeated full-suite runs surface it
+  ~20-80% on x86. See docs/analysis/2026-06-04_concurrent-rw-deleted-rids-race.md
 steps:
 - statement: CREATE TABLE t_conc1 (id INTEGER, vec ${VECTOR(3)});
 - statement: INSERT INTO t_conc1 SELECT i, ${VEC_LITERAL([(i % 10)::FLOAT / 10.0, ((i / 10) % 10)::FLOAT / 10.0, (i % 5)::FLOAT / 5.0], 3)} FROM ${RANGE2(1, 201)} t(i);

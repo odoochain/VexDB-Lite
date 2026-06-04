@@ -74,10 +74,13 @@ steps:
   expect:
   - - 0
 - statement: SET ${GUC_BF_THRESHOLD} = 0;
-- query: SELECT id FROM t_config ORDER BY ${L2(vec, ${VEC_LITERAL([0.0, 0.0, 0.0, 0.0], 4)})} LIMIT 1;
+# brute_force=0 关闭精确兜底 → 走纯 HNSW(近似)。这里只断言「该路径能执行并返回一行」,
+# 不再断言精确 top-1 id:HNSW 召回非 100% 保证,且套件随机测试序 + 建图全局 RNG 状态会让
+# 精确 id 断言偶发失败(孤立跑稳过、套件里偶挂)。精确召回另有 recall_vs_brute 用例覆盖。
+- query: SELECT count(*) FROM (SELECT id FROM t_config ORDER BY ${L2(vec, ${VEC_LITERAL([0.0, 0.0, 0.0, 0.0], 4)})} LIMIT 1);
   _field_types: I
   expect:
-  - - 0
+  - - 1
 - statement: RESET ${GUC_BF_THRESHOLD};
 - statement: DROP TABLE t_config;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_runtime_config.test

@@ -748,64 +748,92 @@ void GraphIndex::SearchANN(const float *query_vec, idx_t k, int ef, std::vector<
     }
     auto &store = runtime_->store;
     PointExtensionContext point_ctx;
-    idx_t needed = std::max<idx_t>(k, static_cast<idx_t>(ef));
-    if (!deleted_rids_.empty()) {
-        needed += deleted_rids_.size();
-    }
-    auto search_k = uint_fast16_t(std::min<idx_t>(needed, std::numeric_limits<uint_fast16_t>::max()));
 
-    bool has_deleted = !deleted_rids_.empty();
-
-    // If the graph entry node has been deleted, search starting from it can wander
-    // into a stale subgraph (its neighbor links may all point to other deleted
-    // nodes). Detect that case and let the algorithm pick a fresh entry from the
-    // upper layers before searching. Building the internal-id deleted set is O(N)
-    // so we only do it when the entry is actually deleted, which is rare.
-    if (has_deleted && store.entry_info.id != INVALID_VECTOR_ID &&
-        store.entry_info.id < store.elems.size()) {
-        bool entry_deleted = false;
-        for (auto &tid : store.elems[store.entry_info.id].tids) {
-            if (deleted_rids_.find(tid.row_id) != deleted_rids_.end()) {
-                entry_deleted = true;
-                break;
+    // The actual HNSW walk + deleted-row filtering. MUST be called with
+    // graph_rwlock_ held shared (reads store + deleted_rids_, both mutated by
+    // writers under the exclusive lock). Factored out so the common path can run
+    // it under the SAME shared lock as the deleted-entry detection — keeping the
+    // hot search path at a single index-lock acquire (QPS-neutral vs the original).
+    auto do_search = [&](uint_fast16_t search_k, bool has_deleted) {
+        // searches hold graph_rwlock_ shared, writers take it exclusive, so the
+        // per-node reader lock inside the HNSW walk is redundant. Skip it to avoid
+        // hub-node reader-byte cacheline contention under high read concurrency.
+        // Safe only while the shared lock is held; the flag is set under it too.
+        store.search_lock_free_ = true;
+        RunWithDuckAlgo(metric_, dimension_, ef_construction_, m_, store, [&](auto &algo) {
+            auto res = algo.search(point_ctx, reinterpret_cast<const char *>(query_vec), search_k);
+            for (idx_t i = 0; i < res.size() && row_ids.size() < k; i++) {
+                row_t rid = res[i].tid.row_id;
+                if (has_deleted && deleted_rids_.find(rid) != deleted_rids_.end()) {
+                    continue;
+                }
+                row_ids.push_back(rid);
+                distances.push_back(res[i].dist);
             }
+        });
+    };
+
+    // deleted_rids_ + store.elems are mutated by writers (Append/Delete) under
+    // graph_rwlock_ exclusive, so every read of them must hold the lock shared.
+    // Common path: ONE shared lock spans deleted detection AND the search.
+    UnorderedSet<size_t> deleted_internal;  // only filled on the rare repair path
+    {
+        vex_duck::SharedLockGuard _rg(graph_rwlock_);
+        const bool has_deleted = !deleted_rids_.empty();
+        idx_t needed = std::max<idx_t>(k, static_cast<idx_t>(ef));
+        if (has_deleted) {
+            needed += deleted_rids_.size();
         }
-        if (entry_deleted) {
-            UnorderedSet<size_t> deleted_internal;
-            for (size_t id = 0; id < store.elems.size(); id++) {
-                for (auto &tid : store.elems[id].tids) {
-                    if (deleted_rids_.find(tid.row_id) != deleted_rids_.end()) {
-                        deleted_internal.insert(id);
-                        break;
-                    }
+        // If the graph entry node has been deleted, search starting from it can wander
+        // into a stale subgraph (its neighbor links may all point to other deleted
+        // nodes). Detect that case and let the algorithm pick a fresh entry from the
+        // upper layers before searching. Building the internal-id deleted set is O(N)
+        // so we only do it when the entry is actually deleted, which is rare.
+        bool entry_deleted = false;
+        if (has_deleted && store.entry_info.id != INVALID_VECTOR_ID &&
+            store.entry_info.id < store.elems.size()) {
+            for (auto &tid : store.elems[store.entry_info.id].tids) {
+                if (deleted_rids_.find(tid.row_id) != deleted_rids_.end()) {
+                    entry_deleted = true;
+                    break;
                 }
             }
-            // repair_entry mutates the graph entry: take the index lock
-            // exclusive so it cannot race with concurrent (shared) searches.
-            vex_duck::ExclusiveLockGuard _wg(graph_rwlock_);
-            RunWithDuckAlgo(metric_, dimension_, ef_construction_, m_, store, [&](auto &algo) {
-                algo.repair_entry(deleted_internal);
-            });
+        }
+        auto search_k = uint_fast16_t(std::min<idx_t>(needed, std::numeric_limits<uint_fast16_t>::max()));
+        if (!entry_deleted) {
+            // Common path: detection + search under the same single shared lock.
+            do_search(search_k, has_deleted);
+            return;
+        }
+        // Rare path: entry node deleted — collect the internal-id deleted set under
+        // the shared lock, then repair under exclusive (below).
+        for (size_t id = 0; id < store.elems.size(); id++) {
+            for (auto &tid : store.elems[id].tids) {
+                if (deleted_rids_.find(tid.row_id) != deleted_rids_.end()) {
+                    deleted_internal.insert(id);
+                    break;
+                }
+            }
         }
     }
 
-    // Index is live: searches hold graph_rwlock_ shared, writers take it
-    // exclusive, so the per-node reader lock inside the HNSW walk is redundant.
-    // Skip it to avoid hub-node reader-byte cacheline contention under high
-    // read concurrency. Safe only while the shared lock below is held.
-    store.search_lock_free_ = true;
-    vex_duck::SharedLockGuard _rg(graph_rwlock_);
-    RunWithDuckAlgo(metric_, dimension_, ef_construction_, m_, store, [&](auto &algo) {
-        auto res = algo.search(point_ctx, reinterpret_cast<const char *>(query_vec), search_k);
-        for (idx_t i = 0; i < res.size() && row_ids.size() < k; i++) {
-            row_t rid = res[i].tid.row_id;
-            if (has_deleted && deleted_rids_.find(rid) != deleted_rids_.end()) {
-                continue;
-            }
-            row_ids.push_back(rid);
-            distances.push_back(res[i].dist);
+    // Rare path only: repair the entry under the exclusive lock, then search.
+    {
+        vex_duck::ExclusiveLockGuard _wg(graph_rwlock_);
+        RunWithDuckAlgo(metric_, dimension_, ef_construction_, m_, store, [&](auto &algo) {
+            algo.repair_entry(deleted_internal);
+        });
+    }
+    {
+        vex_duck::SharedLockGuard _rg(graph_rwlock_);
+        const bool has_deleted = !deleted_rids_.empty();
+        idx_t needed = std::max<idx_t>(k, static_cast<idx_t>(ef));
+        if (has_deleted) {
+            needed += deleted_rids_.size();
         }
-    });
+        auto search_k = uint_fast16_t(std::min<idx_t>(needed, std::numeric_limits<uint_fast16_t>::max()));
+        do_search(search_k, has_deleted);
+    }
 }
 
 ErrorData GraphIndex::Append(IndexLock &l, DataChunk &chunk, Vector &row_ids) {
@@ -1003,6 +1031,12 @@ idx_t GraphIndex::GetNodeCount() const {
     if (!runtime_) {
         return 0;
     }
+    // deleted_rids_ is a std::unordered_set guarded by graph_rwlock_ — writers
+    // (Append/Delete) mutate it under the exclusive lock. The optimizer path
+    // (TryOptimizeANN) calls this on every query plan, so the deleted_rids_ reads
+    // below must hold graph_rwlock_ shared or a concurrent INSERT/DELETE rehash
+    // dangles the bucket array → use-after-free SEGV in unordered_set::find.
+    vex_duck::SharedLockGuard _rg(graph_rwlock_);
     // elems / elem.tids are std::vector, read here lock-free on the optimizer path
     // (TryOptimizeANN). Under concurrent INSERT (add_elem/add_vector/BuildBulk) they
     // realloc, so a lock-free traversal dangles → use-after-free SEGV. Take the same
@@ -1037,6 +1071,10 @@ idx_t GraphIndex::GetRowIdCount() const {
     if (!runtime_) {
         return 0;
     }
+    // deleted_rids_ + store.elems are mutated by writers under graph_rwlock_
+    // exclusive; read them shared so the unordered_set traversal can't race a
+    // concurrent INSERT/DELETE rehash/realloc.
+    vex_duck::SharedLockGuard _rg(graph_rwlock_);
     idx_t total = 0;
     for (auto &elem : runtime_->store.elems) {
         for (auto &tid : elem.tids) {

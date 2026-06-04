@@ -2,8 +2,33 @@
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DUCKDB_DIR="$PROJECT_DIR"
+# 多版本布局: DuckDB 源码树在 build/duck/<ver>/duckdb_src (与 build_duck.sh 对齐),
+# 不再在仓库根。先跑 `DUCKDB_VERSION=<ver> bash build_duck.sh setup` 拉取并配置该版本。
+DUCKDB_VERSION="${DUCKDB_VERSION:-v1.5.2}"
+DUCKDB_DIR="$PROJECT_DIR/build/duck/$DUCKDB_VERSION/duckdb_src"
+# vexdb_lite 扩展加载配置 (build_duck.sh setup 写入). dev/release/test 显式传给 cmake,
+# 否则 vanilla DuckDB 源码树不会编出 vex 扩展。
+VEX_EXT_CONFIG="$DUCKDB_DIR/extension/extension_config_local.cmake"
 NCPU=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 8)
+
+# 守卫: 源码树 / 扩展配置缺失时给出明确指引, 而非 cmake 的 "no CMakeLists.txt".
+ensure_duck_src() {
+    if [[ ! -f "$DUCKDB_DIR/CMakeLists.txt" ]]; then
+        echo -e "${RED}DuckDB 源码树不存在: $DUCKDB_DIR${NC}" >&2
+        echo -e "${YELLOW}先运行: DUCKDB_VERSION=$DUCKDB_VERSION bash build_duck.sh setup${NC}" >&2
+        exit 1
+    fi
+    if [[ ! -f "$VEX_EXT_CONFIG" ]]; then
+        echo -e "${YELLOW}[setup] 生成缺失的 extension 配置 → $VEX_EXT_CONFIG${NC}"
+        cat > "$VEX_EXT_CONFIG" <<EOF
+duckdb_extension_load(vexdb_lite
+    SOURCE_DIR $PROJECT_DIR/vexdb_duckdb
+    INCLUDE_DIR $PROJECT_DIR/vexdb_duckdb/include
+    LOAD_TESTS
+)
+EOF
+    fi
+}
 
 # 颜色
 RED='\033[0;31m'
@@ -178,9 +203,10 @@ esac
 
 case "$CMD" in
     dev)
+        ensure_duck_src
         BUILD_DIR="$DUCKDB_DIR/build/debug"
         TARGET="${TARGET:-unittest}"
-        EXTRA_FLAGS=()
+        EXTRA_FLAGS=(-DDUCKDB_EXTENSION_CONFIGS="$VEX_EXT_CONFIG")
         if [[ $ASAN -eq 1 ]]; then
             BUILD_DIR="$DUCKDB_DIR/build/asan"
             EXTRA_FLAGS+=(
@@ -195,19 +221,21 @@ case "$CMD" in
         ;;
 
     release)
+        ensure_duck_src
         BUILD_DIR="$DUCKDB_DIR/build/release"
         TARGET="${TARGET:-duckdb}"
-        cmake_configure "$BUILD_DIR" "Release"
+        cmake_configure "$BUILD_DIR" "Release" -DDUCKDB_EXTENSION_CONFIGS="$VEX_EXT_CONFIG"
         cmake_build "$BUILD_DIR" "$TARGET" "$JOBS"
         echo -e "${GREEN}Binary: $BUILD_DIR/src/duckdb${NC}"
         ;;
 
     test)
+        ensure_duck_src
         BUILD_DIR="$DUCKDB_DIR/build/release"
         TARGET="unittest"
         # 确保已配置
         if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
-            cmake_configure "$BUILD_DIR" "Release"
+            cmake_configure "$BUILD_DIR" "Release" -DDUCKDB_EXTENSION_CONFIGS="$VEX_EXT_CONFIG"
         fi
         cmake_build "$BUILD_DIR" "$TARGET" "$JOBS"
 
