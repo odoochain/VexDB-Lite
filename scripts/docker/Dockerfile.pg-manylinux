@@ -23,8 +23,10 @@ RUN dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-8-$
                    postgresql18-devel postgresql18-server \
  && dnf clean all
 
-# pg19 dev 快照编译需 flex(manylinux 镜像缺;bison 镜像自带)。单独一层,保住上面 PG 的缓存。
-RUN dnf install -y flex bison && dnf clean all
+# pg19 dev 快照编译需 flex(manylinux 镜像缺;bison 镜像自带)。+ ccache 加速 vexdb_lite
+# 编译(release.sh 挂持久 CCACHE_DIR;vexdb_pg/CMakeLists find_program 自动启用)。
+# 单独一层,保住上面 PG 的缓存。
+RUN dnf install -y flex bison ccache && dnf clean all
 
 # PG 19devel:PGDG 没有,用官方 dev 快照源码编到 /opt/pg19。
 # 快照在容器里 curl 太慢 → 用预先(Mac 快网)下好、放进 build context 的本地包 COPY 进来。
