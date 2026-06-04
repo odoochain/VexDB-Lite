@@ -131,6 +131,9 @@ private:
                     algo.repair_entry(deleted);
 
                     /* Step 2.1: Repair existing points [0, basepoint_num) */
+                    GIStateInput input;
+                    input.bool_val.val = true;
+                    graph_index_get_state(index, GIStateOper::SET_UNDER_VACUUM, input);
                     algo.init_dist_cache();
                     auto [bp_num, up_num, u, u1] = algo.get_repair_info();
                     (void)u; (void)u1;
@@ -152,6 +155,8 @@ private:
                     algo.release_exclusive_lock();
 
                     algo.destroy();
+                    input.bool_val.val = false;
+                    graph_index_get_state(index, GIStateOper::SET_UNDER_VACUUM, input);
                 }
             );
         };
