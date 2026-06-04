@@ -1,7 +1,7 @@
 extension:
   name: vexdb_lite
   description: HNSW-based vector search for DuckDB — FLOAT[N] vectors, L2/Cosine/InnerProduct distance, graph ANN index, product quantization
-  version: 0.0.14            # TODO(发版): 扩展自身版本，发新版时同步更新
+  version: 0.0.15            # 扩展自身版本，发新版时同步更新
   language: C++
   build: cmake
   license: MIT
@@ -17,10 +17,8 @@ extension:
 
 repo:
   github: VexDB-THU/VexDB-Lite
-  # ref 跟 release 同步: 指向最新 release tag。当前 v0.0.14。
-  # ⚠️ 待办: PR #11(多版本 + deleted_rids_ 并发 UAF 修复)合并后发新 release,
-  #         把 ref 与上面的 version 一起 bump 到含修复的 tag(如 v0.0.15)。
-  ref: v0.0.14
+  # ref 跟 release 同步: 指向最新 release tag。v0.0.15 含多版本 + deleted_rids_ 并发 UAF 修复。
+  ref: v0.0.15
 
 docs:
   hello_world: |
