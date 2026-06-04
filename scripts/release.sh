@@ -434,7 +434,7 @@ CFGEOF
 # magic（append_metadata.cmake 写入的 custom-section 名字），并跑一次真 LOAD。
 validate_duck() {
     local arch=$1 dver=$2
-    info "$arch DuckDB smoke 验证 $dver（ELF + 入口符号 + footer + LOAD）"
+    info "$arch DuckDB smoke 验证 ${dver}（ELF + 入口符号 + footer + LOAD）"
     local ext_path="~/$REMOTE_DIR/vexdb_lite/build/duck/$dver/build/extension/vexdb_lite/vexdb_lite.duckdb_extension"
     rssh "$arch" "set -e
         test -f $ext_path
