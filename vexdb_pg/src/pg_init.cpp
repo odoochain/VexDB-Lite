@@ -5,12 +5,14 @@
 #include "distance/core/distance.h"
 #include "vector_buffer/vector_smgr.h"
 #include "guc_config.h"
+#include "graph_index/graph_index_state.h"
 #include "vector_buffer/shared_alloc_set.h"
 #include "vector_buffer/vecbuf_shared.h"
 
 extern "C" {
 #include "storage/shmem.h"
 #include "postmaster/bgworker.h"
+#include "utils/hsearch.h"
 }
 
 /* PostgreSQL module magic block */
@@ -74,9 +76,10 @@ vecbuf_shmem_size(void)
     
     /* Alignment padding */
     size = add_size(size, ann_helper::vector_aligned_size);
-    
-    /* Hashtable overhead is negligible per user direction */
-    
+
+    /* GIState shared hash table */
+    size = add_size(size, hash_estimate_size(128, sizeof(GIStateEntry)));
+
     return size;
 }
 
@@ -88,6 +91,7 @@ vexdb_lite_shmem_request(void)
     
     RequestAddinShmemSpace(vecbuf_shmem_size());
     RequestNamedLWLockTranche("vector_buffer", 1);
+    RequestNamedLWLockTranche("graph_index_state", 1);
 }
 
 static void
@@ -121,6 +125,9 @@ vexdb_lite_shmem_startup(void)
         
         /* Initialize VecBufferManager in shared memory */
         init_vector_smgr();
+
+        /* Initialize per-index state hash table */
+        graph_index_state_init();
     } else {
         /* Attaching to existing shared memory */
         vecbuf_shared_ctx = vecbuf_shared_state->vecbuf_ctx;
@@ -196,8 +203,6 @@ void _PG_init(void)
 
     g_instance.annvec_cxt.ann_cxt = nullptr;
     g_instance.annvec_cxt.redistrib_elem_tracker = nullptr;
-    g_instance.annvec_cxt.qt_update_cxt = nullptr;
-    g_instance.annvec_cxt.qt_update_mgr = nullptr;
 
     g_instance.diskann_cxt.vector_buffers = vexdb_lite_get_vector_buffers();
     g_instance.diskann_cxt.enable_buffer_manager = vexdb_lite_get_enable_vec_buffer_manager();

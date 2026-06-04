@@ -1,6 +1,7 @@
 #include "pg_compat.h"
 #include "graph_index/graph_index_param.h"
 #include "graph_index/graph_index.h"
+#include "graph_index/graph_index_state.h"
 #include "guc_config.h"
 #include "ann_utils.h"
 

@@ -66,6 +66,7 @@ Current functionality:
 | Quantization | Auto quantization | Background auto-enable, supports empty-table index build | ❌ | ❌ | ✅ |
 | Graph index enhancement | Async insert | Fast ingestion for write-heavy workloads | ❌ | ❌ | ✅ |
 | Graph index enhancement | Graph sharding | Large-scale vectors on small-memory machines | ❌ | ❌ | ✅ |
+| Graph index enhancement | Subgraph index build | Continue using memory for index building even in low-memory scenarios to accelerate build speed | ❌ | ❌ | ✅ |
 | HA | Primary-replica HA | Synchronous replication and backup restore | ✅ | ❌ | ✅ |
 | Maintenance | Parallel vacuum | Parallel index cleanup and reclaim | ❌ | ❌ | ✅ |
 
