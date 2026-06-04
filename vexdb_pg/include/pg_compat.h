@@ -102,6 +102,15 @@ extern "C" {
 #define PageSetChecksum(page, blkno) PageSetChecksumInplace((page), (blkno))
 #endif
 
+/* PG19 merged init_size and max_size into a single nelems parameter */
+#if PG_VERSION_NUM >= 190000
+#define VexShmemInitHash(name, nelems, infoP, flags) \
+    ShmemInitHash(name, nelems, infoP, flags)
+#else
+#define VexShmemInitHash(name, nelems, infoP, flags) \
+    ShmemInitHash(name, nelems, nelems, infoP, flags)
+#endif
+
 #ifndef TupleDescFinalize
 #define TupleDescFinalize(tupdesc) ((void)0)
 #endif

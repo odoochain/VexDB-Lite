@@ -3,6 +3,7 @@
 #include "graph_index/graph_index_struct.h"
 #include "graph_index/graph_index_storage.h"
 #include "graph_index/graph_index_xlog.h"
+#include "graph_index/graph_index_state.h"
 #include "annkmeans.h"
 
 int graph_index_get_m(Relation index)
@@ -148,4 +149,77 @@ bool try_set_under_redistrib(Relation index, uint32 id)
 void reset_under_redistrib(Relation index, uint32 id)
 {
     //
+}
+
+extern "C" {
+#include "utils/hsearch.h"
+#include "storage/shmem.h"
+}
+
+static HTAB *gi_state_hash = NULL;
+LWLock *GraphIndexStateLock = NULL;
+
+void graph_index_state_init(void)
+{
+    HASHCTL hash_ctl;
+    MemSet(&hash_ctl, 0, sizeof(hash_ctl));
+    hash_ctl.keysize = sizeof(Oid);
+    hash_ctl.entrysize = sizeof(GIStateEntry);
+
+    gi_state_hash = VexShmemInitHash(
+        "Graph Index State",
+        128,
+        &hash_ctl,
+        HASH_ELEM | HASH_BLOBS
+    );
+
+    GraphIndexStateLock = &(GetNamedLWLockTranche("graph_index_state")->lock);
+}
+
+void graph_index_get_state(Relation index, GIStateOper op, GIStateInput &input)
+{
+    Oid keyid = RelationGetRelid(index);
+    bool found;
+
+    switch (op) {
+        case GIStateOper::GET_UNDER_VACUUM:
+            LWLockAcquire(GraphIndexStateLock, LW_SHARED);
+            {
+                GIStateEntry *entry = (GIStateEntry *)
+                    hash_search(gi_state_hash, &keyid, HASH_FIND, &found);
+                input.bool_val.val = found ? entry->under_vacuum : 0;
+                input.bool_val.set_result = true;
+            }
+            LWLockRelease(GraphIndexStateLock);
+            break;
+
+        case GIStateOper::SET_UNDER_VACUUM:
+            LWLockAcquire(GraphIndexStateLock, LW_EXCLUSIVE);
+            {
+                if (input.bool_val.val) {
+                    GIStateEntry *entry = (GIStateEntry *)
+                        hash_search(gi_state_hash, &keyid, HASH_ENTER, &found);
+                    if (!found) {
+                        entry->index_oid = keyid;
+                        entry->under_vacuum = 0;
+                        entry->under_qt_update = 0;
+                        entry->under_async_insert = 0;
+                    }
+                    entry->under_vacuum = 1;
+                } else {
+                    GIStateEntry *entry = (GIStateEntry *)
+                        hash_search(gi_state_hash, &keyid, HASH_FIND, &found);
+                    if (found) {
+                        entry->under_vacuum = 0;
+                        if (!entry->under_qt_update &&
+                            !entry->under_async_insert)
+                            hash_search(gi_state_hash, &keyid,
+                                        HASH_REMOVE, NULL);
+                    }
+                }
+                input.bool_val.set_result = true;
+            }
+            LWLockRelease(GraphIndexStateLock);
+            break;
+    }
 }

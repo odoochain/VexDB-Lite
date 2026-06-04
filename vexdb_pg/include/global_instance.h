@@ -23,8 +23,6 @@ typedef struct knl_g_annvec_context {
     ann_helper::half_to_float_func half_to_float;
     void *ann_cxt;
     void *redistrib_elem_tracker;
-    void *qt_update_cxt;
-    void *qt_update_mgr;
 } knl_g_annvec_context;
 
 typedef struct knl_g_rabitq_context {

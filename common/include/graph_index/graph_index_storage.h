@@ -27,6 +27,8 @@
 #include "graph_index/graph_index_cluster.h"
 #include "graph_index/graph_index.h"
 #include "graph_index/graph_index_xlog.h"
+/* graph_index_state.h is PG-only; included via vexdb_pg/include/ */
+#include "graph_index/graph_index_state.h"
 #include "module/perf_usage.h"
 #include "vector_buffer/vector_smgr.h"
 #include "ann_utils.h"
@@ -814,10 +816,9 @@ public:
     T assign_vector_id()
     {
         DO_PERF(write_node);
-        // GIStateInput input;
-        // graph_index_get_state(index, GIStateOper::GET_UNDER_VACUUM, input);
-        // bool can_reuse = !input.bool_val.val;
-        bool can_reuse = true;
+        GIStateInput input;
+        graph_index_get_state(index, GIStateOper::GET_UNDER_VACUUM, input);
+        bool can_reuse = !input.bool_val.val;
         T id = (T)INVALID_VECTOR_ID;
         CONSTEXPR_IF (is_base_layer) {
             if (can_reuse) {
