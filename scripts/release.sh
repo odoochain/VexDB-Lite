@@ -515,16 +515,32 @@ build_pg() {
         rssh "$arch" "$docker_pfx image inspect $image >/dev/null 2>&1" \
             || fail "$arch manylinux 镜像 $image 不在；先 docker build -f scripts/docker/Dockerfile.pg-manylinux"
         host_uid=$(rssh "$arch" 'id -u'); host_gid=$(rssh "$arch" 'id -g')
+        # 并行度按本机算: max(4, min(75% 核数, 可用内存GB/4))。瓶颈是内存——AVX-512
+        # dispatcher 等重模板(x86 专属, ARM 无)每个 cc1plus 峰值约 4G, 纯按核数(16 核
+        # ×75%=12)在 x86 会撞 OOM(实测 -j8 ~30G 可用就 cc1plus 被 kill)。故 min 内存封顶;
+        # 又因 ARM 可用内存紧(~9G)会被封到 -j2 而它本无重文件, 用 -j4 下限兜住(已知安全)。
+        local pg_jobs
+        pg_jobs=$(rssh "$arch" 'C=$(nproc); MG=$(free -g | sed -n "2p" | tr -s " " | cut -d" " -f7); J=$((C*3/4)); MJ=$((MG/4)); if [ "$MJ" -ge 1 ] && [ "$MJ" -lt "$J" ]; then J=$MJ; fi; if [ "$J" -lt 4 ]; then J=4; fi; echo "$J"')
+        info "$arch $PG_VERSION 并行度 -j$pg_jobs(min 75%核 / 可用内存GB/4)"
         rssh "$arch" "$docker_pfx run --rm \
             -v \$HOME/$REMOTE_DIR/vexdb_lite:/work \
             -v $boost:/opt/boost:ro \
+            -v \$HOME/.ccache_vexdb:/ccache \
+            -e CCACHE_DIR=/ccache \
             -w /work \
             $image \
             bash -c 'set -e
                 export PATH=/opt/python/cp310-cp310/bin:\$PATH
+                # ccache: 跨 --rm 持久缓存在 host \$HOME/.ccache_vexdb(挂到 /ccache)。
+                # 镜像若没自带就装(幂等, 已装则秒过); vexdb_pg/CMakeLists 的
+                # find_program(ccache) 据此设 CMAKE_CXX_COMPILER_LAUNCHER。CLEAN_BUILD
+                # 清的是 build 目录, ccache 按内容哈希命中, 全量重编也能秒级复用。
+                command -v ccache >/dev/null 2>&1 || yum install -y ccache >/dev/null 2>&1 || true
                 ${CLEAN_BUILD:+rm -rf build/pg-ml-$PG_VERSION;} mkdir -p build/pg-ml-$PG_VERSION && cd build/pg-ml-$PG_VERSION
                 PG_CONFIG=$pgc cmake ../../vexdb_pg -DCMAKE_BUILD_TYPE=Release -DBOOST_FALLBACK_INC=/opt/boost
-                cmake --build . -j8
+                # 并行度 \$pg_jobs 由外层按本机核数+可用内存算(见 build_pg 注释), 避免
+                # AVX-512/annkmeans 重模板并行编时峰值内存撞 OOM。
+                cmake --build . -j$pg_jobs
                 cp vexdb_lite.so /work/vexdb_lite.so
                 chown -R $host_uid:$host_gid /work/build/pg-ml-$PG_VERSION /work/vexdb_lite.so
             '" || fail "$arch $PG_VERSION manylinux build 失败"
