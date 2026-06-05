@@ -140,11 +140,11 @@ MOBILE_EXT_CONFIG="$DUCKDB_DIR/extension/extension_config_mobile.cmake"
 # ============================================================
 # 移动端构建方案（--profile 选择）
 # ============================================================
-# full:    完整功能 — HNSW + HybridIndex + Optimizer + core_functions
+# full:    完整功能 — 图索引 + HybridIndex + Optimizer + core_functions
 #          适用于需要完整 SQL 分析能力的场景
-# compact: 纯向量搜索 — HNSW + core_functions（无 HybridIndex/Optimizer）
+# compact: 纯向量搜索 — 图索引 + core_functions（无 HybridIndex/Optimizer）
 #          适用于只需要向量搜索 + 基本 SQL 的场景
-# minimal: 最小依赖 — 仅 HNSW（无 core_functions，基础 SQL 仍可用）
+# minimal: 最小依赖 — 仅图索引（无 core_functions，基础 SQL 仍可用）
 #          适用于只需要向量搜索、不依赖高级 SQL 函数的场景
 #
 # 体积说明：

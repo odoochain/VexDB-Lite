@@ -1,6 +1,6 @@
 extension:
   name: vexdb_lite
-  description: HNSW-based vector search for DuckDB — FLOAT[N] vectors, L2/Cosine/InnerProduct distance, graph ANN index, product quantization
+  description: Vector similarity search for DuckDB — FLOAT[N] vectors, L2/Cosine/InnerProduct distance, a self-developed graph ANN index (GRAPH_INDEX), and product quantization
   version: 0.0.15            # 扩展自身版本，发新版时同步更新
   language: C++
   build: cmake
@@ -26,19 +26,20 @@ docs:
     CREATE TABLE items (id INTEGER, vec FLOAT[3]);
     INSERT INTO items VALUES (1, [1.0, 2.0, 3.0]), (2, [4.0, 5.0, 6.0]), (3, [1.0, 2.0, 4.0]);
 
-    -- 建 HNSW 图索引(L2 度量)
+    -- 建图索引(L2 度量)
     CREATE INDEX idx ON items USING GRAPH_INDEX (vec) WITH (metric = 'l2');
 
     -- ANN 近邻搜索：ORDER BY distance LIMIT k 自动走索引
     SELECT id, array_distance(vec, [1.0, 2.0, 3.0]::FLOAT[3]) AS dist
     FROM items ORDER BY dist LIMIT 2;
   extended_description: |
-    vexdb_lite adds HNSW-based approximate nearest neighbor (ANN) search to DuckDB.
+    vexdb_lite adds approximate nearest neighbor (ANN) vector search to DuckDB,
+    powered by a self-developed high-performance graph index (GRAPH_INDEX).
 
     Features:
       - Native FLOAT[N] vector type (no custom type needed)
       - Distance functions: L2 / Cosine / Inner Product (with operator aliases <->, <=>, <#>, <~>)
-      - Graph (HNSW) ANN index via `CREATE INDEX ... USING GRAPH_INDEX`
+      - Self-developed graph ANN index via `CREATE INDEX ... USING GRAPH_INDEX`
       - Product Quantization (PQ) for compact indexes
       - Query optimizer rewrite: `ORDER BY distance(...) LIMIT k` → index scan
       - Runtime SIMD dispatch (SSE/AVX2/AVX-512/NEON)

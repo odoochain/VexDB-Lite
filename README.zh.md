@@ -122,7 +122,7 @@ WITH (
 启用 PQ 可将索引存储压缩约 16×。当前 v1 版本的使用规约：
 
 ```sql
-SET maintenance_work_mem = '2GB';   -- 必需，低于 1GB 会自动回落 plain HNSW
+SET maintenance_work_mem = '2GB';   -- 必需，低于 1GB 会自动回落 普通图索引
 CREATE INDEX idx_pq ON items
 USING vexdb_graph (vec floatvector_l2_ops)
 WITH (quantizer = 'pq', pq_m = 4);
@@ -130,7 +130,7 @@ WITH (quantizer = 'pq', pq_m = 4);
 
 **v1 已知限制**：
 
-- `maintenance_work_mem < 1GB` 时 PQ 自动回落 plain HNSW（带 NOTICE 提示）
+- `maintenance_work_mem < 1GB` 时 PQ 自动回落 普通图索引（带 NOTICE 提示）
 - **PQ 索引在 build 后是只读的**：`INSERT` / `UPDATE` / `DELETE` 触发的 aminsert 会被拒绝
   ```
   ERROR:  DML on a PQ-enabled vexdb_graph index is not yet supported
@@ -138,7 +138,7 @@ WITH (quantizer = 'pq', pq_m = 4);
           without quantizer='pq'.
   ```
   推荐工作流：**先批量写数据 → CREATE INDEX → 只读查询**。数据变更后 DROP + CREATE 重建索引。这与 FAISS 等向量库的 "build-once index" 模式一致。
-- parallel build × PQ：走单线程（与 plain HNSW 行为一致）
+- parallel build × PQ：走单线程（与 普通图索引 行为一致）
 
 **核对索引状态**：
 
