@@ -238,7 +238,7 @@ CREATE ACCESS METHOD vexdb_graph
     TYPE INDEX
     HANDLER vexdb_graph_amhandler;
 
-COMMENT ON ACCESS METHOD vexdb_graph IS 'HNSW graph index access method for vector similarity search';
+COMMENT ON ACCESS METHOD vexdb_graph IS 'Self-developed graph index access method for vector similarity search';
 
 -- vexdb_graph opclasses for floatvector
 

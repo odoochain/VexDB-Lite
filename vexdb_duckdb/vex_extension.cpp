@@ -54,7 +54,7 @@ void LoadInternal(ExtensionLoader &loader) {
     config.AddExtensionOption("vexdb_brute_force_threshold",
                               "Run exact brute-force search when index row count <= threshold. "
                               "Below ~10k rows ANN offers no perf win but loses recall, so default "
-                              "favors precision. Set higher to bypass HNSW after large delete+reinsert "
+                              "favors precision. Set higher to bypass the graph index after large delete+reinsert "
                               "churn where recall has degraded.",
                               LogicalType::UBIGINT, Value::UBIGINT(10000));
     // off (default): search ignores PQ, runs HNSW on raw vectors.

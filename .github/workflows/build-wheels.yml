@@ -64,7 +64,7 @@ jobs:
 
           # OEM: rename package to vexdb-lite
           sed -i 's/^name = "duckdb"/name = "vexdb-lite"/' "$BD/pyproject.toml"
-          sed -i "s/^description = .*/description = \"VexDB-Lite: DuckDB with HNSW vector search\"/" "$BD/pyproject.toml"
+          sed -i "s/^description = .*/description = \"VexDB-Lite: DuckDB with graph-index vector search\"/" "$BD/pyproject.toml"
 
           # Patch versioning code to use vexdb-lite env var name
           VERFILE="$BD/duckdb_packaging/setuptools_scm_version.py"
