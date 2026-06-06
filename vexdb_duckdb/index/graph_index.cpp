@@ -347,11 +347,26 @@ void GraphIndex::BuildBulk(const std::vector<float> &vectors, const std::vector<
     // Enable build-only locking in get_data for the parallel build span: workers mutate
     // MemStore concurrently without graph_rwlock_. RAII restores false on all paths
     // (including exceptions) — and only after all workers have joined inside RunWithDuckAlgo.
+    // Also force search_lock_free_ off for the build: the per-node stripe locks
+    // (lock_point) that synchronize concurrent worker reads against add_upperpoint's
+    // exclusive publish are skipped when search_lock_free_ is set. A prior SearchANN
+    // latches that flag true and never resets it, so a rebuild on the same store
+    // would otherwise let build-time readers skip the lock → the upper-point publish
+    // race resurfaces. Save/restore so search keeps its lock-free fast path afterward.
     struct BuildActiveGuard {
         std::atomic<bool> &flag;
-        explicit BuildActiveGuard(std::atomic<bool> &f) : flag(f) { flag.store(true, std::memory_order_release); }
-        ~BuildActiveGuard() { flag.store(false, std::memory_order_release); }
-    } _build_active_guard(runtime_->store.parallel_build_active_);
+        bool &lock_free;
+        bool saved_lock_free;
+        BuildActiveGuard(std::atomic<bool> &f, bool &lf)
+            : flag(f), lock_free(lf), saved_lock_free(lf) {
+            lock_free = false;
+            flag.store(true, std::memory_order_release);
+        }
+        ~BuildActiveGuard() {
+            flag.store(false, std::memory_order_release);
+            lock_free = saved_lock_free;
+        }
+    } _build_active_guard(runtime_->store.parallel_build_active_, runtime_->store.search_lock_free_);
 
     RunWithDuckAlgo(metric_, dimension_, ef_construction_, m_, runtime_->store, [&](auto &algo) {
         using AlgoT = std::decay_t<decltype(algo)>;

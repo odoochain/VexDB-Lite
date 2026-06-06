@@ -1110,6 +1110,17 @@ public:
         if (cur_layer_idx >= upper_points.size()) {
             upper_points.resize(cur_layer_idx + 1, MakeUpperPoint());
         }
+        /* Publish this point's own slot under its stripe lock. During parallel
+         * BuildBulk another worker can reach cur_layer_idx via a reverse edge
+         * (update_reverse_edges<false> in insert_new_point runs right after this)
+         * and read up.lower_layer_idx / up.id / up.neighbors_info via the readers'
+         * lock_point<false,true> (search_upper_layer / search_layer). Those fields
+         * default to INVALID_VECTOR_ID in MakeUpperPoint; without a matching
+         * exclusive lock here the read has no happens-before and may observe the
+         * stale INVALID lower_layer_idx, which is then used as a raw base-layer
+         * index → out-of-bounds SEGV. (Base layer is immune: its lower_layer_idx
+         * is the identity id, never a stored field.) */
+        lock_point<false, false>(cur_layer_idx);
         auto &up = upper_points[cur_layer_idx];
         up.lower_layer_idx = lower_layer_idx;
         up.id = id;
@@ -1131,6 +1142,7 @@ public:
                 }
             }
         }
+        unlock_point<false, false>(cur_layer_idx);
     }
 
     template <typename Func>
