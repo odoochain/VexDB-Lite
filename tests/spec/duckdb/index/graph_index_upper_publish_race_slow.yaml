@@ -1,0 +1,44 @@
+name: index__graph_index_upper_publish_race_slow
+tags:
+- vex
+- slow
+engines:
+- duckdb
+description: >
+  Regression for the parallel-build UPPER-LAYER publish race in DuckDB's MemStore
+  (vex_graph_index_depend_duck.hpp). During multi-worker BuildBulk, add_upperpoint
+  publishes a new point's own slot fields (up.lower_layer_idx / up.id) WITHOUT taking
+  the point's stripe lock, while update_reverse_edges<false> immediately makes that
+  point reachable via a reverse edge. A concurrent worker that walks to the point in
+  search_upper_layer / search_layer takes lock_point<false,true> (SHARED) and reads
+  up.lower_layer_idx — with no happens-before against the unlocked write it can observe
+  the MakeUpperPoint default INVALID_VECTOR_ID, which is then used as a RAW base-layer
+  index → out-of-bounds SEGV. The base layer is immune because get_point_info<true>
+  returns the identity idx, never a stored field — so the crash is upper-only and x86/
+  fast-timing only. Fixed by publishing add_upperpoint's slot under lock_point<false,false>
+  (EXCLUSIVE upper stripe) plus forcing search_lock_free_=false for the build span.
+  This case maximises the window: MANY DISTINCT points (≈20k unique vectors → ≈20k base
+  nodes → ≈1.2k upper nodes, i.e. far more upper-publish events than the dedup-heavy
+  parallel_build_race case) + high thread count + repeated build/drop. NOTE: a data race
+  is probabilistic — a single run is NOT guaranteed to crash an unfixed binary; surface
+  it by running on x86 without sanitizers, ideally several times / in the full suite.
+steps:
+- statement: SET threads = 8;
+- statement: CREATE TABLE t_upub (id INTEGER, vec ${VECTOR(4)});
+# ≈20k MOSTLY-DISTINCT vectors (prime multipliers + prime modulus spread them) so the
+# build creates many base nodes and therefore many upper-layer nodes — every upper node
+# is an add_upperpoint publish that a concurrent searcher can race against.
+- statement: INSERT INTO t_upub SELECT i, ${VEC_LITERAL([((i * 7) % 10007) * 0.001::FLOAT, ((i * 13) % 10007) * 0.001::FLOAT, ((i * 29) % 10007) * 0.001::FLOAT, ((i * 53) % 10007) * 0.001::FLOAT], 4)} FROM ${RANGE2(1, 20001)} t(i);
+- raw_directive: loop iter 0 8
+  raw_body: ''
+- statement: CREATE INDEX idx_upub ON t_upub USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_OPTS_L2};
+# The search after each parallel build descends the upper layers — exactly the read side
+# of the race. It must return 10 rows and must not SEGV.
+- query: SELECT count(*) FROM (SELECT id FROM t_upub ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 2.0, 3.0, 4.0], 4)})} LIMIT 10);
+  _field_types: I
+  expect:
+  - - 10
+- statement: DROP INDEX idx_upub;
+- raw_directive: endloop
+  raw_body: ''
+- statement: DROP TABLE t_upub;
