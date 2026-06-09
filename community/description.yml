@@ -1,7 +1,7 @@
 extension:
   name: vexdb_lite
-  description: HNSW-based vector search for DuckDB — FLOAT[N] vectors, L2/Cosine/InnerProduct distance, graph ANN index, product quantization
-  version: 0.0.15            # 扩展自身版本，发新版时同步更新
+  description: Vector similarity search for DuckDB — FLOAT[N] vectors, L2/Cosine/InnerProduct distance, a self-developed graph ANN index (GRAPH_INDEX), and product quantization
+  version: 0.0.16            # 扩展自身版本，发新版时同步更新
   language: C++
   build: cmake
   license: MIT
@@ -12,37 +12,38 @@ extension:
     - TsinghuaDatabaseGroup
     - CedarSnowy
 
-  # vexdb 没在 Windows / WebAssembly 上构建过，先排除；待验证后可逐步打开。
+  # vexdb_lite 没在 Windows / WebAssembly 上构建过，先排除；待验证后可逐步打开。
   excluded_platforms: "windows_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads"
 
 repo:
   github: VexDB-THU/VexDB-Lite
-  # ref 跟 release 同步: 指向最新 release tag。v0.0.15 含多版本 + deleted_rids_ 并发 UAF 修复。
-  ref: v0.0.15
+  # ref 跟 release 同步: 指向最新 release tag。
+  ref: v0.0.16
 
 docs:
   hello_world: |
-    -- 建表存放 3 维向量
+    -- Store 3-dimensional vectors
     CREATE TABLE items (id INTEGER, vec FLOAT[3]);
     INSERT INTO items VALUES (1, [1.0, 2.0, 3.0]), (2, [4.0, 5.0, 6.0]), (3, [1.0, 2.0, 4.0]);
 
-    -- 建 HNSW 图索引(L2 度量)
+    -- Build a graph ANN index (L2 metric)
     CREATE INDEX idx ON items USING GRAPH_INDEX (vec) WITH (metric = 'l2');
 
-    -- ANN 近邻搜索：ORDER BY distance LIMIT k 自动走索引
+    -- ANN search: ORDER BY distance LIMIT k automatically uses the index
     SELECT id, array_distance(vec, [1.0, 2.0, 3.0]::FLOAT[3]) AS dist
     FROM items ORDER BY dist LIMIT 2;
   extended_description: |
-    vexdb_lite adds HNSW-based approximate nearest neighbor (ANN) search to DuckDB.
+    vexdb_lite adds approximate nearest neighbor (ANN) vector search to DuckDB,
+    powered by a self-developed high-performance graph index (GRAPH_INDEX).
 
     Features:
       - Native FLOAT[N] vector type (no custom type needed)
       - Distance functions: L2 / Cosine / Inner Product (with operator aliases <->, <=>, <#>, <~>)
-      - Graph (HNSW) ANN index via `CREATE INDEX ... USING GRAPH_INDEX`
+      - Self-developed graph ANN index via `CREATE INDEX ... USING GRAPH_INDEX`
       - Product Quantization (PQ) for compact indexes
-      - Query optimizer rewrite: `ORDER BY distance(...) LIMIT k` → index scan
+      - Query optimizer rewrite: `ORDER BY distance(...) LIMIT k` -> index scan
       - Runtime SIMD dispatch (SSE/AVX2/AVX-512/NEON)
 
     Tuning:
-      SET vexdb_ef_search = 40;              -- search expansion factor
+      SET vexdb_ef_search = 40;                -- search expansion factor
       SET vexdb_brute_force_threshold = 10000; -- exact search below this row count
