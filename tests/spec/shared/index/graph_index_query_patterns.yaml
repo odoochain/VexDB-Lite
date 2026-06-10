@@ -140,3 +140,6 @@ steps:
   - - 7
 - statement: DROP TABLE items;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_query_patterns.test
+
+skip:
+  sqlite: true

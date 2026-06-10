@@ -61,3 +61,6 @@ steps:
     - 0.8660254037844386
 - statement: DROP TABLE products;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_ann.test
+
+skip:
+  sqlite: true

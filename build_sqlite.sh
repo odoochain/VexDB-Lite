@@ -48,6 +48,8 @@ case "$CMD" in
             "$BUILD_DIR/m2_vtab_smoke"
             echo "=== M3 HNSW 冒烟 ==="
             "$BUILD_DIR/m3_hnsw_smoke"
+            echo "=== M4 spec（L2 DSL 渲染 + runner） ==="
+            bash "$DIR/../tests/spec/_lib/docker/run_sqlite.sh"
         fi
         ;;
     clean)

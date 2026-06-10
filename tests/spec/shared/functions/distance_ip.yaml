@@ -24,7 +24,7 @@ steps:
   _field_types: R
   expect:
   - - 25.0
-- query: SELECT ${IP(NULL::${VECTOR(2)}, ${VEC_LITERAL([1.0, 2.0], 2)})};
+- query: SELECT ${IP(${TYPED_NULL(2)}, ${VEC_LITERAL([1.0, 2.0], 2)})};
   _field_types: R
   expect:
   - - 'NULL'

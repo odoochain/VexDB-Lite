@@ -33,7 +33,7 @@ steps:
   - - 1
   - - 4
   - - 2
-- query: SELECT ${L2(NULL::${VECTOR(3)}, ${VEC_LITERAL([1.0, 2.0, 3.0], 3)})};
+- query: SELECT ${L2(${TYPED_NULL(3)}, ${VEC_LITERAL([1.0, 2.0, 3.0], 3)})};
   _field_types: R
   expect:
   - - 'NULL'

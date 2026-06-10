@@ -1,0 +1,23 @@
+name: sqlite__f32_codec
+tags: [vex, sqlite]
+description: vexdb_f32 编码/vexdb_vector_to_json 解码 round-trip 与 BLOB/JSON 等价
+steps:
+- query: SELECT vexdb_vector_to_json(vexdb_f32('[1.5, -2.25, 0]'));
+  expect:
+  - - '[1.5,-2.25,0]'
+- query: SELECT length(vexdb_f32('[1,2,3]'));
+  expect:
+  - - 12
+- query: SELECT hex(vexdb_f32('[1]'));
+  expect:
+  - - 0000803F
+- query: SELECT vexdb_l2_distance(vexdb_f32('[1,2,3]'), '[1,2,3]');
+  expect:
+  - - 0.0
+- query: SELECT vexdb_f32(NULL);
+  expect:
+  - - 'NULL'
+- query: SELECT vexdb_f32('not json');
+  expect_error: JSON
+- query: SELECT vexdb_f32(x'010203');
+  expect_error: multiple of 4

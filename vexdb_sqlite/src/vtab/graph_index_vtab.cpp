@@ -201,10 +201,13 @@ bool ConfigGet(GraphIndexVtab &vt, const char *key, std::string &out) {
     return ok;
 }
 
-int DeclareSchema(sqlite3 *db) {
-    // distance 只在 KNN 计划下有值；k 是查询参数列（HIDDEN）。
-    return sqlite3_declare_vtab(db,
-        "CREATE TABLE x(embedding, distance REAL, k INTEGER HIDDEN)");
+int DeclareSchema(sqlite3 *db, const std::string &col_name) {
+    // 第一列用用户声明的列名；distance 只在 KNN 计划下有值；k 是查询参数列。
+    char *sql = sqlite3_mprintf("CREATE TABLE x(\"%w\", distance REAL, k INTEGER HIDDEN)",
+                                col_name.c_str());
+    int rc = sqlite3_declare_vtab(db, sql);
+    sqlite3_free(sql);
+    return rc;
 }
 
 // xCreate/xConnect 公共体。create=true 时建 shadow 表并写 config，
@@ -247,6 +250,9 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
         ConfigSet(*vt, "column", col_name);
     } else {
         std::string v;
+        if (ConfigGet(*vt, "column", v)) {
+            col_name = v;
+        }
         if (!ConfigGet(*vt, "format_version", v)) {
             *pzErr = sqlite3_mprintf("GRAPH_INDEX: missing shadow config for %s", argv[2]);
             delete vt;
@@ -272,7 +278,8 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
         }
     }
 
-    int rc = DeclareSchema(db);
+    if (col_name.empty()) col_name = "embedding";
+    int rc = DeclareSchema(db, col_name);
     if (rc != SQLITE_OK) {
         delete vt;
         return rc;

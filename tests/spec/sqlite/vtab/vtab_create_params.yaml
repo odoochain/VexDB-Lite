@@ -1,0 +1,24 @@
+name: sqlite__vtab_create_params
+tags: [vex, sqlite]
+description: 建表参数解析（m/ef_construction/ef_search/引号 metric）与 shadow 表生命周期
+steps:
+- statement: CREATE VIRTUAL TABLE p1 USING GRAPH_INDEX(v FLOAT[8], metric='cosine', m=32, ef_construction=300, ef_search=64);
+- statement: INSERT INTO p1(rowid, v) VALUES (1, '[1,0,0,0,0,0,0,0]');
+- query: SELECT rowid FROM p1 WHERE v MATCH '[1,0,0,0,0,0,0,0]' AND k = 1;
+  expect:
+  - - 1
+# shadow 表存在且 config 持久化了参数
+- query: SELECT count(*) FROM sqlite_master WHERE name IN ('p1_config','p1_vectors','p1_graph');
+  expect:
+  - - 3
+- query: SELECT value FROM p1_config WHERE key = 'm';
+  expect:
+  - - 32
+- query: SELECT value FROM p1_config WHERE key = 'ef_search';
+  expect:
+  - - 64
+# DROP 清干净 shadow
+- statement: DROP TABLE p1;
+- query: SELECT count(*) FROM sqlite_master WHERE name LIKE 'p1_%';
+  expect:
+  - - 0

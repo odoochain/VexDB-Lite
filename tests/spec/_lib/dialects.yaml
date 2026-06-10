@@ -39,6 +39,8 @@ duckdb:
     # range(n) → 0..n-1, range(a, b) → a..b-1
     RANGE: "range({0})"
     RANGE2: "range({0}, {1})"
+    # 带类型的 NULL 字面量 (sqlite 无 :: cast, 故抽成函数)
+    TYPED_NULL: "NULL::FLOAT[{0}]"
     # CREATE INDEX 末尾带额外参数时使用 (metric 自动嵌入)
     IDX_WITH_L2: " WITH ({0})"
     IDX_WITH_COSINE: " WITH (metric='cosine', {0})"
@@ -74,6 +76,7 @@ pg:
     NEG_IP: "({0} <#> {1})"
     RANGE: "generate_series(0, ({0}) - 1)"
     RANGE2: "generate_series({0}, ({1}) - 1)"
+    TYPED_NULL: "NULL::floatvector"
     IDX_WITH_L2: " WITH ({0})"
     IDX_WITH_COSINE: " WITH ({0})"
     IDX_WITH_IP: " WITH ({0})"
@@ -82,6 +85,47 @@ opengauss:
   inherit: pg
   vars: {}
   functions: {}
+
+sqlite:
+  vars:
+    # SQLite 无 CREATE INDEX 索引类型/opclass/GUC——这些键只为模板解析不炸；
+    # 用到它们的 spec 应 skip: {sqlite: true}（graph_index_* 族走 sqlite 专属
+    # 用例，语句结构 CREATE VIRTUAL TABLE + MATCH+k 与 ORDER BY LIMIT 不同构）。
+    VEX_INDEX: "__unsupported_sqlite_create_index__"
+    OPS_L2_COL: ""
+    OPS_COSINE_COL: ""
+    OPS_IP_COL: ""
+    IDX_OPTS_L2: ""
+    IDX_OPTS_COSINE: ""
+    IDX_OPTS_IP: ""
+    SYS_INDEXES: "__unsupported_sqlite_sys_indexes__"
+    SYS_INDEXES_NAME: "name"
+    SYS_INDEXES_TABLE: "tbl_name"
+    GUC_EF_SEARCH: "__unsupported_sqlite_guc__"
+    GUC_BF_THRESHOLD: "__unsupported_sqlite_guc__"
+    GUC_PQ_SEARCH_MODE: "__unsupported_sqlite_guc__"
+    GUC_PQ_REFINE: "__unsupported_sqlite_guc__"
+    GUC_PARALLEL_SEARCH: "__unsupported_sqlite_guc__"
+    NULL_LITERAL: "NULL"
+  functions:
+    # SQLite 列无类型约束，向量列用 TEXT 声明（JSON 文本/BLOB 双形态均可入）。
+    VECTOR: "TEXT"
+    # 向量字面量=JSON 数组文本（vexdb 函数原生接受）。维度参数 {1} 放注释占位：
+    # 渲染器对单 placeholder 模板会把多参 join 进 {0}（IDX_WITH 语义），必须显式
+    # 消费两个 placeholder。
+    VEC_LITERAL: "'{0}' /*dim={1}*/"
+    L2: "vexdb_l2_distance({0}, {1})"
+    COSINE: "vexdb_cosine_distance({0}, {1})"
+    IP: "vexdb_inner_product({0}, {1})"
+    NEG_IP: "vexdb_negative_inner_product({0}, {1})"
+    # SQLite amalgamation 无 generate_series（CLI 自带是另一回事）；
+    # 用到 RANGE 的 spec 应 skip。
+    RANGE: "__unsupported_sqlite_range__({0})"
+    RANGE2: "__unsupported_sqlite_range__({0}, {1})"
+    TYPED_NULL: "NULL"
+    IDX_WITH_L2: ""
+    IDX_WITH_COSINE: ""
+    IDX_WITH_IP: ""
 
 # ── 弃用别名 (保持向后兼容, 旧用例可继续工作) ──
 # 旧: ${OPS_L2} → 等同 ${OPS_L2_COL}

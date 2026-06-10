@@ -29,3 +29,6 @@ steps:
     - '[0.0, 0.0, 1.0]'
     - 1.4142135623730951
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_distance.test
+
+skip:
+  sqlite: true
