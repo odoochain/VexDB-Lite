@@ -12,6 +12,8 @@
 
 #include <cmath>
 #include <cstring>
+#include <exception>
+#include <thread>
 
 namespace vexdb_sqlite {
 
@@ -110,6 +112,71 @@ void GraphBridge::Insert(const float *vec, int64_t rowid) {
         tid.row_id = rowid;
         typename AlgoT::InsertContextBase ctx(pctx, reinterpret_cast<const char *>(vec), &tid);
         algo.insert(ctx);
+        return 0;
+    });
+}
+
+// 批量建图（duck BuildBulk 三段式）：首点串行立 entry → 单线程回退 → 连续
+// 切片 spawn std::thread。worker 是纯计算（只碰 store/算法），异常聚合后抛。
+void GraphBridge::BuildBulk(const float *vecs, const int64_t *rowids, size_t n, int n_threads) {
+    auto &im = *impl_;
+    if (n == 0) return;
+
+    RunWithAlgo(im.core_metric, im.dim, im.ef_construction, im.m, im.store, [&](auto &algo) {
+        using AlgoT = std::decay_t<decltype(algo)>;
+        auto insert_one = [&](size_t i) {
+            PointExtensionContext pctx;
+            ItemPointerData tid{};
+            tid.row_id = rowids[i];
+            typename AlgoT::InsertContextBase ctx(
+                pctx, reinterpret_cast<const char *>(vecs + i * im.dim), &tid);
+            algo.insert(ctx);
+        };
+
+        // Phase A：首点串行（建 entry，避免空图竞争升级协议）
+        insert_one(0);
+        if (n == 1) return 0;
+
+        size_t rest = n - 1;
+        int workers = n_threads;
+        if (workers > int(rest)) workers = int(rest);
+        // Phase B：单线程回退
+        if (workers <= 1) {
+            for (size_t i = 1; i < n; i++) insert_one(i);
+            return 0;
+        }
+
+        // Phase C：并行。预留容量（内层向量 buffer 预 resize=publish 安全的根基；
+        // upper 预留按 1/(m-1) 几何级数的期望上界放大）。
+        im.store.ReserveCapacity(n, n / size_t(im.m > 2 ? im.m - 1 : 1) + 64);
+        im.store.parallel_build_active_.store(true, std::memory_order_release);
+
+        std::atomic<size_t> next{1};
+        std::atomic<bool> failed{false};
+        std::exception_ptr first_error = nullptr;
+        std::mutex err_mu;
+        auto worker = [&]() {
+            constexpr size_t kBatch = 64;
+            while (!failed.load(std::memory_order_relaxed)) {
+                size_t begin = next.fetch_add(kBatch, std::memory_order_relaxed);
+                if (begin >= n) break;
+                size_t end = begin + kBatch < n ? begin + kBatch : n;
+                try {
+                    for (size_t i = begin; i < end; i++) insert_one(i);
+                } catch (...) {
+                    std::lock_guard<std::mutex> g(err_mu);
+                    if (!first_error) first_error = std::current_exception();
+                    failed.store(true, std::memory_order_relaxed);
+                    break;
+                }
+            }
+        };
+        std::vector<std::thread> threads;
+        threads.reserve(size_t(workers));
+        for (int t = 0; t < workers; t++) threads.emplace_back(worker);
+        for (auto &th : threads) th.join();
+        im.store.parallel_build_active_.store(false, std::memory_order_release);
+        if (first_error) std::rethrow_exception(first_error);
         return 0;
     });
 }

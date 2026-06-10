@@ -22,9 +22,11 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -358,22 +360,36 @@ int EnsureGraph(GraphIndexVtab &vt) {
         }
     }
 
-    // 2) 从 %_vectors 全量重建（M3 单线程；M3+ 在 GraphBridge 内并行化）
+    // 2) 从 %_vectors 全量重建。两段式：先串行 SQL 预读全部 (rowid, vec) 进
+    //    内存（之后计算线程绝不触碰 sqlite3 句柄——线程合法性的边界），再
+    //    BuildBulk 多线程建图（M3+ 并行；构建期独占，xFilter 同线程等待完成）。
+    std::vector<float> vecs;
+    std::vector<int64_t> rowids;
+    {
+        char *sql = sqlite3_mprintf("SELECT rowid, vec FROM %s ORDER BY rowid",
+                                    vt.ShadowName("vectors").c_str());
+        sqlite3_stmt *st = nullptr;
+        int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) return rc;
+        while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+            if (sqlite3_column_bytes(st, 1) != vt.dim * 4) continue;  // 防御脏数据
+            const float *v = static_cast<const float *>(sqlite3_column_blob(st, 1));
+            vecs.insert(vecs.end(), v, v + vt.dim);
+            rowids.push_back(sqlite3_column_int64(st, 0));
+        }
+        sqlite3_finalize(st);
+        if (rc != SQLITE_DONE) return rc;
+    }
     auto bridge = std::make_unique<GraphBridge>(uint16_t(vt.dim), vt.m, vt.ef_construction,
                                                 vt.metric);
-    char *sql = sqlite3_mprintf("SELECT rowid, vec FROM %s ORDER BY rowid",
-                                vt.ShadowName("vectors").c_str());
-    sqlite3_stmt *st = nullptr;
-    int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
-    sqlite3_free(sql);
-    if (rc != SQLITE_OK) return rc;
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        if (sqlite3_column_bytes(st, 1) != vt.dim * 4) continue;  // 防御脏数据
-        bridge->Insert(static_cast<const float *>(sqlite3_column_blob(st, 1)),
-                       sqlite3_column_int64(st, 0));
+    unsigned hw = std::thread::hardware_concurrency();
+    int n_threads = int(hw > 1 ? (hw > 8 ? 8 : hw) : 1);  // 端侧保守上限 8
+    try {
+        bridge->BuildBulk(vecs.data(), rowids.data(), rowids.size(), n_threads);
+    } catch (const std::exception &e) {
+        return vt.SetError(e.what());
     }
-    sqlite3_finalize(st);
-    if (rc != SQLITE_DONE) return rc;
     vt.graph = std::move(bridge);
     vt.graph_dirty = true;
     return SQLITE_OK;

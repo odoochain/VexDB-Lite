@@ -29,6 +29,11 @@ public:
     // 增量插入一条向量（HNSW algo.insert，真增量非重建）。
     void Insert(const float *vec, int64_t rowid);
 
+    // 批量建图（M3+）：vecs 平铺 n×dim，rowids 长度 n。n_threads<=1 退化串行；
+    // 多线程时三段式（首点串行 → 连续切片 spawn worker），调用方保证构建期独占
+    // 且 vecs/rowids 在返回前有效。线程为纯计算，绝不触碰 sqlite3 句柄。
+    void BuildBulk(const float *vecs, const int64_t *rowids, size_t n, int n_threads);
+
     // KNN：返回 (用户语义 distance, rowid) 升序，最多 k 条。
     // cosine 时内部归一化 query 副本。
     void Search(const float *query, size_t k, uint32_t ef_search,

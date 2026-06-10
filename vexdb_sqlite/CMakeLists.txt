@@ -188,4 +188,11 @@ if(VEXDB_SQLITE_BUILD_TESTS)
         target_link_libraries(${smoke} PRIVATE
             vexdb_lite_static sqlite3_amalg Threads::Threads ${CMAKE_DL_LIBS})
     endforeach()
+
+    # M3+ 并行建图冒烟（C++，直接调 GraphBridge）
+    add_executable(m3p_parallel_smoke test/m3p_parallel_smoke.cpp)
+    target_include_directories(m3p_parallel_smoke PRIVATE ${VEXDB_SQLITE_INCLUDES})
+    target_compile_definitions(m3p_parallel_smoke PRIVATE VEXDB_SQLITE_CORE=1)
+    target_link_libraries(m3p_parallel_smoke PRIVATE
+        vexdb_lite_static sqlite3_amalg Threads::Threads ${CMAKE_DL_LIBS})
 endif()

@@ -6,7 +6,9 @@
 #ifndef DISKANN_UTILS_DISTANCE_H
 #define DISKANN_UTILS_DISTANCE_H
 
+#include <functional>
 #include <random>
+#include <thread>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -426,10 +428,15 @@ inline void free_vector(void *vec) { pfree(vec); }
 #endif
 bool is_aligned(const void *ptr);
 
-/* Random number generator for level assignment */
+/* Random number generator for level assignment.
+ * thread_local: 并行 build 的多个 worker 并发调用（get_insert_level），共享
+ * mt19937 状态是数据竞争（TSan 坐实，SQLite M3+ 揪出；duck 并行 build 同样
+ * 命中）。每线程独立流对 HNSW level 的几何分布无影响。种子混入线程序号哈希
+ * 避免各线程产生相同 level 序列。*/
 inline double RandomDouble() {
-    static std::mt19937 rng(42);
-    static std::uniform_real_distribution<double> dist(0.0, 1.0);
+    thread_local std::mt19937 rng(42u + static_cast<unsigned>(
+        std::hash<std::thread::id>{}(std::this_thread::get_id())));
+    thread_local std::uniform_real_distribution<double> dist(0.0, 1.0);
     return dist(rng);
 }
 

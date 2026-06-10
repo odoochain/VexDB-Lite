@@ -22,7 +22,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <new>
+#include <shared_mutex>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -175,10 +177,18 @@ struct GraphIndexPoint {
     uint8 new_inserted = 0;
     std::vector<Data> tids;
 
+    // 并行 BuildBulk 时 dedup 可把多个 worker 路由到同一 point 的 tids；
+    // 进程级粗锁串行化（duck 同款取舍：build 一次性，正确性优先）。
+    static std::shared_mutex &tid_lock() {
+        static std::shared_mutex m;
+        return m;
+    }
+
     bool empty() const { return tids.empty(); }
     // 非模板重载不可删：algorithm.h 以 braced initializer {ptr, size} 调用，
     // 模板形参推导不了 initializer list。
     bool insert_tid(PointExtensionContext &, Span<const Data> data, bool &overwritten) {
+        std::unique_lock<std::shared_mutex> _lk(tid_lock());
         overwritten = false;
         for (size_t i = 0; i < data.size(); ++i) {
             tids.push_back(data[i]);
@@ -192,6 +202,7 @@ struct GraphIndexPoint {
     }
     template <typename SpanLike>
     bool insert_tid(PointExtensionContext &, SpanLike data, bool &overwritten) {
+        std::unique_lock<std::shared_mutex> _lk(tid_lock());
         overwritten = false;
         for (size_t i = 0; i < data.size(); ++i) {
             tids.push_back(data[i]);
@@ -206,6 +217,7 @@ struct GraphIndexPoint {
     }
     template <typename Vec>
     uint32 get_tids(Vec &out, struct PointExtensionContext &) const {
+        std::shared_lock<std::shared_mutex> _lk(tid_lock());
         for (const auto &tid : this->tids) {
             out.push_back(tid);
         }
@@ -289,8 +301,28 @@ public:
 
     bool normalize_vectors_ = false;
 
-    // 单线程版仍用 atomic 计数器（与 duck 版语义一致、序列化字段直读；
-    // 无并发时 fetch_add 零成本）。M3+ 并行建图时这是 fast-path 的基础。
+    // ---- 并发原语（M3+ 并行 BuildBulk）。语义对照 duck 版：----
+    //   entry_mutex_      : 保护 entry_info（升级协议见 get_entry）
+    //   entry_wait_mutex_ : 升级前抢 wait gate 阻拦后续 reader（防写者饥饿）
+    //   elems_mutex_      : 保护 elems/vectors/base_points/upper_points 外层扩容
+    //   striped locks     : 64 路按 idx&MASK 寻址的 per-node 锁（base/upper 两组）
+    //   parallel_build_active_ : true=并行建图中（get_data 走 SHARED 锁）；
+    //                            false=单线程/查询期（免锁快路径）
+    // 单线程路径上这些锁全部 uncontended（~ns 级），不设跳锁开关。
+    mutable std::shared_mutex entry_mutex_;
+    mutable std::mutex entry_wait_mutex_;
+    mutable std::shared_mutex elems_mutex_;
+    static constexpr size_t STRIPE_COUNT = 64;
+    static constexpr size_t STRIPE_MASK = STRIPE_COUNT - 1;
+    mutable std::shared_mutex base_point_locks_[STRIPE_COUNT];
+    mutable std::shared_mutex upper_point_locks_[STRIPE_COUNT];
+    std::atomic<bool> parallel_build_active_{false};
+
+    // 原子层 size：assign_vector_id fast-path 不持锁读（acquire），slow-path 在
+    // EXCLUSIVE elems_mutex_ 下扩容后 release 写——建立 happens-before。
+    std::atomic<size_t> base_size_{0};
+    std::atomic<size_t> upper_size_{0};
+
     std::atomic<T> next_base_id_{0};
     std::atomic<T> next_upper_id_{0};
 
@@ -300,7 +332,11 @@ public:
         entry_info.set(INVALID_VECTOR_ID, INVALID_VECTOR_ID, -1);
     }
 
+    // 并行 build 前调用：预留外层容量 + 预 resize 内层向量 buffer，使并行期
+    // add_vector 只 memcpy 进稳定指针（防 get_data 读侧 dangling——duck 的
+    // parallel-build publish race 教训）。
     void ReserveCapacity(size_t base_n, size_t upper_n) {
+        std::unique_lock<std::shared_mutex> _lk(elems_mutex_);
         elems.reserve(base_n);
         vectors.reserve(base_n);
         base_points.reserve(base_n);
@@ -313,27 +349,55 @@ public:
                 vectors[i].resize(vec_size);
             }
             base_points.resize(base_n, MakeBasePoint());
+            base_size_.store(base_n, std::memory_order_release);
         }
         if (upper_n > upper_points.size()) {
             upper_points.resize(upper_n, MakeUpperPoint());
+            upper_size_.store(upper_n, std::memory_order_release);
         }
     }
 
-    // 单线程：无升级协议，直接返回当前 entry。shared 标志仅用于配对 release。
+    // 双锁升级协议（照 duck/主库）：SHARED 读 entry；需要更高 level 或图空时
+    // 先抢 wait gate 再升 EXCLUSIVE，防写者饥饿。
     template <bool exclusive = false, bool bottom_only = false>
     std::pair<GraphIndexEntryInfo, bool> get_entry(int_fast8_t insert_level = 0) {
         (void)bottom_only;
-        bool shared = !((!exclusive && insert_level > entry_info.level) || entry_info.level < 0);
-        return {entry_info, shared};
+        entry_wait_mutex_.lock();
+        entry_wait_mutex_.unlock();
+
+        entry_mutex_.lock_shared();
+        GraphIndexEntryInfo entry = entry_info;
+        bool shared = true;
+        if ((!exclusive && insert_level > entry.level) || entry.level < 0) {
+            entry_mutex_.unlock_shared();
+            entry_wait_mutex_.lock();
+            entry_mutex_.lock();
+            entry_wait_mutex_.unlock();
+            entry = entry_info;
+            shared = false;
+        }
+        return {entry, shared};
     }
 
-    void release_entry_lock(bool /*shared*/) {}
+    void release_entry_lock(bool shared) {
+        if (shared) {
+            entry_mutex_.unlock_shared();
+        } else {
+            entry_mutex_.unlock();
+        }
+    }
 
+    // fast path：atomic fetch_add 拿独占 id，已在预留容量内则零锁返回；
+    // slow path：EXCLUSIVE elems_mutex_ 下扩容（增量 Append 或未预留时）。
     template <bool is_base_layer>
     T assign_vector_id() {
         if constexpr (is_base_layer) {
-            T id = next_base_id_.fetch_add(1, std::memory_order_relaxed);
-            if (id + 1 > elems.size()) {
+            T id = next_base_id_.fetch_add(1, std::memory_order_acq_rel);
+            if (size_t(id) < base_size_.load(std::memory_order_acquire)) {
+                return id;
+            }
+            std::unique_lock<std::shared_mutex> _lk(elems_mutex_);
+            if (size_t(id) + 1 > elems.size()) {
                 elems.resize(id + 1);
                 vectors.resize(id + 1);
                 base_points.resize(id + 1, MakeBasePoint());
@@ -341,22 +405,38 @@ public:
             if (vectors[id].size() != (size_t)vec_size) {
                 vectors[id].resize(vec_size);
             }
+            base_size_.store(elems.size(), std::memory_order_release);
             return id;
         } else {
-            T idx = next_upper_id_.fetch_add(1, std::memory_order_relaxed);
-            if (idx + 1 > upper_points.size()) {
+            T idx = next_upper_id_.fetch_add(1, std::memory_order_acq_rel);
+            if (size_t(idx) < upper_size_.load(std::memory_order_acquire)) {
+                return idx;
+            }
+            std::unique_lock<std::shared_mutex> _lk(elems_mutex_);
+            if (size_t(idx) + 1 > upper_points.size()) {
                 upper_points.resize(idx + 1, MakeUpperPoint());
             }
+            upper_size_.store(upper_points.size(), std::memory_order_release);
             return idx;
         }
     }
 
-    void add_async_id(T id) { async_ids.push_back(id); }
+    void add_async_id(T id) {
+        std::unique_lock<std::shared_mutex> _lk(elems_mutex_);
+        async_ids.push_back(id);
+    }
 
+    // elems[id]/vectors[id] 的 id 维度由 assign_vector_id 独占分配不竞争；
+    // SHARED elems_mutex_ 防外层 realloc 让引用失效；tid_lock 串行化 dedup
+    // 路由到同一 id 的并发 push_back（duck 同款双锁）。
     void add_elem(PointExtensionContext &, T id, const ItemPointerData &tid) {
+        std::shared_lock<std::shared_mutex> _lk(elems_mutex_);
+        std::unique_lock<std::shared_mutex> _tl(GraphIndexPoint::tid_lock());
         elems[id].tids.push_back(tid);
     }
     void add_elem(PointExtensionContext &, T id, Span<const ItemPointerData> tids) {
+        std::shared_lock<std::shared_mutex> _lk(elems_mutex_);
+        std::unique_lock<std::shared_mutex> _tl(GraphIndexPoint::tid_lock());
         for (const auto &tid : tids) {
             elems[id].tids.push_back(tid);
         }
@@ -383,6 +463,9 @@ public:
             }
             store_data = normalized.data();
         }
+        // SHARED：防外层 realloc。ReserveCapacity 已预 resize 内层 buffer →
+        // 热路径 memcpy 进稳定指针（不 realloc，不挪 data() 指针）。
+        std::shared_lock<std::shared_mutex> _lk(elems_mutex_);
         auto &slot = vectors[id];
         if (slot.size() == (size_t)vec_size) {
             std::memcpy(slot.data(), store_data, vec_size);
@@ -427,13 +510,29 @@ public:
         next_upper_id_.store(T(upper_n), std::memory_order_relaxed);
     }
 
-    char *get_data(T id) {
+    char *get_data_unlocked(T id) {
         if (id >= vectors.size()) return nullptr;
         return vectors[id].data();
     }
-    const char *get_data(T id) const {
+    const char *get_data_unlocked(T id) const {
         if (id >= vectors.size()) return nullptr;
         return vectors[id].data();
+    }
+    // 并行 build 期取 SHARED（防外层 realloc 撕裂读）；其余时间免锁快路径
+    //（SQLite 查询是单线程 xFilter，无并发写）。
+    char *get_data(T id) {
+        if (!parallel_build_active_.load(std::memory_order_acquire)) {
+            return get_data_unlocked(id);
+        }
+        std::shared_lock<std::shared_mutex> _lk(elems_mutex_);
+        return get_data_unlocked(id);
+    }
+    const char *get_data(T id) const {
+        if (!parallel_build_active_.load(std::memory_order_acquire)) {
+            return get_data_unlocked(id);
+        }
+        std::shared_lock<std::shared_mutex> _lk(elems_mutex_);
+        return get_data_unlocked(id);
     }
 
     struct my_buf {
@@ -475,12 +574,27 @@ public:
         return get_distance(distancer, query, id);
     }
 
-    // M3 单线程：no-op。M3+ 并行建图时换 striped lock + add_upperpoint publish
-    // fence（duck 版 race 教训）。
+    // striped per-node 锁：idx & MASK 命中 64 路之一。查询期（非并行 build）
+    // 无并发写，锁 uncontended，不设跳锁开关（duck 的 search_lock_free_ 是
+    // 高并发查询优化，SQLite 串行查询不需要）。
     template <bool is_base_layer, bool shared_lock>
-    void lock_point(T) {}
+    void lock_point(T idx) {
+        auto &lk = (is_base_layer ? base_point_locks_ : upper_point_locks_)[idx & STRIPE_MASK];
+        if constexpr (shared_lock) {
+            lk.lock_shared();
+        } else {
+            lk.lock();
+        }
+    }
     template <bool is_base_layer, bool shared_lock>
-    void unlock_point(T) {}
+    void unlock_point(T idx) {
+        auto &lk = (is_base_layer ? base_point_locks_ : upper_point_locks_)[idx & STRIPE_MASK];
+        if constexpr (shared_lock) {
+            lk.unlock_shared();
+        } else {
+            lk.unlock();
+        }
+    }
 
     template <bool is_base_layer>
     auto get_point_info(T idx) {
@@ -558,19 +672,33 @@ public:
 
     void add_basepoint(T id, const T *neighbors_id) {
         if (id >= base_points.size()) {
-            base_points.resize(id + 1, MakeBasePoint());
+            std::unique_lock<std::shared_mutex> _lk(elems_mutex_);
+            if (id >= base_points.size()) {
+                base_points.resize(id + 1, MakeBasePoint());
+                base_size_.store(base_points.size(), std::memory_order_release);
+            }
         }
         base_points[id].neighbors.assign(neighbors_id, neighbors_id + m * 2);
     }
 
+    // publish fence（duck #26 forward-publish race 的根治同款）：另一 worker 可
+    // 经反向边在本函数返回前到达 cur_layer_idx，读 up.lower_layer_idx/id；不持
+    // EXCLUSIVE stripe 锁写则无 happens-before，读侧可能看到 MakeUpperPoint 的
+    // INVALID 默认值并当裸 base 索引使用 → 越界。base 层免疫（lower=identity）。
     void add_upperpoint(T cur_layer_idx, T lower_layer_idx, T id, const T *neighbors_info) {
         if (cur_layer_idx >= upper_points.size()) {
-            upper_points.resize(cur_layer_idx + 1, MakeUpperPoint());
+            std::unique_lock<std::shared_mutex> _lk(elems_mutex_);
+            if (cur_layer_idx >= upper_points.size()) {
+                upper_points.resize(cur_layer_idx + 1, MakeUpperPoint());
+                upper_size_.store(upper_points.size(), std::memory_order_release);
+            }
         }
+        lock_point<false, false>(cur_layer_idx);
         auto &up = upper_points[cur_layer_idx];
         up.lower_layer_idx = lower_layer_idx;
         up.id = id;
         up.neighbors_info.assign(neighbors_info, neighbors_info + m * 2);
+        unlock_point<false, false>(cur_layer_idx);
     }
 
     template <typename Func>
