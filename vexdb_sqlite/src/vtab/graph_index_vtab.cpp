@@ -43,6 +43,9 @@ constexpr int kDefaultEfSearch = 40;
 // 行数不超过此值时 KNN 直接暴力扫描（小表 ANN 无性能收益反损 recall，
 // 语义对齐 duck 端 vexdb_brute_force_threshold 的精度优先取向）。
 constexpr sqlite3_int64 kBruteForceThreshold = 64;
+// 图 blob 分块大小：SQLite 单 blob 上限默认 1GB（SIFT1M m=32 图 ~1.1GB 实证撞限），
+// 按块写 %_graph 多行。256MB 默认；建表参数 graph_chunk_size 可调（测试用小值强制多块）。
+constexpr sqlite3_int64 kDefaultGraphChunk = 256LL * 1024 * 1024;
 
 // declare_vtab 的列序（rowid 之外）。embedding=0, distance=1, k=2(HIDDEN),
 // cmd=3(与表同名的 HIDDEN 列，fts5 风格 special insert：
@@ -62,6 +65,8 @@ struct GraphIndexVtab {
     int m = kDefaultM;
     int ef_construction = kDefaultEfConstruction;
     int ef_search = kDefaultEfSearch;
+    sqlite3_int64 brute_force_threshold = kBruteForceThreshold;
+    sqlite3_int64 graph_chunk_size = kDefaultGraphChunk;
 
     // M3：内存 HNSW 图（懒加载：首次 KNN 时从 %_graph blob 还原或 %_vectors 重建）。
     // 一致性协议：任何写路径先清 %_graph（宿主事务内）；xSync 把 dirty 内存图
@@ -145,6 +150,12 @@ bool ParseCreateArgs(int argc, const char *const *argv, GraphIndexVtab &vt,
             } else if (key == "ef_search") {
                 vt.ef_search = atoi(val.c_str());
                 if (vt.ef_search < 1) { err = "ef_search must be positive"; return false; }
+            } else if (key == "brute_force_threshold") {
+                vt.brute_force_threshold = atoll(val.c_str());
+                if (vt.brute_force_threshold < 0) { err = "brute_force_threshold must be >= 0"; return false; }
+            } else if (key == "graph_chunk_size") {
+                vt.graph_chunk_size = atoll(val.c_str());
+                if (vt.graph_chunk_size < 4096) { err = "graph_chunk_size must be >= 4096"; return false; }
             } else {
                 err = "unknown parameter: " + key;
                 return false;
@@ -254,6 +265,8 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
         ConfigSet(*vt, "m", std::to_string(vt->m));
         ConfigSet(*vt, "ef_construction", std::to_string(vt->ef_construction));
         ConfigSet(*vt, "ef_search", std::to_string(vt->ef_search));
+        ConfigSet(*vt, "brute_force_threshold", std::to_string(vt->brute_force_threshold));
+        ConfigSet(*vt, "graph_chunk_size", std::to_string(vt->graph_chunk_size));
         ConfigSet(*vt, "column", col_name);
     } else {
         std::string v;
@@ -282,6 +295,12 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
         vt->ef_construction = atoi(v.c_str());
         if (ConfigGet(*vt, "ef_search", v)) {
             vt->ef_search = atoi(v.c_str());
+        }
+        if (ConfigGet(*vt, "brute_force_threshold", v)) {
+            vt->brute_force_threshold = atoll(v.c_str());
+        }
+        if (ConfigGet(*vt, "graph_chunk_size", v)) {
+            vt->graph_chunk_size = atoll(v.c_str());
         }
     }
 
@@ -354,22 +373,28 @@ int InvalidatePersistedGraph(GraphIndexVtab &vt) {
 int EnsureGraph(GraphIndexVtab &vt) {
     if (vt.graph) return SQLITE_OK;
 
-    // 1) 尝试 load 持久化 blob
+    // 1) 尝试 load 持久化 blob（分块存储：blk 0..n 按序拼接）
     {
-        char *sql = sqlite3_mprintf("SELECT data FROM %s WHERE blk = 0",
+        char *sql = sqlite3_mprintf("SELECT data FROM %s ORDER BY blk",
                                     vt.ShadowName("graph").c_str());
         sqlite3_stmt *st = nullptr;
         int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
         sqlite3_free(sql);
-        if (rc == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW) {
-            const char *blob = static_cast<const char *>(sqlite3_column_blob(st, 0));
-            size_t len = size_t(sqlite3_column_bytes(st, 0));
-            std::string err;
-            vt.graph = GraphBridge::LoadFromBlob(blob, len, uint16_t(vt.dim), vt.m,
-                                                 vt.ef_construction, vt.metric, err);
-            // load 失败不报错：fall through 重建（blob 视为陈旧）
+        std::vector<char> buf;
+        if (rc == SQLITE_OK) {
+            while (sqlite3_step(st) == SQLITE_ROW) {
+                const char *blob = static_cast<const char *>(sqlite3_column_blob(st, 0));
+                size_t len = size_t(sqlite3_column_bytes(st, 0));
+                buf.insert(buf.end(), blob, blob + len);
+            }
         }
         sqlite3_finalize(st);
+        if (!buf.empty()) {
+            std::string err;
+            vt.graph = GraphBridge::LoadFromBlob(buf.data(), buf.size(), uint16_t(vt.dim),
+                                                 vt.m, vt.ef_construction, vt.metric, err);
+            // load 失败不报错：fall through 重建（blob 视为陈旧）
+        }
         if (vt.graph) {
             vt.graph_dirty = false;
             return SQLITE_OK;
@@ -412,7 +437,7 @@ int EnsureGraph(GraphIndexVtab &vt) {
 }
 
 int vtabBestIndex(sqlite3_vtab *, sqlite3_index_info *info) {
-    int match_idx = -1, k_idx = -1;
+    int match_idx = -1, k_idx = -1, limit_idx = -1;
     for (int i = 0; i < info->nConstraint; i++) {
         const auto &c = info->aConstraint[i];
         if (!c.usable) continue;
@@ -420,12 +445,17 @@ int vtabBestIndex(sqlite3_vtab *, sqlite3_index_info *info) {
             match_idx = i;
         if (c.iColumn == COL_K && c.op == SQLITE_INDEX_CONSTRAINT_EQ)
             k_idx = i;
+        if (c.op == SQLITE_INDEX_CONSTRAINT_LIMIT)
+            limit_idx = i;
     }
-    if (match_idx >= 0 && k_idx >= 0) {
+    // k 来源二选一：显式 k=?，或 LIMIT 下推（SQLite ≥3.38，sqlite-vec 习惯写法
+    // `... MATCH ? ORDER BY distance LIMIT n`）。显式 k 优先。
+    int k_src = k_idx >= 0 ? k_idx : limit_idx;
+    if (match_idx >= 0 && k_src >= 0) {
         info->aConstraintUsage[match_idx].argvIndex = 1;
         info->aConstraintUsage[match_idx].omit = 1;
-        info->aConstraintUsage[k_idx].argvIndex = 2;
-        info->aConstraintUsage[k_idx].omit = 1;
+        info->aConstraintUsage[k_src].argvIndex = 2;
+        info->aConstraintUsage[k_src].omit = 1;
         info->idxNum = PLAN_KNN;
         info->estimatedCost = 100.0;
         info->estimatedRows = 10;
@@ -437,7 +467,7 @@ int vtabBestIndex(sqlite3_vtab *, sqlite3_index_info *info) {
         return SQLITE_OK;
     }
     if (match_idx >= 0) {
-        // 有 MATCH 没 k：明确报错好过静默全扫
+        // 有 MATCH 没 k/LIMIT：明确报错好过静默全扫
         return SQLITE_CONSTRAINT;
     }
     info->idxNum = PLAN_SCAN;
@@ -472,7 +502,7 @@ int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, sqlite3_value **argv) {
     if (k <= 0) return vt.SetError("k must be positive");
 
     // M3：行数超过阈值走 HNSW 图（懒加载）；小表保持暴力（精度优先）。
-    if (CountVectors(vt) > kBruteForceThreshold) {
+    if (CountVectors(vt) > vt.brute_force_threshold) {
         int rc = EnsureGraph(vt);
         if (rc != SQLITE_OK) return rc;
         std::vector<std::pair<double, int64_t>> hits;
@@ -643,6 +673,13 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
             ConfigSet(*vt, "ef_search", std::to_string(v));
             return SQLITE_OK;
         }
+        if (key == "brute_force_threshold" && eq != std::string::npos) {
+            sqlite3_int64 v = atoll(cmd.c_str() + eq + 1);
+            if (v < 0) return vt->SetError("brute_force_threshold must be >= 0");
+            vt->brute_force_threshold = v;
+            ConfigSet(*vt, "brute_force_threshold", std::to_string(v));
+            return SQLITE_OK;
+        }
         return vt->SetError(("unknown command: " + cmd).c_str());
     }
 
@@ -732,14 +769,25 @@ int vtabSync(sqlite3_vtab *pVtab) {
     if (!vt->graph || !vt->graph_dirty) return SQLITE_OK;
     std::vector<char> blob;
     vt->graph->SerializeToBlob(blob);
-    char *sql = sqlite3_mprintf("INSERT OR REPLACE INTO %s(blk, data) VALUES (0, ?1)",
+    // 分块写（解 SQLite 单 blob 1GB 上限；写前清旧块，整体随宿主事务原子）
+    int rc = InvalidatePersistedGraph(*vt);
+    if (rc != SQLITE_OK) return rc;
+    char *sql = sqlite3_mprintf("INSERT INTO %s(blk, data) VALUES (?1, ?2)",
                                 vt->ShadowName("graph").c_str());
     sqlite3_stmt *st = nullptr;
-    int rc = sqlite3_prepare_v2(vt->db, sql, -1, &st, nullptr);
+    rc = sqlite3_prepare_v2(vt->db, sql, -1, &st, nullptr);
     sqlite3_free(sql);
     if (rc != SQLITE_OK) return rc;
-    sqlite3_bind_blob64(st, 1, blob.data(), blob.size(), SQLITE_STATIC);
-    rc = sqlite3_step(st);
+    const size_t chunk = size_t(vt->graph_chunk_size);
+    sqlite3_int64 blk = 0;
+    for (size_t off = 0; off < blob.size(); off += chunk, blk++) {
+        size_t len = std::min(chunk, blob.size() - off);
+        sqlite3_reset(st);
+        sqlite3_bind_int64(st, 1, blk);
+        sqlite3_bind_blob64(st, 2, blob.data() + off, len, SQLITE_STATIC);
+        rc = sqlite3_step(st);
+        if (rc != SQLITE_DONE) break;
+    }
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) return vt->SetError(sqlite3_errmsg(vt->db));
     vt->graph_dirty = false;

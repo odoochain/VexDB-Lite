@@ -121,6 +121,18 @@ set(VEXDB_SQLITE_INCLUDES
     ${VEXDB_BOOST_INC}
 )
 
+# 版本信息注入（vexdb_version() 输出；对齐 duck 端做法）
+execute_process(COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE VEXDB_SQLITE_GIT_HASH OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT VEXDB_SQLITE_GIT_HASH)
+    set(VEXDB_SQLITE_GIT_HASH "unknown")
+endif()
+string(TIMESTAMP VEXDB_SQLITE_BUILD_TIME "%Y-%m-%d %H:%M")
+add_compile_definitions(
+    VEXDB_SQLITE_GIT_HASH="${VEXDB_SQLITE_GIT_HASH}"
+    VEXDB_SQLITE_BUILD_TIME="${VEXDB_SQLITE_BUILD_TIME}")
+
 # SQLite 端靠 C++ 异常在边界 catch 转 SQLITE_ERROR（与 PG 的 -fno-exceptions 不同，
 # 不可关异常）。
 add_compile_options(-g -Wall)

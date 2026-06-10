@@ -1,0 +1,20 @@
+name: sqlite__vtab_limit_pushdown
+tags: [vex, sqlite]
+description: LIMIT 下推（不写 k 的 sqlite-vec 习惯写法，SQLITE_INDEX_CONSTRAINT_LIMIT，≥3.38）
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], metric=l2);
+- statement: INSERT INTO idx(rowid, embedding) VALUES (1,'[0,0]'),(2,'[1,0]'),(3,'[2,0]'),(4,'[3,0]');
+# LIMIT 当 k 用
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0]' ORDER BY distance LIMIT 2;
+  expect:
+  - - 1
+    - 0.0
+  - - 2
+    - 1.0
+# 显式 k 仍优先生效（k=1 比 LIMIT 3 严）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 1 ORDER BY distance LIMIT 3;
+  expect:
+  - - 1
+# 无 k 无 LIMIT 仍报错
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]';
+  expect_error: k
