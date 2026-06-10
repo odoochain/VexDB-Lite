@@ -47,19 +47,27 @@ constexpr sqlite3_int64 kBruteForceThreshold = 64;
 // 按块写 %_graph 多行。256MB 默认；建表参数 graph_chunk_size 可调（测试用小值强制多块）。
 constexpr sqlite3_int64 kDefaultGraphChunk = 256LL * 1024 * 1024;
 
-// declare_vtab 的列序（rowid 之外）。embedding=0, distance=1, k=2(HIDDEN),
-// cmd=3(与表同名的 HIDDEN 列，fts5 风格 special insert：
-// INSERT INTO t(t) VALUES('ef_search=N') 运行时改参)。
-enum Col { COL_EMBEDDING = 0, COL_DISTANCE = 1, COL_K = 2, COL_CMD = 3 };
+// declare_vtab 的列序（rowid 之外）。M6' 起 meta 列动态插在向量列与 distance
+// 之间：embedding=0, meta[i]=1+i, distance=1+n_meta, k=2+n_meta(HIDDEN),
+// cmd=3+n_meta(与表同名的 HIDDEN 列，fts5 风格 special insert)。
+// 动态列号经 GraphIndexVtab::ColDistance()/ColK()/ColCmd() 取。
+enum Col { COL_EMBEDDING = 0 };
 
 // xBestIndex/xFilter 间的计划标记。
 enum Plan { PLAN_SCAN = 0, PLAN_KNN = 1 };
+
+// metadata 列（Stage B：标量列随向量存 %_vectors 同表，supports filtered search）。
+struct MetaCol {
+    std::string name;
+    std::string type;  // TEXT | INTEGER | REAL（SQLite affinity 白名单）
+};
 
 struct GraphIndexVtab {
     sqlite3_vtab base;
     sqlite3 *db = nullptr;
     std::string schema;   // attached database 名（main/temp/…）
     std::string name;     // 虚拟表名
+    std::vector<MetaCol> meta_cols;
     int dim = 0;
     VexMetric metric = VexMetric::L2;
     int m = kDefaultM;
@@ -76,6 +84,11 @@ struct GraphIndexVtab {
     // 行数缓存：-1=未知（首查时 count 一次），之后随 INSERT/DELETE 增减维护。
     // 1M 行表上每次 KNN 都 count(*) 全表扫（~80ms）会淹没 HNSW 本身（μs 级）。
     sqlite3_int64 row_count = -1;
+
+    // 动态列号（meta 列数决定 distance/k/cmd 偏移）
+    int ColDistance() const { return 1 + int(meta_cols.size()); }
+    int ColK() const { return 2 + int(meta_cols.size()); }
+    int ColCmd() const { return 3 + int(meta_cols.size()); }
 
     std::string ShadowName(const char *suffix) const {
         char *q = sqlite3_mprintf("\"%w\".\"%w_%s\"", schema.c_str(), name.c_str(), suffix);
@@ -162,26 +175,40 @@ bool ParseCreateArgs(int argc, const char *const *argv, GraphIndexVtab &vt,
             }
             continue;
         }
-        // 列声明 "<name> FLOAT[<dim>]"
+        // 列声明 "<name> FLOAT[<dim>]"（向量列，恰好一个、必须最先声明）或
+        // "<name> TEXT|INTEGER|REAL"（metadata 标量列，Stage B filtered search）
         size_t sp = arg.find_first_of(" \t");
         if (sp == std::string::npos) { err = "bad column declaration: " + arg; return false; }
         std::string cname = arg.substr(0, sp), ctype = arg.substr(sp + 1);
         TrimSpaces(ctype);
         std::string upper = ctype;
         for (auto &c : upper) c = static_cast<char>(toupper(c));
-        if (upper.compare(0, 6, "FLOAT[") != 0 || upper.back() != ']') {
-            err = "column type must be FLOAT[N]: " + arg;
-            return false;
+        if (upper.compare(0, 6, "FLOAT[") == 0 && upper.back() == ']') {
+            if (have_col) { err = "exactly one vector column is supported"; return false; }
+            if (!vt.meta_cols.empty()) {
+                err = "vector column must be declared before metadata columns";
+                return false;
+            }
+            int d = atoi(ctype.substr(6).c_str());
+            if (d <= 0 || static_cast<size_t>(d) > vexdb_sqlite::kMaxDim) {
+                err = "dimension out of range [1,65535]";
+                return false;
+            }
+            vt.dim = d;
+            col_name = cname;
+            have_col = true;
+            continue;
         }
-        if (have_col) { err = "exactly one vector column is supported in M2"; return false; }
-        int d = atoi(ctype.substr(6).c_str());
-        if (d <= 0 || static_cast<size_t>(d) > vexdb_sqlite::kMaxDim) {
-            err = "dimension out of range [1,65535]";
-            return false;
+        if (upper == "TEXT" || upper == "INTEGER" || upper == "INT" || upper == "REAL") {
+            if (!have_col) {
+                err = "vector column must be declared before metadata columns";
+                return false;
+            }
+            vt.meta_cols.push_back({cname, upper == "INT" ? "INTEGER" : upper});
+            continue;
         }
-        vt.dim = d;
-        col_name = cname;
-        have_col = true;
+        err = "column type must be FLOAT[N] or TEXT/INTEGER/REAL: " + arg;
+        return false;
     }
     if (!have_col) { err = "missing vector column declaration, e.g. embedding FLOAT[128]"; return false; }
     return true;
@@ -217,15 +244,51 @@ bool ConfigGet(GraphIndexVtab &vt, const char *key, std::string &out) {
     return ok;
 }
 
-int DeclareSchema(sqlite3 *db, const std::string &col_name, const std::string &table_name) {
-    // 第一列用用户声明的列名；distance 只在 KNN 计划下有值；k 是查询参数列；
-    // 末列与表同名（fts5 风格 special insert 入口）。
+// 引号安全的列名片段（"name" 或 "name" TYPE）
+std::string QuotedCol(const std::string &name, const char *type = nullptr) {
+    char *q = type ? sqlite3_mprintf("\"%w\" %s", name.c_str(), type)
+                   : sqlite3_mprintf("\"%w\"", name.c_str());
+    std::string s = q ? q : "";
+    sqlite3_free(q);
+    return s;
+}
+
+int DeclareSchema(sqlite3 *db, const GraphIndexVtab &vt, const std::string &col_name) {
+    // 列序 = [向量列, meta..., distance, k HIDDEN, cmd HIDDEN]；distance 只在
+    // KNN 计划下有值；末列与表同名（fts5 风格 special insert 入口）。
+    std::string cols = QuotedCol(col_name);
+    for (const auto &mc : vt.meta_cols)
+        cols += ", " + QuotedCol(mc.name, mc.type.c_str());
     char *sql = sqlite3_mprintf(
-        "CREATE TABLE x(\"%w\", distance REAL, k INTEGER HIDDEN, \"%w\" TEXT HIDDEN)",
-        col_name.c_str(), table_name.c_str());
+        "CREATE TABLE x(%s, distance REAL, k INTEGER HIDDEN, \"%w\" TEXT HIDDEN)",
+        cols.c_str(), vt.name.c_str());
     int rc = sqlite3_declare_vtab(db, sql);
     sqlite3_free(sql);
     return rc;
+}
+
+// meta 列定义 config 序列化："name:TYPE,name:TYPE"（列名经 argv 解析不含逗号/冒号）
+std::string SerializeMetaCols(const std::vector<MetaCol> &mcs) {
+    std::string s;
+    for (const auto &mc : mcs) {
+        if (!s.empty()) s += ",";
+        s += mc.name + ":" + mc.type;
+    }
+    return s;
+}
+
+void ParseMetaCols(const std::string &s, std::vector<MetaCol> &out) {
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t comma = s.find(',', pos);
+        std::string item = s.substr(pos, comma == std::string::npos ? std::string::npos
+                                                                    : comma - pos);
+        size_t colon = item.find(':');
+        if (colon != std::string::npos)
+            out.push_back({item.substr(0, colon), item.substr(colon + 1)});
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
 }
 
 // xCreate/xConnect 公共体。create=true 时建 shadow 表并写 config，
@@ -245,12 +308,16 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
             delete vt;
             return SQLITE_ERROR;
         }
+        // %_vectors 带 meta 列（用户可在其上自建 SQLite 索引加速过滤谓词）
+        std::string meta_decl;
+        for (const auto &mc : vt->meta_cols)
+            meta_decl += ", " + QuotedCol(mc.name, mc.type.c_str());
         char *sql = sqlite3_mprintf(
             "CREATE TABLE %s(key TEXT PRIMARY KEY, value TEXT);"
-            "CREATE TABLE %s(rowid INTEGER PRIMARY KEY, vec BLOB NOT NULL);"
+            "CREATE TABLE %s(rowid INTEGER PRIMARY KEY, vec BLOB NOT NULL%s);"
             "CREATE TABLE %s(blk INTEGER PRIMARY KEY, data BLOB NOT NULL);",
             vt->ShadowName("config").c_str(), vt->ShadowName("vectors").c_str(),
-            vt->ShadowName("graph").c_str());
+            meta_decl.c_str(), vt->ShadowName("graph").c_str());
         int rc = ExecFmt(db, sql);
         sqlite3_free(sql);
         if (rc != SQLITE_OK) {
@@ -268,10 +335,15 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
         ConfigSet(*vt, "brute_force_threshold", std::to_string(vt->brute_force_threshold));
         ConfigSet(*vt, "graph_chunk_size", std::to_string(vt->graph_chunk_size));
         ConfigSet(*vt, "column", col_name);
+        if (!vt->meta_cols.empty())
+            ConfigSet(*vt, "meta_cols", SerializeMetaCols(vt->meta_cols));
     } else {
         std::string v;
         if (ConfigGet(*vt, "column", v)) {
             col_name = v;
+        }
+        if (ConfigGet(*vt, "meta_cols", v)) {
+            ParseMetaCols(v, vt->meta_cols);
         }
         if (!ConfigGet(*vt, "format_version", v)) {
             *pzErr = sqlite3_mprintf("GRAPH_INDEX: missing shadow config for %s", argv[2]);
@@ -305,7 +377,7 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
     }
 
     if (col_name.empty()) col_name = "embedding";
-    int rc = DeclareSchema(db, col_name, vt->name);
+    int rc = DeclareSchema(db, *vt, col_name);
     if (rc != SQLITE_OK) {
         delete vt;
         return rc;
@@ -436,14 +508,15 @@ int EnsureGraph(GraphIndexVtab &vt) {
     return SQLITE_OK;
 }
 
-int vtabBestIndex(sqlite3_vtab *, sqlite3_index_info *info) {
+int vtabBestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *info) {
+    auto *vt = asVtab(pVtab);
     int match_idx = -1, k_idx = -1, limit_idx = -1;
     for (int i = 0; i < info->nConstraint; i++) {
         const auto &c = info->aConstraint[i];
         if (!c.usable) continue;
         if (c.iColumn == COL_EMBEDDING && c.op == SQLITE_INDEX_CONSTRAINT_MATCH)
             match_idx = i;
-        if (c.iColumn == COL_K && c.op == SQLITE_INDEX_CONSTRAINT_EQ)
+        if (c.iColumn == vt->ColK() && c.op == SQLITE_INDEX_CONSTRAINT_EQ)
             k_idx = i;
         if (c.op == SQLITE_INDEX_CONSTRAINT_LIMIT)
             limit_idx = i;
@@ -460,7 +533,7 @@ int vtabBestIndex(sqlite3_vtab *, sqlite3_index_info *info) {
         info->estimatedCost = 100.0;
         info->estimatedRows = 10;
         // KNN 结果已按 distance 升序物化
-        if (info->nOrderBy == 1 && info->aOrderBy[0].iColumn == COL_DISTANCE &&
+        if (info->nOrderBy == 1 && info->aOrderBy[0].iColumn == vt->ColDistance() &&
             !info->aOrderBy[0].desc) {
             info->orderByConsumed = 1;
         }
@@ -589,8 +662,10 @@ int vtabFilter(sqlite3_vtab_cursor *pCur, int idxNum, const char *, int argc,
         if (argc < 2) return vt->SetError("internal: KNN plan expects 2 args");
         return FilterKnn(*vt, *cur, argv);
     }
-    char *sql = sqlite3_mprintf("SELECT rowid, vec FROM %s ORDER BY rowid",
-                                vt->ShadowName("vectors").c_str());
+    std::string meta_sel;
+    for (const auto &mc : vt->meta_cols) meta_sel += ", " + QuotedCol(mc.name);
+    char *sql = sqlite3_mprintf("SELECT rowid, vec%s FROM %s ORDER BY rowid",
+                                meta_sel.c_str(), vt->ShadowName("vectors").c_str());
     int rc = sqlite3_prepare_v2(vt->db, sql, -1, &cur->scan_stmt, nullptr);
     sqlite3_free(sql);
     if (rc != SQLITE_OK) return rc;
@@ -615,9 +690,27 @@ int vtabEof(sqlite3_vtab_cursor *pCur) {
 
 int vtabColumn(sqlite3_vtab_cursor *pCur, sqlite3_context *ctx, int col) {
     auto *cur = asCursor(pCur);
+    auto *vt = asVtab(pCur->pVtab);
+    const int n_meta = int(vt->meta_cols.size());
     if (cur->plan == PLAN_KNN) {
-        if (col == COL_DISTANCE) {
+        if (col == vt->ColDistance()) {
             sqlite3_result_double(ctx, cur->hits[cur->pos].dist);
+        } else if (col >= 1 && col <= n_meta) {
+            // KNN 模式 meta 列点查回吐：供 SQLite 引擎层评估未下推的 WHERE
+            // 谓词（M6' 的 KNN+后过滤形态；M7' 升级为图内过滤）。
+            char *sql = sqlite3_mprintf("SELECT %s FROM %s WHERE rowid = %lld",
+                                        QuotedCol(vt->meta_cols[col - 1].name).c_str(),
+                                        vt->ShadowName("vectors").c_str(),
+                                        cur->hits[cur->pos].rowid);
+            sqlite3_stmt *st = nullptr;
+            if (sqlite3_prepare_v2(vt->db, sql, -1, &st, nullptr) == SQLITE_OK &&
+                sqlite3_step(st) == SQLITE_ROW) {
+                sqlite3_result_value(ctx, sqlite3_column_value(st, 0));
+            } else {
+                sqlite3_result_null(ctx);
+            }
+            sqlite3_finalize(st);
+            sqlite3_free(sql);
         } else {
             sqlite3_result_null(ctx);  // KNN 模式不回吐向量本体（用 rowid join 原表）
         }
@@ -625,6 +718,8 @@ int vtabColumn(sqlite3_vtab_cursor *pCur, sqlite3_context *ctx, int col) {
     }
     if (col == COL_EMBEDDING) {
         sqlite3_result_value(ctx, sqlite3_column_value(cur->scan_stmt, 1));
+    } else if (col >= 1 && col <= n_meta) {
+        sqlite3_result_value(ctx, sqlite3_column_value(cur->scan_stmt, 1 + col));
     } else {
         sqlite3_result_null(ctx);
     }
@@ -661,8 +756,9 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
     }
     // special insert（fts5 风格）：INSERT INTO t(t) VALUES('ef_search=N')
     // 运行时改参，同连接即时生效并持久化进 config，不触碰数据与内存图。
-    if (argc > 2 + COL_CMD && sqlite3_value_type(argv[2 + COL_CMD]) == SQLITE_TEXT) {
-        std::string cmd = reinterpret_cast<const char *>(sqlite3_value_text(argv[2 + COL_CMD]));
+    const int col_cmd = vt->ColCmd();
+    if (argc > 2 + col_cmd && sqlite3_value_type(argv[2 + col_cmd]) == SQLITE_TEXT) {
+        std::string cmd = reinterpret_cast<const char *>(sqlite3_value_text(argv[2 + col_cmd]));
         size_t eq = cmd.find('=');
         std::string key = cmd.substr(0, eq == std::string::npos ? cmd.size() : eq);
         TrimSpaces(key);
@@ -683,51 +779,68 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
         return vt->SetError(("unknown command: " + cmd).c_str());
     }
 
-    // INSERT / UPDATE 的向量值
+    // INSERT / UPDATE 的向量值。UPDATE 未触及向量列时（meta-only 更新，
+    // sqlite3_value_nochange 为真）值内容 unspecified——跳过解析与 SET，
+    // 且向量未变 ⇒ 图仍有效，免去全图重建（Stage B 标签变更高频场景）。
     sqlite3_value *vec_val = argv[2 + COL_EMBEDDING];
-    if (sqlite3_value_type(vec_val) == SQLITE_NULL)
-        return vt->SetError("embedding must not be NULL");
+    bool is_insert = sqlite3_value_type(argv[0]) == SQLITE_NULL;
+    bool vec_nochange = !is_insert && sqlite3_value_nochange(vec_val);
     VectorView v;
-    std::string err;
-    if (!GetVector(vec_val, v, err)) return vt->SetError(err.c_str());
-    if (static_cast<int>(v.dim) != vt->dim) {
-        err = "vector dimension " + std::to_string(v.dim) + " != index dimension " +
-              std::to_string(vt->dim);
-        return vt->SetError(err.c_str());
+    if (!vec_nochange) {
+        if (sqlite3_value_type(vec_val) == SQLITE_NULL)
+            return vt->SetError("embedding must not be NULL");
+        std::string err;
+        if (!GetVector(vec_val, v, err)) return vt->SetError(err.c_str());
+        if (static_cast<int>(v.dim) != vt->dim) {
+            err = "vector dimension " + std::to_string(v.dim) + " != index dimension " +
+                  std::to_string(vt->dim);
+            return vt->SetError(err.c_str());
+        }
     }
     // distance/k 列不可写
-    if (sqlite3_value_type(argv[2 + COL_DISTANCE]) != SQLITE_NULL ||
-        sqlite3_value_type(argv[2 + COL_K]) != SQLITE_NULL)
+    if (sqlite3_value_type(argv[2 + vt->ColDistance()]) != SQLITE_NULL ||
+        sqlite3_value_type(argv[2 + vt->ColK()]) != SQLITE_NULL)
         return vt->SetError("distance/k columns are read-only");
 
-    bool is_insert = sqlite3_value_type(argv[0]) == SQLITE_NULL;
     sqlite3_int64 old_rowid = is_insert ? 0 : sqlite3_value_int64(argv[0]);
     bool has_new_rowid = sqlite3_value_type(argv[1]) != SQLITE_NULL;
     sqlite3_int64 new_rowid = has_new_rowid ? sqlite3_value_int64(argv[1]) : 0;
 
+    // meta 值从 argv[2 + 1 + i] 透传（参数位 ?4 起；?1=rowid ?2=vec ?3=UPDATE 的旧 rowid）
+    const int n_meta = int(vt->meta_cols.size());
     sqlite3_stmt *st = nullptr;
     int rc;
     if (is_insert) {
-        char *sql = sqlite3_mprintf(
-            has_new_rowid ? "INSERT INTO %s(rowid, vec) VALUES (?1, ?2)"
-                          : "INSERT INTO %s(vec) VALUES (?2)",
-            vt->ShadowName("vectors").c_str());
+        std::string cols = "vec", vals = "?2";
+        if (has_new_rowid) { cols = "rowid, " + cols; vals = "?1, " + vals; }
+        for (int i = 0; i < n_meta; i++) {
+            cols += ", " + QuotedCol(vt->meta_cols[i].name);
+            vals += ", ?" + std::to_string(4 + i);
+        }
+        char *sql = sqlite3_mprintf("INSERT INTO %s(%s) VALUES (%s)",
+                                    vt->ShadowName("vectors").c_str(), cols.c_str(),
+                                    vals.c_str());
         rc = sqlite3_prepare_v2(vt->db, sql, -1, &st, nullptr);
         sqlite3_free(sql);
         if (rc != SQLITE_OK) return rc;
         if (has_new_rowid) sqlite3_bind_int64(st, 1, new_rowid);
     } else {
-        // UPDATE（含 rowid 变更）
-        char *sql = sqlite3_mprintf(
-            "UPDATE %s SET rowid = ?1, vec = ?2 WHERE rowid = ?3",
-            vt->ShadowName("vectors").c_str());
+        // UPDATE（含 rowid 变更；vec 未触及时不 SET vec）
+        std::string sets = vec_nochange ? "rowid = ?1" : "rowid = ?1, vec = ?2";
+        for (int i = 0; i < n_meta; i++)
+            sets += ", " + QuotedCol(vt->meta_cols[i].name) + " = ?" + std::to_string(4 + i);
+        char *sql = sqlite3_mprintf("UPDATE %s SET %s WHERE rowid = ?3",
+                                    vt->ShadowName("vectors").c_str(), sets.c_str());
         rc = sqlite3_prepare_v2(vt->db, sql, -1, &st, nullptr);
         sqlite3_free(sql);
         if (rc != SQLITE_OK) return rc;
         sqlite3_bind_int64(st, 1, has_new_rowid ? new_rowid : old_rowid);
         sqlite3_bind_int64(st, 3, old_rowid);
     }
-    sqlite3_bind_blob(st, 2, v.data, static_cast<int>(v.dim * 4), SQLITE_TRANSIENT);
+    if (!vec_nochange)
+        sqlite3_bind_blob(st, 2, v.data, static_cast<int>(v.dim * 4), SQLITE_TRANSIENT);
+    for (int i = 0; i < n_meta; i++)
+        sqlite3_bind_value(st, 4 + i, argv[2 + 1 + i]);
     rc = sqlite3_step(st);
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) {
@@ -740,7 +853,10 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
     if (is_insert) *pRowid = final_rowid;
 
     // M3 图维护：持久化 blob 一律作废（xSync 重写）；内存图 INSERT 真增量，
-    // UPDATE 改了已有向量 → 作废重建。
+    // UPDATE 改了已有向量/rowid → 作废重建。例外：meta-only UPDATE（向量与
+    // rowid 都没变）不触及图——向量拓扑未变，图与 blob 均仍有效。
+    bool rowid_changed = !is_insert && has_new_rowid && new_rowid != old_rowid;
+    if (vec_nochange && !rowid_changed) return SQLITE_OK;
     rc = InvalidatePersistedGraph(*vt);
     if (rc != SQLITE_OK) return rc;
     if (is_insert) {
