@@ -1,7 +1,7 @@
 #ifndef HALF_H
 #define HALF_H
 
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #include <cstdint>
 using uint16 = uint16_t;
 #else

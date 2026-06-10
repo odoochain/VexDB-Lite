@@ -1,0 +1,550 @@
+// GRAPH_INDEX 虚拟表模块 —— M2：shadow table 持久化 + xUpdate + 暴力 KNN。
+//
+// 用法：
+//   CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(
+//       embedding FLOAT[128], metric=cosine, m=16, ef_construction=200);
+//   INSERT INTO idx(rowid, embedding) VALUES (1, :vec);   -- BLOB 或 JSON 文本
+//   SELECT rowid, distance FROM idx WHERE embedding MATCH :q AND k = 10;
+//
+// Shadow tables（普通表，经宿主连接 SQL 读写 → 随宿主事务原子回滚，这是
+// FTS5/RTREE 的标准范式；铁律：禁止任何旁路 mmap/裸文件写）：
+//   <name>_config (key TEXT PRIMARY KEY, value TEXT)   维度/metric/m/efc/格式版本
+//   <name>_vectors(rowid INTEGER PRIMARY KEY, vec BLOB) 向量数据
+//
+// M2 查询是暴力扫描（功能对标 sqlite-vec）；M3 把 xFilter 切到 GraphIndexCore
+// 的 ANN 搜索，%_graph shadow 表落图结构。distance 列三 metric 统一
+// lower=closer（L2=sqrt、cosine=1-sim、ip=负内积），ORDER BY distance ASC 即最近。
+#include "vexdb_sqlite_internal.h"
+#include "vtab/graph_index_vtab.h"
+#include "functions/vector_codec.h"
+#include "vex_distance_entry.h"
+
+#include <algorithm>
+#include <cstring>
+#include <new>
+#include <string>
+#include <vector>
+
+namespace {
+
+using vexdb_sqlite::GetDistanceFn;
+using vexdb_sqlite::GetVector;
+using vexdb_sqlite::VectorView;
+
+constexpr int kFormatVersion = 1;
+constexpr int kDefaultM = 16;
+constexpr int kDefaultEfConstruction = 200;
+
+// declare_vtab 的列序（rowid 之外）。embedding=0, distance=1, k=2(HIDDEN)。
+enum Col { COL_EMBEDDING = 0, COL_DISTANCE = 1, COL_K = 2 };
+
+// xBestIndex/xFilter 间的计划标记。
+enum Plan { PLAN_SCAN = 0, PLAN_KNN = 1 };
+
+struct GraphIndexVtab {
+    sqlite3_vtab base;
+    sqlite3 *db = nullptr;
+    std::string schema;   // attached database 名（main/temp/…）
+    std::string name;     // 虚拟表名
+    int dim = 0;
+    VexMetric metric = VexMetric::L2;
+    int m = kDefaultM;
+    int ef_construction = kDefaultEfConstruction;
+
+    std::string ShadowName(const char *suffix) const {
+        char *q = sqlite3_mprintf("\"%w\".\"%w_%s\"", schema.c_str(), name.c_str(), suffix);
+        std::string s = q ? q : "";
+        sqlite3_free(q);
+        return s;
+    }
+    int SetError(const char *msg) {
+        sqlite3_free(base.zErrMsg);
+        base.zErrMsg = sqlite3_mprintf("%s", msg);
+        return SQLITE_ERROR;
+    }
+};
+
+struct GraphIndexCursor {
+    sqlite3_vtab_cursor base;
+    int plan = PLAN_SCAN;
+    // SCAN 模式：流式遍历 shadow 表
+    sqlite3_stmt *scan_stmt = nullptr;
+    int scan_eof = 1;
+    // KNN 模式：物化 top-k 结果
+    struct Hit { double dist; sqlite3_int64 rowid; };
+    std::vector<Hit> hits;
+    size_t pos = 0;
+};
+
+GraphIndexVtab *asVtab(sqlite3_vtab *v) { return reinterpret_cast<GraphIndexVtab *>(v); }
+GraphIndexCursor *asCursor(sqlite3_vtab_cursor *c) { return reinterpret_cast<GraphIndexCursor *>(c); }
+
+// ---------- 参数解析 ----------
+
+void TrimSpaces(std::string &s) {
+    size_t b = s.find_first_not_of(" \t\r\n");
+    size_t e = s.find_last_not_of(" \t\r\n");
+    s = (b == std::string::npos) ? "" : s.substr(b, e - b + 1);
+}
+
+bool ParseMetric(const std::string &v, VexMetric &out) {
+    if (v == "l2") { out = VexMetric::L2; return true; }
+    if (v == "cosine") { out = VexMetric::COSINE; return true; }
+    if (v == "ip" || v == "inner_product") { out = VexMetric::INNER_PRODUCT; return true; }
+    return false;
+}
+
+// 解析 CREATE VIRTUAL TABLE 的参数串（argv[3..]）：
+//   恰好一个向量列声明 "<col> FLOAT[<dim>]"（大小写不敏感），
+//   加可选 "metric=..." "m=..." "ef_construction=..."。
+bool ParseCreateArgs(int argc, const char *const *argv, GraphIndexVtab &vt,
+                     std::string &col_name, std::string &err) {
+    bool have_col = false;
+    for (int i = 3; i < argc; i++) {
+        std::string arg = argv[i];
+        TrimSpaces(arg);
+        if (arg.empty()) continue;
+        size_t eq = arg.find('=');
+        if (eq != std::string::npos && arg.find(' ') > eq) {
+            std::string key = arg.substr(0, eq), val = arg.substr(eq + 1);
+            TrimSpaces(key); TrimSpaces(val);
+            for (auto &c : key) c = static_cast<char>(tolower(c));
+            for (auto &c : val) c = static_cast<char>(tolower(c));
+            // 容忍 'cosine' / "cosine" 引号
+            if (val.size() >= 2 && (val.front() == '\'' || val.front() == '"'))
+                val = val.substr(1, val.size() - 2);
+            if (key == "metric") {
+                if (!ParseMetric(val, vt.metric)) { err = "unknown metric: " + val; return false; }
+            } else if (key == "m") {
+                vt.m = atoi(val.c_str());
+                if (vt.m < 2 || vt.m > 256) { err = "m out of range [2,256]"; return false; }
+            } else if (key == "ef_construction") {
+                vt.ef_construction = atoi(val.c_str());
+                if (vt.ef_construction < 1) { err = "ef_construction must be positive"; return false; }
+            } else {
+                err = "unknown parameter: " + key;
+                return false;
+            }
+            continue;
+        }
+        // 列声明 "<name> FLOAT[<dim>]"
+        size_t sp = arg.find_first_of(" \t");
+        if (sp == std::string::npos) { err = "bad column declaration: " + arg; return false; }
+        std::string cname = arg.substr(0, sp), ctype = arg.substr(sp + 1);
+        TrimSpaces(ctype);
+        std::string upper = ctype;
+        for (auto &c : upper) c = static_cast<char>(toupper(c));
+        if (upper.compare(0, 6, "FLOAT[") != 0 || upper.back() != ']') {
+            err = "column type must be FLOAT[N]: " + arg;
+            return false;
+        }
+        if (have_col) { err = "exactly one vector column is supported in M2"; return false; }
+        int d = atoi(ctype.substr(6).c_str());
+        if (d <= 0 || static_cast<size_t>(d) > vexdb_sqlite::kMaxDim) {
+            err = "dimension out of range [1,65535]";
+            return false;
+        }
+        vt.dim = d;
+        col_name = cname;
+        have_col = true;
+    }
+    if (!have_col) { err = "missing vector column declaration, e.g. embedding FLOAT[128]"; return false; }
+    return true;
+}
+
+// ---------- shadow table 辅助 ----------
+
+int ExecFmt(sqlite3 *db, const char *sql) {
+    return sqlite3_exec(db, sql, nullptr, nullptr, nullptr);
+}
+
+int ConfigSet(GraphIndexVtab &vt, const char *key, const std::string &val) {
+    char *sql = sqlite3_mprintf(
+        "INSERT OR REPLACE INTO %s(key, value) VALUES (%Q, %Q)",
+        vt.ShadowName("config").c_str(), key, val.c_str());
+    int rc = ExecFmt(vt.db, sql);
+    sqlite3_free(sql);
+    return rc;
+}
+
+bool ConfigGet(GraphIndexVtab &vt, const char *key, std::string &out) {
+    char *sql = sqlite3_mprintf("SELECT value FROM %s WHERE key = %Q",
+                                vt.ShadowName("config").c_str(), key);
+    sqlite3_stmt *st = nullptr;
+    bool ok = false;
+    if (sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW) {
+        out = reinterpret_cast<const char *>(sqlite3_column_text(st, 0));
+        ok = true;
+    }
+    sqlite3_finalize(st);
+    sqlite3_free(sql);
+    return ok;
+}
+
+int DeclareSchema(sqlite3 *db) {
+    // distance 只在 KNN 计划下有值；k 是查询参数列（HIDDEN）。
+    return sqlite3_declare_vtab(db,
+        "CREATE TABLE x(embedding, distance REAL, k INTEGER HIDDEN)");
+}
+
+// xCreate/xConnect 公共体。create=true 时建 shadow 表并写 config，
+// false 时从 config 恢复参数。
+int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
+                sqlite3_vtab **ppVtab, char **pzErr, bool create) {
+    auto *vt = new (std::nothrow) GraphIndexVtab();
+    if (!vt) return SQLITE_NOMEM;
+    vt->db = db;
+    vt->schema = argv[1];
+    vt->name = argv[2];
+
+    std::string err, col_name;
+    if (create) {
+        if (!ParseCreateArgs(argc, argv, *vt, col_name, err)) {
+            *pzErr = sqlite3_mprintf("GRAPH_INDEX: %s", err.c_str());
+            delete vt;
+            return SQLITE_ERROR;
+        }
+        char *sql = sqlite3_mprintf(
+            "CREATE TABLE %s(key TEXT PRIMARY KEY, value TEXT);"
+            "CREATE TABLE %s(rowid INTEGER PRIMARY KEY, vec BLOB NOT NULL);",
+            vt->ShadowName("config").c_str(), vt->ShadowName("vectors").c_str());
+        int rc = ExecFmt(db, sql);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) {
+            *pzErr = sqlite3_mprintf("GRAPH_INDEX: failed to create shadow tables: %s",
+                                     sqlite3_errmsg(db));
+            delete vt;
+            return rc;
+        }
+        ConfigSet(*vt, "format_version", std::to_string(kFormatVersion));
+        ConfigSet(*vt, "dim", std::to_string(vt->dim));
+        ConfigSet(*vt, "metric", std::to_string(static_cast<uint32_t>(vt->metric)));
+        ConfigSet(*vt, "m", std::to_string(vt->m));
+        ConfigSet(*vt, "ef_construction", std::to_string(vt->ef_construction));
+        ConfigSet(*vt, "column", col_name);
+    } else {
+        std::string v;
+        if (!ConfigGet(*vt, "format_version", v)) {
+            *pzErr = sqlite3_mprintf("GRAPH_INDEX: missing shadow config for %s", argv[2]);
+            delete vt;
+            return SQLITE_ERROR;
+        }
+        if (atoi(v.c_str()) > kFormatVersion) {
+            *pzErr = sqlite3_mprintf(
+                "GRAPH_INDEX: on-disk format v%s is newer than supported v%d", v.c_str(),
+                kFormatVersion);
+            delete vt;
+            return SQLITE_ERROR;
+        }
+        ConfigGet(*vt, "dim", v);
+        vt->dim = atoi(v.c_str());
+        ConfigGet(*vt, "metric", v);
+        vt->metric = static_cast<VexMetric>(atoi(v.c_str()));
+        ConfigGet(*vt, "m", v);
+        vt->m = atoi(v.c_str());
+        ConfigGet(*vt, "ef_construction", v);
+        vt->ef_construction = atoi(v.c_str());
+    }
+
+    int rc = DeclareSchema(db);
+    if (rc != SQLITE_OK) {
+        delete vt;
+        return rc;
+    }
+    *ppVtab = &vt->base;
+    return SQLITE_OK;
+}
+
+// ---------- module 回调 ----------
+
+int vtabCreate(sqlite3 *db, void *, int argc, const char *const *argv,
+               sqlite3_vtab **ppVtab, char **pzErr) {
+    return ConnectImpl(db, argc, argv, ppVtab, pzErr, /*create=*/true);
+}
+
+int vtabConnect(sqlite3 *db, void *, int argc, const char *const *argv,
+                sqlite3_vtab **ppVtab, char **pzErr) {
+    return ConnectImpl(db, argc, argv, ppVtab, pzErr, /*create=*/false);
+}
+
+int vtabDisconnect(sqlite3_vtab *pVtab) {
+    delete asVtab(pVtab);
+    return SQLITE_OK;
+}
+
+int vtabDestroy(sqlite3_vtab *pVtab) {
+    auto *vt = asVtab(pVtab);
+    char *sql = sqlite3_mprintf("DROP TABLE IF EXISTS %s; DROP TABLE IF EXISTS %s;",
+                                vt->ShadowName("config").c_str(),
+                                vt->ShadowName("vectors").c_str());
+    int rc = ExecFmt(vt->db, sql);
+    sqlite3_free(sql);
+    delete vt;
+    return rc;
+}
+
+int vtabBestIndex(sqlite3_vtab *, sqlite3_index_info *info) {
+    int match_idx = -1, k_idx = -1;
+    for (int i = 0; i < info->nConstraint; i++) {
+        const auto &c = info->aConstraint[i];
+        if (!c.usable) continue;
+        if (c.iColumn == COL_EMBEDDING && c.op == SQLITE_INDEX_CONSTRAINT_MATCH)
+            match_idx = i;
+        if (c.iColumn == COL_K && c.op == SQLITE_INDEX_CONSTRAINT_EQ)
+            k_idx = i;
+    }
+    if (match_idx >= 0 && k_idx >= 0) {
+        info->aConstraintUsage[match_idx].argvIndex = 1;
+        info->aConstraintUsage[match_idx].omit = 1;
+        info->aConstraintUsage[k_idx].argvIndex = 2;
+        info->aConstraintUsage[k_idx].omit = 1;
+        info->idxNum = PLAN_KNN;
+        info->estimatedCost = 100.0;
+        info->estimatedRows = 10;
+        // KNN 结果已按 distance 升序物化
+        if (info->nOrderBy == 1 && info->aOrderBy[0].iColumn == COL_DISTANCE &&
+            !info->aOrderBy[0].desc) {
+            info->orderByConsumed = 1;
+        }
+        return SQLITE_OK;
+    }
+    if (match_idx >= 0) {
+        // 有 MATCH 没 k：明确报错好过静默全扫
+        return SQLITE_CONSTRAINT;
+    }
+    info->idxNum = PLAN_SCAN;
+    info->estimatedCost = 1e6;
+    return SQLITE_OK;
+}
+
+int vtabOpen(sqlite3_vtab *, sqlite3_vtab_cursor **ppCur) {
+    auto *c = new (std::nothrow) GraphIndexCursor();
+    if (!c) return SQLITE_NOMEM;
+    *ppCur = &c->base;
+    return SQLITE_OK;
+}
+
+int vtabClose(sqlite3_vtab_cursor *cur) {
+    auto *c = asCursor(cur);
+    sqlite3_finalize(c->scan_stmt);
+    delete c;
+    return SQLITE_OK;
+}
+
+int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, sqlite3_value **argv) {
+    VectorView q;
+    std::string err;
+    if (!GetVector(argv[0], q, err)) return vt.SetError(err.c_str());
+    if (static_cast<int>(q.dim) != vt.dim) {
+        err = "query dimension " + std::to_string(q.dim) + " != index dimension " +
+              std::to_string(vt.dim);
+        return vt.SetError(err.c_str());
+    }
+    sqlite3_int64 k = sqlite3_value_int64(argv[1]);
+    if (k <= 0) return vt.SetError("k must be positive");
+
+    const auto dist_fn = GetDistanceFn(vt.metric);
+    char *sql = sqlite3_mprintf("SELECT rowid, vec FROM %s", vt.ShadowName("vectors").c_str());
+    sqlite3_stmt *st = nullptr;
+    int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) return rc;
+
+    // 暴力扫描 + 大小 k 的最大堆（堆顶=当前第 k 近，更近则替换）。
+    auto cmp = [](const GraphIndexCursor::Hit &a, const GraphIndexCursor::Hit &b) {
+        return a.dist < b.dist;
+    };
+    auto &heap = cur.hits;
+    heap.clear();
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        int len = sqlite3_column_bytes(st, 1);
+        if (len != vt.dim * 4) continue;  // 防御：维度不符的脏数据跳过
+        const float *vec = static_cast<const float *>(sqlite3_column_blob(st, 1));
+        double d = dist_fn(q.data, vec, static_cast<uint16_t>(vt.dim));
+        if (heap.size() < static_cast<size_t>(k)) {
+            heap.push_back({d, sqlite3_column_int64(st, 0)});
+            std::push_heap(heap.begin(), heap.end(), cmp);
+        } else if (d < heap.front().dist) {
+            std::pop_heap(heap.begin(), heap.end(), cmp);
+            heap.back() = {d, sqlite3_column_int64(st, 0)};
+            std::push_heap(heap.begin(), heap.end(), cmp);
+        }
+    }
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) return rc;
+    std::sort_heap(heap.begin(), heap.end(), cmp);  // 升序：最近在前
+    cur.pos = 0;
+    return SQLITE_OK;
+}
+
+int vtabFilter(sqlite3_vtab_cursor *pCur, int idxNum, const char *, int argc,
+               sqlite3_value **argv) {
+    auto *cur = asCursor(pCur);
+    auto *vt = asVtab(pCur->pVtab);
+    cur->plan = idxNum;
+    sqlite3_finalize(cur->scan_stmt);
+    cur->scan_stmt = nullptr;
+    cur->hits.clear();
+    cur->pos = 0;
+
+    if (idxNum == PLAN_KNN) {
+        if (argc < 2) return vt->SetError("internal: KNN plan expects 2 args");
+        return FilterKnn(*vt, *cur, argv);
+    }
+    char *sql = sqlite3_mprintf("SELECT rowid, vec FROM %s ORDER BY rowid",
+                                vt->ShadowName("vectors").c_str());
+    int rc = sqlite3_prepare_v2(vt->db, sql, -1, &cur->scan_stmt, nullptr);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) return rc;
+    cur->scan_eof = (sqlite3_step(cur->scan_stmt) != SQLITE_ROW);
+    return SQLITE_OK;
+}
+
+int vtabNext(sqlite3_vtab_cursor *pCur) {
+    auto *cur = asCursor(pCur);
+    if (cur->plan == PLAN_KNN) {
+        cur->pos++;
+    } else {
+        cur->scan_eof = (sqlite3_step(cur->scan_stmt) != SQLITE_ROW);
+    }
+    return SQLITE_OK;
+}
+
+int vtabEof(sqlite3_vtab_cursor *pCur) {
+    auto *cur = asCursor(pCur);
+    return cur->plan == PLAN_KNN ? cur->pos >= cur->hits.size() : cur->scan_eof;
+}
+
+int vtabColumn(sqlite3_vtab_cursor *pCur, sqlite3_context *ctx, int col) {
+    auto *cur = asCursor(pCur);
+    if (cur->plan == PLAN_KNN) {
+        if (col == COL_DISTANCE) {
+            sqlite3_result_double(ctx, cur->hits[cur->pos].dist);
+        } else {
+            sqlite3_result_null(ctx);  // KNN 模式不回吐向量本体（用 rowid join 原表）
+        }
+        return SQLITE_OK;
+    }
+    if (col == COL_EMBEDDING) {
+        sqlite3_result_value(ctx, sqlite3_column_value(cur->scan_stmt, 1));
+    } else {
+        sqlite3_result_null(ctx);
+    }
+    return SQLITE_OK;
+}
+
+int vtabRowid(sqlite3_vtab_cursor *pCur, sqlite3_int64 *pRowid) {
+    auto *cur = asCursor(pCur);
+    *pRowid = cur->plan == PLAN_KNN ? cur->hits[cur->pos].rowid
+                                    : sqlite3_column_int64(cur->scan_stmt, 0);
+    return SQLITE_OK;
+}
+
+// INSERT/DELETE/UPDATE。argv 布局（SQLite vtab 约定）：
+//   DELETE: argc=1, argv[0]=旧 rowid
+//   INSERT: argc=N+2, argv[0]=NULL, argv[1]=新 rowid（或 NULL 自动分配）, argv[2..]=列值
+//   UPDATE: argc=N+2, argv[0]=旧 rowid, argv[1]=新 rowid, argv[2..]=列值
+int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
+               sqlite3_int64 *pRowid) {
+    auto *vt = asVtab(pVtab);
+    // DELETE
+    if (argc == 1) {
+        char *sql = sqlite3_mprintf("DELETE FROM %s WHERE rowid = %lld",
+                                    vt->ShadowName("vectors").c_str(),
+                                    sqlite3_value_int64(argv[0]));
+        int rc = ExecFmt(vt->db, sql);
+        sqlite3_free(sql);
+        return rc;
+    }
+    // INSERT / UPDATE 的向量值
+    sqlite3_value *vec_val = argv[2 + COL_EMBEDDING];
+    if (sqlite3_value_type(vec_val) == SQLITE_NULL)
+        return vt->SetError("embedding must not be NULL");
+    VectorView v;
+    std::string err;
+    if (!GetVector(vec_val, v, err)) return vt->SetError(err.c_str());
+    if (static_cast<int>(v.dim) != vt->dim) {
+        err = "vector dimension " + std::to_string(v.dim) + " != index dimension " +
+              std::to_string(vt->dim);
+        return vt->SetError(err.c_str());
+    }
+    // distance/k 列不可写
+    if (sqlite3_value_type(argv[2 + COL_DISTANCE]) != SQLITE_NULL ||
+        sqlite3_value_type(argv[2 + COL_K]) != SQLITE_NULL)
+        return vt->SetError("distance/k columns are read-only");
+
+    bool is_insert = sqlite3_value_type(argv[0]) == SQLITE_NULL;
+    sqlite3_int64 old_rowid = is_insert ? 0 : sqlite3_value_int64(argv[0]);
+    bool has_new_rowid = sqlite3_value_type(argv[1]) != SQLITE_NULL;
+    sqlite3_int64 new_rowid = has_new_rowid ? sqlite3_value_int64(argv[1]) : 0;
+
+    sqlite3_stmt *st = nullptr;
+    int rc;
+    if (is_insert) {
+        char *sql = sqlite3_mprintf(
+            has_new_rowid ? "INSERT INTO %s(rowid, vec) VALUES (?1, ?2)"
+                          : "INSERT INTO %s(vec) VALUES (?2)",
+            vt->ShadowName("vectors").c_str());
+        rc = sqlite3_prepare_v2(vt->db, sql, -1, &st, nullptr);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) return rc;
+        if (has_new_rowid) sqlite3_bind_int64(st, 1, new_rowid);
+    } else {
+        // UPDATE（含 rowid 变更）
+        char *sql = sqlite3_mprintf(
+            "UPDATE %s SET rowid = ?1, vec = ?2 WHERE rowid = ?3",
+            vt->ShadowName("vectors").c_str());
+        rc = sqlite3_prepare_v2(vt->db, sql, -1, &st, nullptr);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) return rc;
+        sqlite3_bind_int64(st, 1, has_new_rowid ? new_rowid : old_rowid);
+        sqlite3_bind_int64(st, 3, old_rowid);
+    }
+    sqlite3_bind_blob(st, 2, v.data, static_cast<int>(v.dim * 4), SQLITE_TRANSIENT);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        if (rc == SQLITE_CONSTRAINT) return SQLITE_CONSTRAINT;  // 重复 rowid 等
+        return vt->SetError(sqlite3_errmsg(vt->db));
+    }
+    if (is_insert) *pRowid = has_new_rowid ? new_rowid : sqlite3_last_insert_rowid(vt->db);
+    return SQLITE_OK;
+}
+
+int vtabShadowName(const char *name) {
+    return strcmp(name, "config") == 0 || strcmp(name, "vectors") == 0 ||
+           strcmp(name, "graph") == 0;  // graph 留给 M3
+}
+
+}  // namespace
+
+// iVersion=3 启用 xShadowName（DEFENSIVE 模式下保护 shadow 表不被普通 SQL 误写）。
+// M3 填 xBegin/xSync/xCommit/xRollback（内存图的事务钩子；M2 全部写入直接经
+// shadow 表 SQL，事务性由宿主天然保证，无需钩子）。
+const sqlite3_module vexdb_graph_index_module = {
+    /* iVersion      */ 3,
+    /* xCreate       */ vtabCreate,
+    /* xConnect      */ vtabConnect,
+    /* xBestIndex    */ vtabBestIndex,
+    /* xDisconnect   */ vtabDisconnect,
+    /* xDestroy      */ vtabDestroy,
+    /* xOpen         */ vtabOpen,
+    /* xClose        */ vtabClose,
+    /* xFilter       */ vtabFilter,
+    /* xNext         */ vtabNext,
+    /* xEof          */ vtabEof,
+    /* xColumn       */ vtabColumn,
+    /* xRowid        */ vtabRowid,
+    /* xUpdate       */ vtabUpdate,
+    /* xBegin        */ nullptr,
+    /* xSync         */ nullptr,
+    /* xCommit       */ nullptr,
+    /* xRollback     */ nullptr,
+    /* xFindFunction */ nullptr,
+    /* xRename       */ nullptr,
+    /* xSavepoint    */ nullptr,
+    /* xRelease      */ nullptr,
+    /* xRollbackTo   */ nullptr,
+    /* xShadowName   */ vtabShadowName,
+};

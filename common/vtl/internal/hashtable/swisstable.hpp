@@ -19,7 +19,7 @@
 #include "mock/utils/palloc.h"
 #include "mock/utils/elog.h"
 #include "mock/utils/memtrace.h"
-#elif defined(PG_VEXDB_TARGET_DUCK)
+#elif (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #else
 #include "utils/palloc.h"
 #endif

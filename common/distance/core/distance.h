@@ -32,13 +32,13 @@ extern "C" {
 #include "postgres.h"
 #include "utils/rel.h"
 }
-#elif defined(PG_VEXDB_TARGET_DUCK)
+#elif (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 using Relation = void *;
 #endif
 
 #include "distance/core/architecture_macro.h"
 #include "distance/core/distance_func.h"
-#if !defined(PG_VEXDB_TARGET_DUCK)
+#if !(defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #include "quantizer.h"
 #endif
 
@@ -48,7 +48,7 @@ enum class Arch : uint16 {
     BOOST_PP_SEQ_ENUM(DISTANCER_ISAS)
 };
 
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 enum class Metric : uint32 {
     L2 = 0,
     COSINE = 1,
@@ -379,7 +379,7 @@ inline void transform_int16_to_int8(const int16 *src, int8 *dst, uint16 dim)
     }
 }
 
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 Metric get_func_metric(uint32 func_id);
 #else
 Metric get_func_metric(Oid func_id);
@@ -419,7 +419,7 @@ uint32 get_aligned_dim(uint32 dim);
 size_t get_aligned_vec_size(size_t vec_size);
 float *alloc_floatvector(uint32 dim, size_t n = 1);
 char *alloc_vector(size_t vec_size, size_t n = 1);
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 inline void free_vector(void *vec) { std::free(vec); }
 #else
 inline void free_vector(void *vec) { pfree(vec); }

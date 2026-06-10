@@ -4,7 +4,7 @@
 #ifndef VTL_CONTAINER_H
 #define VTL_CONTAINER_H
 
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #include <new>
 #include <cstddef>
 #include <cstdint>
@@ -28,7 +28,7 @@ using int64 = int64_t;
 #define CONTAINER_USE_STL_TREE false
 #define CONTAINER_USE_STL_HASH false
 #define CONTAINER_USE_STL_PAIR false
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #define CONTAINER_USE_STL_OPTIONAL true
 #else
 #define CONTAINER_USE_STL_OPTIONAL false
@@ -37,7 +37,7 @@ using int64 = int64_t;
 #define CONTAINER_USE_STL_STRINGVIEW false
 #define CONTAINER_USE_STL_STRING false
 #define CONTAINER_USE_STL_SPAN false
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #define CONTAINER_USE_STL_TUPLE true
 #else
 #define CONTAINER_USE_STL_TUPLE false
@@ -45,7 +45,7 @@ using int64 = int64_t;
 #define VERIFY_DATA false
 #define BTREE_VERIFY_DATA false
 
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #define NEW new
 #else
 #include "utils/palloc.h"

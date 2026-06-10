@@ -3,6 +3,9 @@
 
 #if defined(PG_VEXDB_TARGET_DUCK)
 #include "vex_graph_index_depend_duck.hpp"
+#elif defined(PG_VEXDB_TARGET_SQLITE)
+// SQLite store policy 头在 M3 接入（vexdb_sqlite/include/store/）。
+#error "SQLite graph_index store dependency lands in M3; do not include this header yet"
 #elif defined(PG_VEXDB_TARGET_PG)
 #include "postgres.h"
 #include "global_instance.h"

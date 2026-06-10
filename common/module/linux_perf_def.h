@@ -5,7 +5,7 @@
 #ifndef LINUX_PERF_DEF_H
 #define LINUX_PERF_DEF_H
 
-#if !defined(PG_VEXDB_TARGET_DUCK)
+#if !(defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #include "c.h"
 #else
 #include <cstdint>

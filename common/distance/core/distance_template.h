@@ -11,7 +11,7 @@
 
 #include "distance/core/distance.h"
 
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #ifndef Assert
 #define Assert(cond) ((void)0)
 #endif
