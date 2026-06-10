@@ -44,8 +44,10 @@ constexpr int kDefaultEfSearch = 40;
 // 语义对齐 duck 端 vexdb_brute_force_threshold 的精度优先取向）。
 constexpr sqlite3_int64 kBruteForceThreshold = 64;
 
-// declare_vtab 的列序（rowid 之外）。embedding=0, distance=1, k=2(HIDDEN)。
-enum Col { COL_EMBEDDING = 0, COL_DISTANCE = 1, COL_K = 2 };
+// declare_vtab 的列序（rowid 之外）。embedding=0, distance=1, k=2(HIDDEN),
+// cmd=3(与表同名的 HIDDEN 列，fts5 风格 special insert：
+// INSERT INTO t(t) VALUES('ef_search=N') 运行时改参)。
+enum Col { COL_EMBEDDING = 0, COL_DISTANCE = 1, COL_K = 2, COL_CMD = 3 };
 
 // xBestIndex/xFilter 间的计划标记。
 enum Plan { PLAN_SCAN = 0, PLAN_KNN = 1 };
@@ -66,6 +68,9 @@ struct GraphIndexVtab {
     // 序列化写回——磁盘上存在 blob 即保证与 %_vectors 一致；崩溃中途=无 blob=重建。
     std::unique_ptr<GraphBridge> graph;
     bool graph_dirty = false;
+    // 行数缓存：-1=未知（首查时 count 一次），之后随 INSERT/DELETE 增减维护。
+    // 1M 行表上每次 KNN 都 count(*) 全表扫（~80ms）会淹没 HNSW 本身（μs 级）。
+    sqlite3_int64 row_count = -1;
 
     std::string ShadowName(const char *suffix) const {
         char *q = sqlite3_mprintf("\"%w\".\"%w_%s\"", schema.c_str(), name.c_str(), suffix);
@@ -201,10 +206,12 @@ bool ConfigGet(GraphIndexVtab &vt, const char *key, std::string &out) {
     return ok;
 }
 
-int DeclareSchema(sqlite3 *db, const std::string &col_name) {
-    // 第一列用用户声明的列名；distance 只在 KNN 计划下有值；k 是查询参数列。
-    char *sql = sqlite3_mprintf("CREATE TABLE x(\"%w\", distance REAL, k INTEGER HIDDEN)",
-                                col_name.c_str());
+int DeclareSchema(sqlite3 *db, const std::string &col_name, const std::string &table_name) {
+    // 第一列用用户声明的列名；distance 只在 KNN 计划下有值；k 是查询参数列；
+    // 末列与表同名（fts5 风格 special insert 入口）。
+    char *sql = sqlite3_mprintf(
+        "CREATE TABLE x(\"%w\", distance REAL, k INTEGER HIDDEN, \"%w\" TEXT HIDDEN)",
+        col_name.c_str(), table_name.c_str());
     int rc = sqlite3_declare_vtab(db, sql);
     sqlite3_free(sql);
     return rc;
@@ -279,7 +286,7 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
     }
 
     if (col_name.empty()) col_name = "embedding";
-    int rc = DeclareSchema(db, col_name);
+    int rc = DeclareSchema(db, col_name, vt->name);
     if (rc != SQLITE_OK) {
         delete vt;
         return rc;
@@ -320,6 +327,7 @@ int vtabDestroy(sqlite3_vtab *pVtab) {
 // ---------- M3：内存图生命周期 ----------
 
 sqlite3_int64 CountVectors(GraphIndexVtab &vt) {
+    if (vt.row_count >= 0) return vt.row_count;
     char *sql = sqlite3_mprintf("SELECT count(*) FROM %s", vt.ShadowName("vectors").c_str());
     sqlite3_stmt *st = nullptr;
     sqlite3_int64 n = 0;
@@ -329,6 +337,7 @@ sqlite3_int64 CountVectors(GraphIndexVtab &vt) {
     }
     sqlite3_finalize(st);
     sqlite3_free(sql);
+    vt.row_count = n;
     return n;
 }
 
@@ -468,11 +477,36 @@ int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, sqlite3_value **argv) {
         if (rc != SQLITE_OK) return rc;
         std::vector<std::pair<double, int64_t>> hits;
         vt.graph->Search(q.data, size_t(k), uint32_t(vt.ef_search), hits);
+        // distance 列重算为用户语义（与暴力路径/标量函数严格一致）。
+        // 算法返回的 dist 是内核原始值，且 common 的 Distancer 主模板与各
+        // Arch 特化对 COSINE 语义不一致（主模板=1-cos，特化=-cos；ODR 隐患，
+        // 不同 TU/构建可能拿到不同实现）——排序单调同向不受影响，但输出值
+        // 不可信。k 次点查+重算成本可忽略，换取对内核语义漂移彻底免疫。
+        const auto dist_fn = GetDistanceFn(vt.metric);
+        char *sql = sqlite3_mprintf("SELECT vec FROM %s WHERE rowid = ?1",
+                                    vt.ShadowName("vectors").c_str());
+        sqlite3_stmt *st = nullptr;
+        rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) return rc;
         cur.hits.clear();
         cur.hits.reserve(hits.size());
         for (const auto &h : hits) {
-            cur.hits.push_back({h.first, h.second});
+            sqlite3_reset(st);
+            sqlite3_bind_int64(st, 1, h.second);
+            double d = h.first;
+            if (sqlite3_step(st) == SQLITE_ROW &&
+                sqlite3_column_bytes(st, 0) == vt.dim * 4) {
+                d = dist_fn(q.data, static_cast<const float *>(sqlite3_column_blob(st, 0)),
+                            static_cast<uint16_t>(vt.dim));
+            }
+            cur.hits.push_back({d, h.second});
         }
+        sqlite3_finalize(st);
+        std::sort(cur.hits.begin(), cur.hits.end(),
+                  [](const GraphIndexCursor::Hit &a, const GraphIndexCursor::Hit &b) {
+                      return a.dist < b.dist;
+                  });
         cur.pos = 0;
         return SQLITE_OK;
     }
@@ -590,10 +624,28 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
         int rc = ExecFmt(vt->db, sql);
         sqlite3_free(sql);
         if (rc != SQLITE_OK) return rc;
+        if (vt->row_count > 0 && sqlite3_changes(vt->db) > 0) vt->row_count--;
         vt->graph.reset();
         vt->graph_dirty = false;
         return InvalidatePersistedGraph(*vt);
     }
+    // special insert（fts5 风格）：INSERT INTO t(t) VALUES('ef_search=N')
+    // 运行时改参，同连接即时生效并持久化进 config，不触碰数据与内存图。
+    if (argc > 2 + COL_CMD && sqlite3_value_type(argv[2 + COL_CMD]) == SQLITE_TEXT) {
+        std::string cmd = reinterpret_cast<const char *>(sqlite3_value_text(argv[2 + COL_CMD]));
+        size_t eq = cmd.find('=');
+        std::string key = cmd.substr(0, eq == std::string::npos ? cmd.size() : eq);
+        TrimSpaces(key);
+        if (key == "ef_search" && eq != std::string::npos) {
+            int v = atoi(cmd.c_str() + eq + 1);
+            if (v < 1) return vt->SetError("ef_search must be positive");
+            vt->ef_search = v;
+            ConfigSet(*vt, "ef_search", std::to_string(v));
+            return SQLITE_OK;
+        }
+        return vt->SetError(("unknown command: " + cmd).c_str());
+    }
+
     // INSERT / UPDATE 的向量值
     sqlite3_value *vec_val = argv[2 + COL_EMBEDDING];
     if (sqlite3_value_type(vec_val) == SQLITE_NULL)
@@ -655,6 +707,7 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
     rc = InvalidatePersistedGraph(*vt);
     if (rc != SQLITE_OK) return rc;
     if (is_insert) {
+        if (vt->row_count >= 0) vt->row_count++;
         if (vt->graph) {
             vt->graph->Insert(v.data, final_rowid);
             vt->graph_dirty = true;
