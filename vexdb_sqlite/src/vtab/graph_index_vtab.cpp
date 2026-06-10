@@ -17,10 +17,12 @@
 #include "vexdb_sqlite_internal.h"
 #include "vtab/graph_index_vtab.h"
 #include "functions/vector_codec.h"
+#include "index/graph_bridge.h"
 #include "vex_distance_entry.h"
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <string>
 #include <vector>
@@ -29,11 +31,16 @@ namespace {
 
 using vexdb_sqlite::GetDistanceFn;
 using vexdb_sqlite::GetVector;
+using vexdb_sqlite::GraphBridge;
 using vexdb_sqlite::VectorView;
 
 constexpr int kFormatVersion = 1;
 constexpr int kDefaultM = 16;
 constexpr int kDefaultEfConstruction = 200;
+constexpr int kDefaultEfSearch = 40;
+// 行数不超过此值时 KNN 直接暴力扫描（小表 ANN 无性能收益反损 recall，
+// 语义对齐 duck 端 vexdb_brute_force_threshold 的精度优先取向）。
+constexpr sqlite3_int64 kBruteForceThreshold = 64;
 
 // declare_vtab 的列序（rowid 之外）。embedding=0, distance=1, k=2(HIDDEN)。
 enum Col { COL_EMBEDDING = 0, COL_DISTANCE = 1, COL_K = 2 };
@@ -50,6 +57,13 @@ struct GraphIndexVtab {
     VexMetric metric = VexMetric::L2;
     int m = kDefaultM;
     int ef_construction = kDefaultEfConstruction;
+    int ef_search = kDefaultEfSearch;
+
+    // M3：内存 HNSW 图（懒加载：首次 KNN 时从 %_graph blob 还原或 %_vectors 重建）。
+    // 一致性协议：任何写路径先清 %_graph（宿主事务内）；xSync 把 dirty 内存图
+    // 序列化写回——磁盘上存在 blob 即保证与 %_vectors 一致；崩溃中途=无 blob=重建。
+    std::unique_ptr<GraphBridge> graph;
+    bool graph_dirty = false;
 
     std::string ShadowName(const char *suffix) const {
         char *q = sqlite3_mprintf("\"%w\".\"%w_%s\"", schema.c_str(), name.c_str(), suffix);
@@ -121,6 +135,9 @@ bool ParseCreateArgs(int argc, const char *const *argv, GraphIndexVtab &vt,
             } else if (key == "ef_construction") {
                 vt.ef_construction = atoi(val.c_str());
                 if (vt.ef_construction < 1) { err = "ef_construction must be positive"; return false; }
+            } else if (key == "ef_search") {
+                vt.ef_search = atoi(val.c_str());
+                if (vt.ef_search < 1) { err = "ef_search must be positive"; return false; }
             } else {
                 err = "unknown parameter: " + key;
                 return false;
@@ -207,8 +224,10 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
         }
         char *sql = sqlite3_mprintf(
             "CREATE TABLE %s(key TEXT PRIMARY KEY, value TEXT);"
-            "CREATE TABLE %s(rowid INTEGER PRIMARY KEY, vec BLOB NOT NULL);",
-            vt->ShadowName("config").c_str(), vt->ShadowName("vectors").c_str());
+            "CREATE TABLE %s(rowid INTEGER PRIMARY KEY, vec BLOB NOT NULL);"
+            "CREATE TABLE %s(blk INTEGER PRIMARY KEY, data BLOB NOT NULL);",
+            vt->ShadowName("config").c_str(), vt->ShadowName("vectors").c_str(),
+            vt->ShadowName("graph").c_str());
         int rc = ExecFmt(db, sql);
         sqlite3_free(sql);
         if (rc != SQLITE_OK) {
@@ -222,6 +241,7 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
         ConfigSet(*vt, "metric", std::to_string(static_cast<uint32_t>(vt->metric)));
         ConfigSet(*vt, "m", std::to_string(vt->m));
         ConfigSet(*vt, "ef_construction", std::to_string(vt->ef_construction));
+        ConfigSet(*vt, "ef_search", std::to_string(vt->ef_search));
         ConfigSet(*vt, "column", col_name);
     } else {
         std::string v;
@@ -245,6 +265,9 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
         vt->m = atoi(v.c_str());
         ConfigGet(*vt, "ef_construction", v);
         vt->ef_construction = atoi(v.c_str());
+        if (ConfigGet(*vt, "ef_search", v)) {
+            vt->ef_search = atoi(v.c_str());
+        }
     }
 
     int rc = DeclareSchema(db);
@@ -275,13 +298,85 @@ int vtabDisconnect(sqlite3_vtab *pVtab) {
 
 int vtabDestroy(sqlite3_vtab *pVtab) {
     auto *vt = asVtab(pVtab);
-    char *sql = sqlite3_mprintf("DROP TABLE IF EXISTS %s; DROP TABLE IF EXISTS %s;",
-                                vt->ShadowName("config").c_str(),
-                                vt->ShadowName("vectors").c_str());
+    char *sql = sqlite3_mprintf(
+        "DROP TABLE IF EXISTS %s; DROP TABLE IF EXISTS %s; DROP TABLE IF EXISTS %s;",
+        vt->ShadowName("config").c_str(), vt->ShadowName("vectors").c_str(),
+        vt->ShadowName("graph").c_str());
     int rc = ExecFmt(vt->db, sql);
     sqlite3_free(sql);
     delete vt;
     return rc;
+}
+
+// ---------- M3：内存图生命周期 ----------
+
+sqlite3_int64 CountVectors(GraphIndexVtab &vt) {
+    char *sql = sqlite3_mprintf("SELECT count(*) FROM %s", vt.ShadowName("vectors").c_str());
+    sqlite3_stmt *st = nullptr;
+    sqlite3_int64 n = 0;
+    if (sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW) {
+        n = sqlite3_column_int64(st, 0);
+    }
+    sqlite3_finalize(st);
+    sqlite3_free(sql);
+    return n;
+}
+
+// 任何写路径调用：作废持久化图（宿主事务内，随事务回滚）。
+int InvalidatePersistedGraph(GraphIndexVtab &vt) {
+    char *sql = sqlite3_mprintf("DELETE FROM %s", vt.ShadowName("graph").c_str());
+    int rc = ExecFmt(vt.db, sql);
+    sqlite3_free(sql);
+    return rc;
+}
+
+// 确保内存图就绪：优先 %_graph blob 还原；无/损坏/参数不符则从 %_vectors 重建。
+// 重建标记 dirty（待下一次写事务的 xSync 落盘；查询路径绝不写库）。
+int EnsureGraph(GraphIndexVtab &vt) {
+    if (vt.graph) return SQLITE_OK;
+
+    // 1) 尝试 load 持久化 blob
+    {
+        char *sql = sqlite3_mprintf("SELECT data FROM %s WHERE blk = 0",
+                                    vt.ShadowName("graph").c_str());
+        sqlite3_stmt *st = nullptr;
+        int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
+        sqlite3_free(sql);
+        if (rc == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW) {
+            const char *blob = static_cast<const char *>(sqlite3_column_blob(st, 0));
+            size_t len = size_t(sqlite3_column_bytes(st, 0));
+            std::string err;
+            vt.graph = GraphBridge::LoadFromBlob(blob, len, uint16_t(vt.dim), vt.m,
+                                                 vt.ef_construction, vt.metric, err);
+            // load 失败不报错：fall through 重建（blob 视为陈旧）
+        }
+        sqlite3_finalize(st);
+        if (vt.graph) {
+            vt.graph_dirty = false;
+            return SQLITE_OK;
+        }
+    }
+
+    // 2) 从 %_vectors 全量重建（M3 单线程；M3+ 在 GraphBridge 内并行化）
+    auto bridge = std::make_unique<GraphBridge>(uint16_t(vt.dim), vt.m, vt.ef_construction,
+                                                vt.metric);
+    char *sql = sqlite3_mprintf("SELECT rowid, vec FROM %s ORDER BY rowid",
+                                vt.ShadowName("vectors").c_str());
+    sqlite3_stmt *st = nullptr;
+    int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) return rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        if (sqlite3_column_bytes(st, 1) != vt.dim * 4) continue;  // 防御脏数据
+        bridge->Insert(static_cast<const float *>(sqlite3_column_blob(st, 1)),
+                       sqlite3_column_int64(st, 0));
+    }
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) return rc;
+    vt.graph = std::move(bridge);
+    vt.graph_dirty = true;
+    return SQLITE_OK;
 }
 
 int vtabBestIndex(sqlite3_vtab *, sqlite3_index_info *info) {
@@ -343,6 +438,21 @@ int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, sqlite3_value **argv) {
     }
     sqlite3_int64 k = sqlite3_value_int64(argv[1]);
     if (k <= 0) return vt.SetError("k must be positive");
+
+    // M3：行数超过阈值走 HNSW 图（懒加载）；小表保持暴力（精度优先）。
+    if (CountVectors(vt) > kBruteForceThreshold) {
+        int rc = EnsureGraph(vt);
+        if (rc != SQLITE_OK) return rc;
+        std::vector<std::pair<double, int64_t>> hits;
+        vt.graph->Search(q.data, size_t(k), uint32_t(vt.ef_search), hits);
+        cur.hits.clear();
+        cur.hits.reserve(hits.size());
+        for (const auto &h : hits) {
+            cur.hits.push_back({h.first, h.second});
+        }
+        cur.pos = 0;
+        return SQLITE_OK;
+    }
 
     const auto dist_fn = GetDistanceFn(vt.metric);
     char *sql = sqlite3_mprintf("SELECT rowid, vec FROM %s", vt.ShadowName("vectors").c_str());
@@ -448,14 +558,18 @@ int vtabRowid(sqlite3_vtab_cursor *pCur, sqlite3_int64 *pRowid) {
 int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
                sqlite3_int64 *pRowid) {
     auto *vt = asVtab(pVtab);
-    // DELETE
+    // DELETE：HNSW 不做物理删点，M3 策略=作废内存图与持久化 blob，下次查询重建
+    //（重建只读 %_vectors，已删行天然不在）。
     if (argc == 1) {
         char *sql = sqlite3_mprintf("DELETE FROM %s WHERE rowid = %lld",
                                     vt->ShadowName("vectors").c_str(),
                                     sqlite3_value_int64(argv[0]));
         int rc = ExecFmt(vt->db, sql);
         sqlite3_free(sql);
-        return rc;
+        if (rc != SQLITE_OK) return rc;
+        vt->graph.reset();
+        vt->graph_dirty = false;
+        return InvalidatePersistedGraph(*vt);
     }
     // INSERT / UPDATE 的向量值
     sqlite3_value *vec_val = argv[2 + COL_EMBEDDING];
@@ -508,7 +622,60 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
         if (rc == SQLITE_CONSTRAINT) return SQLITE_CONSTRAINT;  // 重复 rowid 等
         return vt->SetError(sqlite3_errmsg(vt->db));
     }
-    if (is_insert) *pRowid = has_new_rowid ? new_rowid : sqlite3_last_insert_rowid(vt->db);
+    sqlite3_int64 final_rowid =
+        is_insert ? (has_new_rowid ? new_rowid : sqlite3_last_insert_rowid(vt->db))
+                  : (has_new_rowid ? new_rowid : old_rowid);
+    if (is_insert) *pRowid = final_rowid;
+
+    // M3 图维护：持久化 blob 一律作废（xSync 重写）；内存图 INSERT 真增量，
+    // UPDATE 改了已有向量 → 作废重建。
+    rc = InvalidatePersistedGraph(*vt);
+    if (rc != SQLITE_OK) return rc;
+    if (is_insert) {
+        if (vt->graph) {
+            vt->graph->Insert(v.data, final_rowid);
+            vt->graph_dirty = true;
+        }
+    } else {
+        vt->graph.reset();
+        vt->graph_dirty = false;
+    }
+    return SQLITE_OK;
+}
+
+// ---------- 事务钩子（M3） ----------
+// 写入本身全经 shadow 表 SQL（随宿主事务原子回滚）；钩子只管内存图的一致性：
+//   xSync    : 把 dirty 内存图序列化写回 %_graph（可失败的工作必须放这里）
+//   xRollback: 事务回滚 → 内存图可能含已回滚的插入，作废
+//   xCommit  : 清理无事可做（blob 已在 xSync 落盘）
+
+int vtabBegin(sqlite3_vtab *) { return SQLITE_OK; }
+
+int vtabSync(sqlite3_vtab *pVtab) {
+    auto *vt = asVtab(pVtab);
+    if (!vt->graph || !vt->graph_dirty) return SQLITE_OK;
+    std::vector<char> blob;
+    vt->graph->SerializeToBlob(blob);
+    char *sql = sqlite3_mprintf("INSERT OR REPLACE INTO %s(blk, data) VALUES (0, ?1)",
+                                vt->ShadowName("graph").c_str());
+    sqlite3_stmt *st = nullptr;
+    int rc = sqlite3_prepare_v2(vt->db, sql, -1, &st, nullptr);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) return rc;
+    sqlite3_bind_blob64(st, 1, blob.data(), blob.size(), SQLITE_STATIC);
+    rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) return vt->SetError(sqlite3_errmsg(vt->db));
+    vt->graph_dirty = false;
+    return SQLITE_OK;
+}
+
+int vtabCommit(sqlite3_vtab *) { return SQLITE_OK; }
+
+int vtabRollback(sqlite3_vtab *pVtab) {
+    auto *vt = asVtab(pVtab);
+    vt->graph.reset();
+    vt->graph_dirty = false;
     return SQLITE_OK;
 }
 
@@ -537,10 +704,10 @@ const sqlite3_module vexdb_graph_index_module = {
     /* xColumn       */ vtabColumn,
     /* xRowid        */ vtabRowid,
     /* xUpdate       */ vtabUpdate,
-    /* xBegin        */ nullptr,
-    /* xSync         */ nullptr,
-    /* xCommit       */ nullptr,
-    /* xRollback     */ nullptr,
+    /* xBegin        */ vtabBegin,
+    /* xSync         */ vtabSync,
+    /* xCommit       */ vtabCommit,
+    /* xRollback     */ vtabRollback,
     /* xFindFunction */ nullptr,
     /* xRename       */ nullptr,
     /* xSavepoint    */ nullptr,

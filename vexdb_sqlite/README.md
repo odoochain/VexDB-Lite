@@ -22,7 +22,8 @@ SELECT rowid, distance FROM idx WHERE embedding MATCH :query AND k = 10;  -- 暴
 | M0 双形态注册链路 | `m0_static_smoke` + CLI `.load` | ✅ arm64 + x86_64 |
 | M1 距离层（common SIMD dispatch） | `m1_distance_smoke` + 跨引擎 800 组对照（`m1_cross_engine_check.py`，float64 真值仲裁）+ DuckDB 回归 111 cases | ✅ |
 | M2 虚拟表（shadow table 持久化 + 暴力 KNN） | `m2_vtab_smoke`（KNN 正确性/事务回滚/关库重开/错误路径） | ✅ arm64 + x86_64 |
-| M3 HNSW（GraphIndexCore）+ M3+ 并行建图 | — | 下一步 |
+| M3 HNSW（共享算法 × 单线程 SQLite store，>64 行走图，`%_graph` blob 持久化） | `m3_hnsw_smoke`（recall@10=1.000、增量、重开 blob 还原、DELETE/ROLLBACK） | ✅ arm64 + x86_64 |
+| M3+ 并行建图 / M4 spec / M5 发版 | — | 下一步 |
 
 距离语义三 metric 统一 **lower = closer**（L2=sqrt、cosine=1-sim、ip=负内积），`ORDER BY distance ASC` 即最近优先。跨 ISA（NEON/SSE）允许 ~1e-6 级 float32 重排序分歧。
 

@@ -104,11 +104,14 @@ set(VEXDB_SQLITE_SRCS
     src/functions/distance_functions.cpp
     src/functions/vector_codec.cpp
     src/distance/vex_distance_entry.cpp
+    src/index/graph_algo_smoke.cpp
+    src/index/graph_bridge.cpp
     ${VEXDB_DISTANCE_SRCS}
 )
 
 set(VEXDB_SQLITE_INCLUDES
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/store
     ${SQLITE_AMALG_DIR}
     ${REPO_ROOT}/common/include
     ${REPO_ROOT}/common
@@ -177,7 +180,7 @@ if(VEXDB_SQLITE_BUILD_TESTS)
     target_include_directories(sqlite3_amalg PUBLIC ${SQLITE_AMALG_DIR})
     target_compile_definitions(sqlite3_amalg PRIVATE SQLITE_ENABLE_LOAD_EXTENSION=1)
 
-    foreach(smoke m0_static_smoke m1_distance_smoke m2_vtab_smoke)
+    foreach(smoke m0_static_smoke m1_distance_smoke m2_vtab_smoke m3_hnsw_smoke)
         add_executable(${smoke} test/${smoke}.c)
         target_include_directories(${smoke} PRIVATE ${VEXDB_SQLITE_INCLUDES})
         # 宿主侧静态注册形态：直接用真实 sqlite3 符号（非 ext 间接表）。

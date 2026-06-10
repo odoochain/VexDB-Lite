@@ -46,6 +46,8 @@ case "$CMD" in
             "$BUILD_DIR/m1_distance_smoke"
             echo "=== M2 虚拟表冒烟 ==="
             "$BUILD_DIR/m2_vtab_smoke"
+            echo "=== M3 HNSW 冒烟 ==="
+            "$BUILD_DIR/m3_hnsw_smoke"
         fi
         ;;
     clean)
