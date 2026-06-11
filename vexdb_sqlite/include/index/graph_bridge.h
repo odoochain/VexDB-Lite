@@ -49,13 +49,16 @@ public:
 
     size_t Count() const;
 
-    // ---- deleted-set（DELETE O(1) 标记，免全量重建）----
-    // 图结构不动：已删节点仍参与 HNSW 导航（保连通性），仅不进结果（Search
-    // 内部叠加过滤 + ef 按存活比补偿）。持久化为 v3 的 KIND_DELETED 段。
-    // 删除占比超阈值时调用方应作废重建（图质量与空间回收）。
-    void MarkDeleted(int64_t rowid);
-    bool IsDeleted(int64_t rowid) const;
-    size_t DeletedCount() const;
+    // ---- tid 摘除（DELETE/UPDATE 增量化，对齐 MySQL 二级索引 delete-mark+
+    // insert 范式）----
+    // 把 rowid 从其节点的 tids 里摘除：节点变空壳后天然零输出（查询展开
+    // tids 产行）但仍参与 HNSW 导航（保连通性）。UPDATE 向量 = RemoveTid(旧)
+    // + Insert(新)——同 rowid 旧空壳与新节点无二义。elems 变更随 SerializeV2
+    // 持久化（无需独立 deleted 段）。返回 false=rowid 不在图中。
+    // 空壳（dead）节点占 ef 槽位，Search 内按 dead 比补偿；占比超阈值时
+    // 调用方应作废重建（图质量与空间回收，对应 MySQL purge）。
+    bool RemoveTid(int64_t rowid);
+    size_t DeadNodeCount() const;
 
     // ---- 格式 v2：段式（M9'，%_graph(kind, seg, data)）----
     // kind：0=meta 1=elems 2=upper 3=base 段 4=vec 段（base/vec 按 4096 条定长

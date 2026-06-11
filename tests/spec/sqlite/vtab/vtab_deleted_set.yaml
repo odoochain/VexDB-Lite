@@ -1,6 +1,6 @@
 name: sqlite__vtab_deleted_set
 tags: [vex, sqlite]
-description: deleted-set（DELETE O(1) 标记不重建；查询过滤+谓词组合+restart 持久化+20% 阈值重建+resurrect 撞已删 rowid）
+description: tid 摘除（DELETE/UPDATE O(1) 增量不重建，MySQL 二级索引 delete-mark+insert 范式；查询过滤+谓词组合+restart 持久化+20% 空壳阈值重建+重插已删 rowid）
 steps:
 # 100 行 > 阈值 64 走图（默认全内存模式）
 - statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], category TEXT, metric=l2);
@@ -8,20 +8,19 @@ steps:
     WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 100)
     INSERT INTO idx(rowid, embedding, category)
     SELECT i, vexdb_f32('[' || i || ',0]'), CASE WHEN i%2=0 THEN 'even' ELSE 'odd' END FROM c;
-# 触发建图 + special insert 写事务落盘 v3 段（DELETE 标记需要图在/段在）
+# 触发建图 + special insert 写事务落盘 v3 段（tid 摘除需要图在/段在）
 - query: SELECT rowid FROM idx WHERE embedding MATCH '[50,0]' AND k = 1;
   expect:
   - - 50
 - statement: INSERT INTO idx(idx) VALUES ('ef_search=40');
-# DELETE 标记：被删行立即从 KNN 消失（图不重建）
+# DELETE = tid 摘除：被删行立即从 KNN 消失（图不重建，段保留）
 - statement: DELETE FROM idx WHERE rowid = 1;
 - query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 3 ORDER BY distance;
   expect:
   - - 2
   - - 3
   - - 4
-# deleted 段（kind=5）已随写事务落盘
-- query: SELECT count(*) FROM idx_graph WHERE kind = 5;
+- query: SELECT count(*) > 0 FROM idx_graph;
   expect:
   - - 1
 # 与谓词过滤组合（even 里删掉 2 → top even 从 4 起）
@@ -31,29 +30,41 @@ steps:
   - - 4
   - - 6
   - - 8
+# UPDATE 向量增量：旧位置空壳零输出、新位置立即可查
+- statement: UPDATE idx SET embedding = vexdb_f32('[0.25,0]') WHERE rowid = 50;
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0]' AND k = 2 ORDER BY distance;
+  expect:
+  - - 50
+    - 0.25
+  - - 3
+    - 3.0
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[50,0]' AND k = 2 ORDER BY distance, rowid;
+  expect:
+  - - 49
+  - - 51
 - raw_directive: restart
-# 重开：deleted 段恢复生效，已删行仍不出现
+# 重开：摘除/更新随 elems 段恢复（1、2 已删不出现，50 在新位置）
 - query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 3 ORDER BY distance;
   expect:
+  - - 50
   - - 3
   - - 4
-  - - 5
-# resurrect：INSERT 撞已删 rowid（deleted={1,2}）→ 作废重建，新向量生效
+# 重插已删 rowid（旧节点已是空壳，无幽灵二义）：增量插入直接生效
 - statement: INSERT INTO idx(rowid, embedding, category) VALUES (1, vexdb_f32('[0.5,0]'), 'odd');
 - query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0]' AND k = 2 ORDER BY distance;
   expect:
+  - - 50
+    - 0.25
   - - 1
     - 0.5
-  - - 3
-    - 3.0
-# 20% 阈值重建：resurrect 已清空 deleted；一条语句删 rowid 3..22 共 20 行，
-# 第 20 行时 20*5=100 ≥ total 99 触发作废重建，结果仍正确
+# 20% 空壳阈值重建：当前空壳=3（1 重插不复用旧壳、2、50 旧壳），图节点
+# ~103；一条语句删 rowid 3..22 共 20 行，期间空壳越阈值触发作废重建，结果仍正确
 - statement: DELETE FROM idx WHERE rowid >= 3 AND rowid <= 22;
 - query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 3 ORDER BY distance;
   expect:
+  - - 50
   - - 1
   - - 23
-  - - 24
 - query: SELECT count(*) FROM idx;
   expect:
   - - 79

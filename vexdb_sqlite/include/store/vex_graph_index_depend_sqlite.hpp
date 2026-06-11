@@ -783,13 +783,13 @@ public:
     static constexpr bool has_occlusion_cache = true;
     static constexpr bool clustered = false;
 
-    // %_graph(kind, seg, data) 的 kind 取值（格式 v2/v3，GraphBridge 序列化共用）
+    // %_graph(kind, seg, data) 的 kind 取值（格式 v2/v3，GraphBridge 序列化共用）。
+    // v3 = elems 支持空壳节点（tid 摘除后 tids 为空，DELETE/UPDATE 增量化）。
     static constexpr int KIND_META = 0;
     static constexpr int KIND_ELEMS = 1;
     static constexpr int KIND_UPPER = 2;
     static constexpr int KIND_BASE = 3;
     static constexpr int KIND_VEC = 4;
-    static constexpr int KIND_DELETED = 5;  // v3：deleted rowid 集合（cnt + int64 列表）
     // 段粒度：HNSW 查询是随机点查，段越大 I/O 放大越狠（读整段只用一条记录，
     // miss 成本=整段 blob 读）。64 条 → vec 段 32KB（128 维）/ base 段 16KB
     //（m=16），向 PG 8KB page 的取向靠拢；1M 行 ≈ 15625 段/类，%_graph 行数

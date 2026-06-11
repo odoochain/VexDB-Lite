@@ -14,7 +14,7 @@
 #include <cstring>
 #include <exception>
 #include <thread>
-#include <unordered_set>
+#include <unordered_map>
 
 namespace vexdb_sqlite {
 
@@ -51,9 +51,9 @@ auto RunWithAlgo(Metric metric, uint16_t dim, int ef_construction, int m, Store 
 
 // ---- 序列化格式 v3（段式，M9'：%_graph(kind, seg, data)；全部小端定长记录）----
 // v1（全量镜像分块）已废弃：EnsureGraph 读不出 meta 段 → fall through 重建。
-// v3 = v2 + KIND_DELETED 段（deleted-set）。读侧接受 v2（旧库无删除标记，
-// 空 set 兼容）；写侧统一 v3——旧代码打开 v3 库会拒绝并重建（%_vectors 已删
-// 行天然不在，安全），防旧代码把删除标记当不存在、幽灵行复活。
+// v3 = elems 支持空壳节点（tid 摘除：DELETE/UPDATE 增量化，对齐 MySQL 二级
+// 索引 delete-mark+insert 范式）。空壳节点 v2 解析器也兼容（cnt=0 正常读，
+// 查询零输出），读侧接受 v2；写侧统一 v3。
 constexpr uint32_t kGraphBlobMagic = 0x47535856;  // 'VXSG'
 constexpr uint32_t kGraphBlobVersion = 3;
 constexpr uint32_t kGraphBlobMinVersion = 2;
@@ -97,11 +97,28 @@ struct GraphBridge::Impl {
     Metric core_metric;
     SqliteStore store;                          // 全内存模式（disk 为空时生效）
     std::unique_ptr<SqliteDiskStore> disk;      // DiskStore 模式（非空=段式懒加载）
-    // deleted-set（rowid 级；图不动，Search 内过滤）。dirty=待 xSync 写
-    // KIND_DELETED 段（mem 模式由 vtab graph_dirty 统一管，此标记只服务
-    // disk 模式的 HasDirty）。
-    std::unordered_set<int64_t> deleted;
-    bool deleted_dirty = false;
+    // tid 摘除（DELETE/UPDATE 增量化）：rowid→节点 id 反查 map 懒构建（首次
+    // RemoveTid 时从 elems 扫描，之后随 Insert/RemoveTid 维护）；dead_nodes=
+    // tids 摘空的空壳节点数（占 ef 槽位，Search 补偿+阈值重建判据）。
+    std::unordered_map<int64_t, uint32_t> rowid_to_node;
+    bool rowid_map_built = false;
+    size_t dead_nodes = 0;
+    bool elems_dirty = false;  // tid 摘除待落盘（disk 模式 HasDirty 用）
+
+    template <typename ElemsVec>
+    void build_rowid_map(const ElemsVec &elems) {
+        rowid_to_node.clear();
+        rowid_to_node.reserve(elems.size() * 2);
+        dead_nodes = 0;
+        for (size_t i = 0; i < elems.size(); i++) {
+            if (elems[i].tids.empty()) {
+                dead_nodes++;
+                continue;
+            }
+            for (const auto &t : elems[i].tids) rowid_to_node[t.row_id] = uint32_t(i);
+        }
+        rowid_map_built = true;
+    }
 
     Impl(uint16_t dim_in, int m_in, int efc_in, VexMetric metric_in)
         : dim(dim_in), m(m_in), ef_construction(efc_in), metric(metric_in),
@@ -134,6 +151,9 @@ void GraphBridge::Insert(const float *vec, int64_t rowid) {
     } else {
         run(im.store);
     }
+    // 新节点 id 由算法内部分配（dedup 还可能挂到既有节点），rowid→node 懒 map
+    // 作废，下次 RemoveTid 重扫 elems 重建（批量 DELETE 间无 INSERT 时只建一次）。
+    im.rowid_map_built = false;
 }
 
 // 批量建图（duck BuildBulk 三段式）：首点串行立 entry → 单线程回退 → 连续
@@ -230,33 +250,28 @@ void GraphBridge::Search(const float *query, size_t k, uint32_t ef_search,
     }
 
     uint32_t ef = std::max<uint32_t>(uint32_t(k), ef_search);
-    // deleted-set 的 ef 补偿：已删节点占据遍历但不进结果，按存活比放大（上限 2×）。
-    const auto &deleted = im.deleted;
-    if (!deleted.empty()) {
+    // 空壳（tid 摘空）节点占据遍历与结果槽位但产不出行，按存活比放大 ef
+    //（上限 2×）。空壳节点的零输出由 tids 展开天然保证，无需显式过滤。
+    if (im.dead_nodes > 0) {
         size_t n = Count();
-        size_t live = n > deleted.size() ? n - deleted.size() : 1;
+        size_t live = n > im.dead_nodes ? n - im.dead_nodes : 1;
         ef = uint32_t(std::min<double>(double(ef) * double(n) / double(live), double(ef) * 2.0));
     }
-    // rowid 级总过滤 = 谓词 ∧ 非 deleted
-    auto row_ok = [&](int64_t rid) -> bool {
-        if (!deleted.empty() && deleted.count(rid)) return false;
-        return !filter || filter(rid);
-    };
-    const bool need_filter = bool(filter) || !deleted.empty();
     auto run = [&](auto &store) {
         RunWithAlgo(im.core_metric, im.dim, im.ef_construction, im.m, store, [&](auto &algo) {
             PointExtensionContext pctx;
             // 节点级 filter：dedup 后一个 point 可挂多个 rowid，任一通过即保留节点
-            // （结果输出端再按 rowid 精确过滤掉混进来的不满足行）。
+            // （结果输出端再按 rowid 精确过滤掉混进来的不满足行）。空壳节点
+            // 无 tid 可通过，天然不进结果。
             auto node_filter = [&](uint32 id) -> bool {
                 for (const auto &t : store.elems[id].tids) {
-                    if (row_ok(t.row_id)) return true;
+                    if (filter(t.row_id)) return true;
                 }
                 return false;
             };
             auto emit = [&](const auto &res) {
                 for (size_t i = 0; i < res.size() && out.size() < k; i++) {
-                    if (need_filter && !row_ok(res[i].tid.row_id)) continue;
+                    if (filter && !filter(res[i].tid.row_id)) continue;
                     double d = res[i].dist;
                     switch (im.metric) {
                     case VexMetric::L2: d = std::sqrt(d); break;          // raw=平方距离
@@ -266,7 +281,7 @@ void GraphBridge::Search(const float *query, size_t k, uint32_t ef_search,
                     out.emplace_back(d, res[i].tid.row_id);
                 }
             };
-            if (need_filter) {
+            if (filter) {
                 emit(algo.search(pctx, reinterpret_cast<const char *>(q), ef, node_filter));
             } else {
                 emit(algo.search(pctx, reinterpret_cast<const char *>(q), ef));
@@ -281,16 +296,29 @@ void GraphBridge::Search(const float *query, size_t k, uint32_t ef_search,
     }
 }
 
-void GraphBridge::MarkDeleted(int64_t rowid) {
-    if (impl_->deleted.insert(rowid).second) impl_->deleted_dirty = true;
+bool GraphBridge::RemoveTid(int64_t rowid) {
+    auto &im = *impl_;
+    auto with_elems = [&](auto &elems) -> bool {
+        if (!im.rowid_map_built) im.build_rowid_map(elems);
+        auto it = im.rowid_to_node.find(rowid);
+        if (it == im.rowid_to_node.end()) return false;
+        auto &tids = elems[it->second].tids;
+        for (size_t i = 0; i < tids.size(); i++) {
+            if (tids[i].row_id == rowid) {
+                tids.erase(tids.begin() + i);
+                break;
+            }
+        }
+        if (tids.empty()) im.dead_nodes++;
+        im.rowid_to_node.erase(it);
+        im.elems_dirty = true;
+        return true;
+    };
+    return im.disk ? with_elems(im.disk->elems) : with_elems(im.store.elems);
 }
 
-bool GraphBridge::IsDeleted(int64_t rowid) const {
-    return impl_->deleted.count(rowid) > 0;
-}
-
-size_t GraphBridge::DeletedCount() const {
-    return impl_->deleted.size();
+size_t GraphBridge::DeadNodeCount() const {
+    return impl_->dead_nodes;
 }
 
 size_t GraphBridge::Count() const {
@@ -302,7 +330,7 @@ bool GraphBridge::IsDiskMode() const {
 }
 
 bool GraphBridge::HasDirty() const {
-    return impl_->deleted_dirty || (impl_->disk && impl_->disk->has_dirty());
+    return impl_->elems_dirty || (impl_->disk && impl_->disk->has_dirty());
 }
 
 namespace {
@@ -314,35 +342,16 @@ constexpr int kKindElems = SqliteDiskStore::KIND_ELEMS;
 constexpr int kKindUpper = SqliteDiskStore::KIND_UPPER;
 constexpr int kKindBase = SqliteDiskStore::KIND_BASE;
 constexpr int kKindVec = SqliteDiskStore::KIND_VEC;
-constexpr int kKindDeleted = SqliteDiskStore::KIND_DELETED;
 constexpr size_t kSegRecords = SqliteDiskStore::SEG_RECORDS;
 
-void BuildDeletedBlob(const std::unordered_set<int64_t> &deleted, std::vector<char> &out) {
-    out.clear();
-    AppendPod(out, uint64_t(deleted.size()));
-    for (int64_t rid : deleted) AppendPod(out, rid);
-}
-
-// v2 旧库无 KIND_DELETED 段（read 失败=空 set 兼容）；v3 段缺失同样视为空。
-bool ParseDeletedBlob(const std::vector<char> &blob, std::unordered_set<int64_t> &deleted,
-                      std::string &err) {
-    const char *p = blob.data();
-    const char *end = p + blob.size();
-    uint64_t cnt = 0;
-    if (!ReadPod(p, end, cnt)) {
-        err = "graph v3 deleted blob truncated";
-        return false;
+// 载入后初始化空壳节点计数（tid 摘除产生的 dead 节点，序列化随 elems 走）。
+template <typename ElemsVec>
+size_t CountDeadNodes(const ElemsVec &elems) {
+    size_t dead = 0;
+    for (const auto &e : elems) {
+        if (e.tids.empty()) dead++;
     }
-    deleted.reserve(size_t(cnt) * 2);
-    for (uint64_t i = 0; i < cnt; i++) {
-        int64_t rid = 0;
-        if (!ReadPod(p, end, rid)) {
-            err = "graph v3 deleted blob truncated in rowids";
-            return false;
-        }
-        deleted.insert(rid);
-    }
-    return true;
+    return dead;
 }
 
 void BuildMetaBlob(uint16_t dim, int m, int efc, VexMetric metric, size_t base_n,
@@ -493,15 +502,13 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
         if (!write(kKindElems, 0, buf)) return false;
         BuildUpperBlob(ds.upper_points, upper_n, im.m, buf);
         if (!write(kKindUpper, 0, buf)) return false;
-        BuildDeletedBlob(im.deleted, buf);
-        if (!write(kKindDeleted, 0, buf)) return false;
         bool ok = true;
         ds.flush_dirty_segs([&](int kind, uint32 seg, const std::vector<char> &data) {
             if (!write(kind, seg, data)) ok = false;
         });
         if (ok) {
             ds.upper_dirty = false;
-            im.deleted_dirty = false;
+            im.elems_dirty = false;
         }
         return ok;
     }
@@ -521,9 +528,7 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
     if (!write(kKindElems, 0, buf)) return false;
     BuildUpperBlob(st.upper_points, upper_n, im.m, buf);
     if (!write(kKindUpper, 0, buf)) return false;
-    BuildDeletedBlob(im.deleted, buf);
-    if (!write(kKindDeleted, 0, buf)) return false;
-    im.deleted_dirty = false;
+    im.elems_dirty = false;
 
     const size_t n_segs = (base_n + kSegRecords - 1) / kSegRecords;
     for (size_t seg = 0; seg < n_segs; seg++) {
@@ -579,9 +584,7 @@ std::unique_ptr<GraphBridge> GraphBridge::OpenV2(const SegReadFn &read, uint16_t
         return nullptr;
     if (!read(kKindUpper, 0, buf) || !ParseUpperBlob(buf, upper_n, m, st.upper_points, err))
         return nullptr;
-    if (read(kKindDeleted, 0, buf) &&
-        !ParseDeletedBlob(buf, bridge->impl_->deleted, err))
-        return nullptr;
+    bridge->impl_->dead_nodes = CountDeadNodes(st.elems);
 
     const size_t n_segs = (base_n + kSegRecords - 1) / kSegRecords;
     for (size_t seg = 0; seg < n_segs; seg++) {
@@ -643,8 +646,7 @@ std::unique_ptr<GraphBridge> GraphBridge::OpenV2Disk(const SegReadFn &read,
         return nullptr;
     if (!read(kKindUpper, 0, buf) || !ParseUpperBlob(buf, upper_n, m, ds.upper_points, err))
         return nullptr;
-    if (read(kKindDeleted, 0, buf) && !ParseDeletedBlob(buf, im.deleted, err))
-        return nullptr;
+    im.dead_nodes = CountDeadNodes(ds.elems);
     ds.reset_capacity(base_n, upper_n);
     ds.entry_info.set(size_t(h.entry_id), size_t(h.entry_cur_layer_idx),
                       int_fast8_t(h.entry_level));

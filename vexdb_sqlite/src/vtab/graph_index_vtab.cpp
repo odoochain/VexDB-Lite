@@ -1147,10 +1147,10 @@ int vtabRowid(sqlite3_vtab_cursor *pCur, sqlite3_int64 *pRowid) {
 int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
                sqlite3_int64 *pRowid) {
     auto *vt = asVtab(pVtab);
-    // DELETE：deleted-set 标记（duck 同款，O(1)）——图不动，已删节点仍参与
-    // HNSW 导航（保连通性）但不进结果（Search 内过滤 + ef 按存活比补偿），
-    // xSync 把 KIND_DELETED 段落盘。删除占比 ≥20% 时图质量与空间退化 →
-    // 作废重建（下次查询/写事务恢复）。图加载不了（无段等）也走作废兜底。
+    // DELETE：tid 摘除（MySQL 二级索引 delete-mark 范式的精确版）——把 rowid
+    // 从其节点的 tids 摘掉，空壳节点仍参与 HNSW 导航（保连通性）但天然零输出，
+    // elems 变更随 xSync 落盘。空壳占比 ≥20% 时图质量与空间退化 → 作废重建
+    //（对应 MySQL purge）。图加载不了（无段等）也走作废兜底。
     if (argc == 1) {
         sqlite3_int64 del_rowid = sqlite3_value_int64(argv[0]);
         char *sql = sqlite3_mprintf("DELETE FROM %s WHERE rowid = %lld",
@@ -1160,16 +1160,15 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
         if (rc != SQLITE_OK) return rc;
         if (sqlite3_changes(vt->db) == 0) return SQLITE_OK;  // 行不存在：无事可做
         if (vt->row_count > 0) vt->row_count--;
-        TryOpenGraph(*vt);  // 图未加载时先 open（段在即可标记，免作废）
-        if (vt->graph) {
-            vt->graph->MarkDeleted(del_rowid);
-            sqlite3_int64 dc = sqlite3_int64(vt->graph->DeletedCount());
-            sqlite3_int64 total = CountVectors(*vt) + dc;  // 图节点数=存活+已删
-            if (dc * 5 < total) {  // deleted < 20%：保留标记
-                vt->graph_dirty = true;  // mem 模式 xSync 全量重写（含 deleted 段）
+        TryOpenGraph(*vt);  // 图未加载时先 open（段在即可摘除，免作废）
+        if (vt->graph && vt->graph->RemoveTid(del_rowid)) {
+            sqlite3_int64 dead = sqlite3_int64(vt->graph->DeadNodeCount());
+            sqlite3_int64 total = sqlite3_int64(vt->graph->Count());  // 图节点数（含空壳）
+            if (dead * 5 < total) {  // 空壳 < 20%：保留
+                vt->graph_dirty = true;  // mem 模式 xSync 全量重写
                 return SQLITE_OK;
             }
-            // 删除占比 ≥20% → 作废重建
+            // 空壳占比 ≥20% → 作废重建
         }
         vt->graph.reset();
         vt->graph_dirty = false;
@@ -1284,41 +1283,65 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
                   : (has_new_rowid ? new_rowid : old_rowid);
     if (is_insert) *pRowid = final_rowid;
 
-    // M3 图维护：内存图 INSERT 真增量，UPDATE 改了已有向量/rowid → 作废重建。
-    // 例外：meta-only UPDATE（向量与 rowid 都没变）不触及图——向量拓扑未变，
-    // 图与持久化段均仍有效。
-    // 持久化段处置分模式：MemStore=一律清段（xSync 全量重写协议）；DiskStore
-    // 增量 INSERT=不清段（未动段仍有效，dirty 段 xSync UPSERT 覆盖——清了
-    // 反而丢未动段）。
+    // 图维护（INSERT/UPDATE 均增量，MySQL 二级索引 delete-mark+insert 范式）：
+    //   INSERT          = 图内增量插入（旧节点若有同 rowid 的残留 tid 已被
+    //                     此前 DELETE/UPDATE 摘除，无二义）
+    //   UPDATE 向量     = RemoveTid(旧 rowid) + Insert(新向量)——旧节点变空壳
+    //   UPDATE 仅 rowid = RemoveTid(旧) + Insert(原向量, 新 rowid)
+    //   meta-only UPDATE = 不触图（向量拓扑未变）
+    // 持久化段处置分模式：MemStore=清段+xSync 全量重写；DiskStore=不清段
+    //（未动段仍有效，dirty 段 xSync UPSERT 覆盖——清了反而丢未动段）。
     bool rowid_changed = !is_insert && has_new_rowid && new_rowid != old_rowid;
     if (vec_nochange && !rowid_changed) return SQLITE_OK;
-    bool disk_incremental = is_insert && vt->graph && vt->graph->IsDiskMode();
-    if (!disk_incremental) {
-        rc = InvalidatePersistedGraph(*vt);
-        if (rc != SQLITE_OK) return rc;
+    if (is_insert && vt->row_count >= 0) vt->row_count++;
+
+    if (!is_insert) TryOpenGraph(*vt);  // 图未加载时先 open（段在即可摘除）
+    bool can_incremental = vt->graph != nullptr;
+    if (can_incremental && !is_insert) {
+        // UPDATE：摘旧 tid。摘不到（图与 %_vectors 漂移）作废兜底。
+        can_incremental = vt->graph->RemoveTid(old_rowid);
     }
-    if (is_insert) {
-        if (vt->row_count >= 0) vt->row_count++;
-        if (vt->graph && vt->graph->IsDeleted(final_rowid)) {
-            // resurrect：INSERT 撞已删 rowid——图里旧节点（旧向量）的 tid 仍指
-            // 该 rowid，简单从 deleted set 摘除会让旧向量当幽灵结果复活；增量
-            // 插入又会出现新旧两个同 rowid 节点。罕见场景正确性优先：作废重建。
-            vt->graph.reset();
-            vt->graph_dirty = false;
-            rc = InvalidatePersistedGraph(*vt);
-            if (rc != SQLITE_OK) return rc;
-            return SQLITE_OK;
-        }
-        if (vt->graph) {
-            // 两模式均真增量：MemStore 全内存 insert（xSync 全量重写）；
-            // DiskStore 段内 insert（dirty 段+常驻改动，xSync 只写 dirty——
-            // 写事务内 evict 写回合法，write 回调已注入）。
-            vt->graph->Insert(v.data, final_rowid);
-            vt->graph_dirty = true;
-        }
-    } else {
+    if (!can_incremental) {
+        // 图缺失/摘除失败：作废重建兜底
         vt->graph.reset();
         vt->graph_dirty = false;
+        return InvalidatePersistedGraph(*vt);
+    }
+    if (!vt->graph->IsDiskMode()) {
+        rc = InvalidatePersistedGraph(*vt);  // mem 模式协议：清段，xSync 全量重写
+        if (rc != SQLITE_OK) return rc;
+    }
+    // 取要插入的向量：INSERT/UPDATE 向量用解析好的 v.data；UPDATE 仅 rowid
+    //（vec 未触及，内容 unspecified）从 %_vectors 点查新行。
+    std::vector<float> vec_buf;
+    const float *ins_vec = v.data;
+    if (vec_nochange) {
+        char *sql = sqlite3_mprintf("SELECT vec FROM %s WHERE rowid = %lld",
+                                    vt->ShadowName("vectors").c_str(), final_rowid);
+        sqlite3_stmt *vst = nullptr;
+        rc = sqlite3_prepare_v2(vt->db, sql, -1, &vst, nullptr);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) return rc;
+        if (sqlite3_step(vst) == SQLITE_ROW && sqlite3_column_bytes(vst, 0) == vt->dim * 4) {
+            const float *p = static_cast<const float *>(sqlite3_column_blob(vst, 0));
+            vec_buf.assign(p, p + vt->dim);
+            ins_vec = vec_buf.data();
+        }
+        sqlite3_finalize(vst);
+        if (vec_buf.empty()) {  // 取不到：作废兜底
+            vt->graph.reset();
+            vt->graph_dirty = false;
+            return InvalidatePersistedGraph(*vt);
+        }
+    }
+    vt->graph->Insert(ins_vec, final_rowid);
+    vt->graph_dirty = true;
+    // 空壳占比 ≥20% → 作废重建（对应 MySQL purge）
+    sqlite3_int64 dead = sqlite3_int64(vt->graph->DeadNodeCount());
+    if (dead * 5 >= sqlite3_int64(vt->graph->Count())) {
+        vt->graph.reset();
+        vt->graph_dirty = false;
+        return InvalidatePersistedGraph(*vt);
     }
     return SQLITE_OK;
 }

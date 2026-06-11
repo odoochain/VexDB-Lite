@@ -8,8 +8,8 @@ steps:
     WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 200)
     INSERT INTO idx(rowid, embedding, category)
     SELECT i, vexdb_f32('[' || i || ',0]'), CASE WHEN i%2=0 THEN 'even' ELSE 'odd' END FROM c;
-# INSERT 事务的 xSync 已落盘 v3 段：6 种 kind（meta/elems/upper/base/vec/deleted）
-# 齐全（base/vec 段数随 SEG_RECORDS 调参漂移，只断言存在性）
+# INSERT 事务的 xSync 已落盘 v3 段：5 种 kind（meta/elems/upper/base/vec）齐全
+# （base/vec 段数随 SEG_RECORDS 调参漂移，只断言存在性）
 - query: SELECT kind, count(*) > 0 FROM idx_graph GROUP BY kind ORDER BY kind;
   expect:
   - - 0
@@ -21,8 +21,6 @@ steps:
   - - 3
     - 1
   - - 4
-    - 1
-  - - 5
     - 1
 # DiskStore 懒加载查询：结果与全内存模式逐位一致
 - query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0]' AND k = 3 ORDER BY distance;
@@ -41,7 +39,7 @@ steps:
   - - 6
   - - 8
   - - 10
-# DELETE = deleted-set 标记（O(1)）：段不清、图不重建，同事务立即过滤已删行
+# DELETE = tid 摘除（O(1)）：段不清、图不重建，同事务立即生效
 - statement: BEGIN;
 - statement: DELETE FROM idx WHERE rowid = 200;
 - query: SELECT count(*) > 0 FROM idx_graph;
@@ -52,25 +50,16 @@ steps:
   - - 199
   - - 198
 - statement: COMMIT;
-# COMMIT 后 deleted 段（kind=5）已落盘
-- query: SELECT count(*) FROM idx_graph WHERE kind = 5;
-  expect:
-  - - 1
-# UPDATE 向量仍作废重建（事务内暴力退化路径 + COMMIT 的 xSync 恢复重建）
-- statement: BEGIN;
+# UPDATE 向量增量（tid 摘除+新节点插入；段不清、图不重建）
 - statement: UPDATE idx SET embedding = vexdb_f32('[300,0]') WHERE rowid = 199;
-- query: SELECT count(*) FROM idx_graph;
-  expect:
-  - - 0
-- query: SELECT rowid FROM idx WHERE embedding MATCH '[300,0]' AND k = 1;
-  expect:
-  - - 199
-- statement: COMMIT;
-# COMMIT 的 xSync 恢复路径：超限+无段+行数>阈值 → 两阶段重建+落盘
 - query: SELECT count(*) > 0 FROM idx_graph;
   expect:
   - - 1
-# 恢复后 DiskStore 查询（200 已删不出现、199 新向量生效）
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[300,0]' AND k = 1;
+  expect:
+  - - 199
+    - 0.0
+# 旧向量位置不再命中 199（旧节点空壳零输出）
 - query: SELECT rowid FROM idx WHERE embedding MATCH '[198,0]' AND k = 2 ORDER BY distance;
   expect:
   - - 198
@@ -115,3 +104,22 @@ steps:
   - - 500
   - - 1
   - - 2
+# 空壳占比越 20% 阈值 → 作废清段 → 事务内暴力退化 → COMMIT 的 xSync
+# 两阶段重建恢复（超限+无段+行数>阈值）
+- statement: BEGIN;
+- statement: DELETE FROM idx WHERE rowid >= 150 AND rowid <= 199;
+- query: SELECT count(*) FROM idx_graph;
+  expect:
+  - - 0
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 2 ORDER BY distance;
+  expect:
+  - - 500
+  - - 1
+- statement: COMMIT;
+- query: SELECT count(*) > 0 FROM idx_graph;
+  expect:
+  - - 1
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[149,0]' AND k = 2 ORDER BY distance;
+  expect:
+  - - 149
+  - - 148
