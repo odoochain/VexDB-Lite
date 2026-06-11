@@ -1206,9 +1206,12 @@ private:
 
     void evict_if_needed(size_t incoming) {
         if (base_cache_.bytes + vec_cache_.bytes + incoming <= cache_budget_) return;
-        // 一次扫描收集 (tick, cache, seg)，按 tick 升序批量驱逐到预算 75%——
-        // 避免逐段驱逐时每次全扫 map 的 O(n²)（段粒度小、段数多时是热路径）。
-        std::vector<std::tuple<uint64, SegCache *, uint32>> order;
+        // 一次扫描收集 (dirty, tick, cache, seg)，clean 段排前、再按 tick 升序，
+        // 批量驱逐到预算 75%——dirty 段写回（UPSERT 整段）是构建期写放大的
+        // 大头（反向边更新随机散布全图 base 段，驱逐后马上被重载再改 dirty），
+        // clean 段驱逐零成本，优先丢弃；clean 不够时才动 dirty（buffer manager
+        // 的脏页优先保留惯例）。批量化避免逐段驱逐每次全扫 map 的 O(n²)。
+        std::vector<std::tuple<bool, uint64, SegCache *, uint32>> order;
         order.reserve(base_cache_.segs.size() + vec_cache_.segs.size());
         for (SegCache *c : {&base_cache_, &vec_cache_}) {
             uint64 newest = 0;
@@ -1216,12 +1219,12 @@ private:
             for (auto &kv : c->segs) {
                 if (kv.second.tick == newest) continue;  // pin 最近段：保护
                 // get_point_info 返回的段内指针在算法消费窗口内有效
-                order.emplace_back(kv.second.tick, c, kv.first);
+                order.emplace_back(kv.second.dirty, kv.second.tick, c, kv.first);
             }
         }
         std::sort(order.begin(), order.end());
         const size_t target = cache_budget_ - std::min(cache_budget_, cache_budget_ / 4);
-        for (const auto &[tick, c, seg] : order) {
+        for (const auto &[dirty, tick, c, seg] : order) {
             if (base_cache_.bytes + vec_cache_.bytes + incoming <= target) break;
             auto vit = c->segs.find(seg);
             if (vit == c->segs.end()) continue;

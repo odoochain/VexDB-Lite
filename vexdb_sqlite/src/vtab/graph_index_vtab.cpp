@@ -611,6 +611,101 @@ int RebuildInMemory(GraphIndexVtab &vt) {
     return SQLITE_OK;
 }
 
+// 两阶段构建（M9'c，对齐 PG openGauss"内存建到预算线 → flush → 磁盘逐条"）。
+// 仅在写事务内调用（xSync 恢复路径）：
+//   phase 1（MEMORY）：前 K 行（rowid 升序）预读 + 并行 BuildBulk → SerializeV2
+//   落段 → 释放（K 由预算反推：图 + 预读数组合计 ≤ limit）
+//   phase 2（DISK）：OpenV2Disk 打开段图，剩余行流式逐条 algo.insert（段缓存内
+//   增量，dirty 段超预算 evict 写回）→ flush dirty + 常驻
+// 构建期峰值 ≈ graph_memory_limit（phase 2 流式游标 O(1)；%_vectors 只读与
+// %_graph 只写不同表，同连接嵌套语句合法）。
+int BuildTwoPhase(GraphIndexVtab &vt, sqlite3_int64 n) {
+    // 构建期预算 = 4×graph_memory_limit（对齐 PG maintenance_work_mem >
+    // work_mem 的惯例：构建是一次性 maintenance 操作，临时放大仍有界；
+    // phase 2 的写工作集是反向边触碰的 base 段，预算太紧会驱逐 dirty 段
+    // 反复写回——写放大不可用）。
+    sqlite3_int64 build_budget = vt.graph_memory_limit * 4;
+    // 每行内存：图（vec+base+upper 摊销，对齐 EstimateGraphBytes）+ 预读数组
+    sqlite3_int64 per_graph = EstimateGraphBytes(vt, 1024) / 1024 + 1;
+    sqlite3_int64 per_row = per_graph + sqlite3_int64(vt.dim) * 4 + 16;
+    sqlite3_int64 K = build_budget / std::max<sqlite3_int64>(per_row, 1);
+    K = std::max<sqlite3_int64>(K, 1024);  // 太小的内存图没有锚定意义
+    if (K > n) K = n;
+
+    sqlite3_int64 last_rowid = 0;
+    {
+        // phase 1：前 K 行并行建图
+        std::vector<float> vecs;
+        std::vector<int64_t> rowids;
+        vecs.reserve(size_t(K) * vt.dim);
+        rowids.reserve(size_t(K));
+        char *sql = sqlite3_mprintf("SELECT rowid, vec FROM %s ORDER BY rowid LIMIT %lld",
+                                    vt.ShadowName("vectors").c_str(), (long long)K);
+        sqlite3_stmt *st = nullptr;
+        int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) return rc;
+        while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+            if (sqlite3_column_bytes(st, 1) != vt.dim * 4) continue;
+            const float *v = static_cast<const float *>(sqlite3_column_blob(st, 1));
+            vecs.insert(vecs.end(), v, v + vt.dim);
+            rowids.push_back(sqlite3_column_int64(st, 0));
+        }
+        sqlite3_finalize(st);
+        if (rc != SQLITE_DONE) return rc;
+        if (rowids.empty()) return SQLITE_OK;
+        last_rowid = rowids.back();
+
+        GraphBridge mem_bridge(uint16_t(vt.dim), vt.m, vt.ef_construction, vt.metric);
+        unsigned hw = std::thread::hardware_concurrency();
+        int n_threads = int(hw > 1 ? (hw > 8 ? 8 : hw) : 1);
+        try {
+            mem_bridge.BuildBulk(vecs.data(), rowids.data(), rowids.size(), n_threads);
+        } catch (const std::exception &e) {
+            return vt.SetError(e.what());
+        }
+        // 落段前清残段（进入条件=meta 缺失，可能仍有孤儿段）
+        int rc2 = InvalidatePersistedGraph(vt);
+        if (rc2 != SQLITE_OK) return rc2;
+        if (!mem_bridge.SerializeV2(MakeSegWriter(vt)))
+            return vt.SetError(sqlite3_errmsg(vt.db));
+    }  // 内存图与预读数组在此释放
+
+    // phase 2：DiskStore 打开（构建期预算）+ 剩余行流式逐条插入。构建完成后
+    // 图保留使用（预算大于查询期 limit 是软超额；图作废/重开即回到查询预算）。
+    std::string err;
+    vt.graph = GraphBridge::OpenV2Disk(MakeSegReader(vt), MakeSegWriter(vt), MakeRecReader(vt),
+                                       uint16_t(vt.dim), vt.m, vt.ef_construction, vt.metric,
+                                       size_t(build_budget), err);
+    if (!vt.graph) return vt.SetError(err.c_str());
+    vt.graph_dirty = false;
+    if (last_rowid > 0 && K < n) {
+        char *sql = sqlite3_mprintf(
+            "SELECT rowid, vec FROM %s WHERE rowid > %lld ORDER BY rowid",
+            vt.ShadowName("vectors").c_str(), (long long)last_rowid);
+        sqlite3_stmt *st = nullptr;
+        int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
+        sqlite3_free(sql);
+        if (rc != SQLITE_OK) return rc;
+        try {
+            while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+                if (sqlite3_column_bytes(st, 1) != vt.dim * 4) continue;
+                const float *v = static_cast<const float *>(sqlite3_column_blob(st, 1));
+                vt.graph->Insert(v, sqlite3_column_int64(st, 0));
+            }
+        } catch (const std::exception &e) {
+            sqlite3_finalize(st);
+            vt.graph.reset();
+            return vt.SetError(e.what());
+        }
+        sqlite3_finalize(st);
+        if (rc != SQLITE_DONE) return rc;
+    }
+    if (!vt.graph->SerializeV2(MakeSegWriter(vt)))
+        return vt.SetError(sqlite3_errmsg(vt.db));
+    return SQLITE_OK;
+}
+
 // 确保图就绪。分流（M9'）：
 //   全图估算 ≤ graph_memory_limit（或 limit=0）→ 全内存：v2 段载入，无/损坏则重建
 //   超限 → DiskStore 懒加载 open（只读，write 回调为空——查询路径绝不写库）；
@@ -1171,8 +1266,9 @@ int vtabSync(sqlite3_vtab *pVtab) {
     auto *vt = asVtab(pVtab);
 
     // M9' 恢复路径：DiskStore 形态（超 limit）下写操作作废了图与 v2 段，查询
-    // 路径不重建（峰值违背 limit）只能暴力——借写事务窗口全内存重建+落盘，
-    // 之后查询恢复 DiskStore open。峰值临时超限，两阶段磁盘构建（M9'c）根治。
+    // 路径不重建（峰值违背 limit）只能暴力——借写事务窗口两阶段构建+落盘
+    //（M9'c：前 K 行并行内存建图 flush，剩余流式磁盘逐条，峰值 ≈ limit），
+    // 之后查询恢复 DiskStore open。
     if (!vt->graph) {
         sqlite3_int64 n = CountVectors(*vt);
         bool over_limit = vt->graph_memory_limit > 0 &&
@@ -1182,8 +1278,9 @@ int vtabSync(sqlite3_vtab *pVtab) {
         std::vector<char> probe;
         auto probe_reader = MakeSegReader(*vt);
         if (probe_reader && probe_reader(0, 0, probe)) return SQLITE_OK;
-        int rc = RebuildInMemory(*vt);
+        int rc = BuildTwoPhase(*vt, n);
         if (rc != SQLITE_OK) return rc;
+        if (!vt->graph) return SQLITE_OK;  // 空表等边界
     }
 
     auto writer = MakeSegWriter(*vt);

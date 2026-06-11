@@ -1,0 +1,44 @@
+name: sqlite__vtab_twophase_build
+tags: [vex, sqlite]
+description: M9'c 两阶段构建（超限表写事务内建图：前 K 行并行内存建图落段 + 剩余行 DiskStore 流式逐条；跨 phase 边界行可查；restart 还原）
+steps:
+# limit=20000 → 构建预算 80000B，dim=16 时 K=1024；1100 行 → phase 2 插 76 行
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[16], metric=l2, ef_construction=64, graph_memory_limit=20000);
+- statement: |
+    WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 1100)
+    INSERT INTO idx(rowid, embedding)
+    SELECT i, vexdb_f32('[' || i || ',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]') FROM c;
+# COMMIT 的 xSync 已两阶段建图落段（5 种 kind 齐全）
+- query: SELECT count(DISTINCT kind) FROM idx_graph;
+  expect:
+  - - 5
+# phase 1 区域（rowid ≤ 1024）查询正确
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]' AND k = 3 ORDER BY distance;
+  expect:
+  - - 1
+    - 1.0
+  - - 2
+    - 2.0
+  - - 3
+    - 3.0
+# phase 2 区域（rowid > 1024，DiskStore 逐条插入的行）可查
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[1100,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]' AND k = 1;
+  expect:
+  - - 1100
+    - 0.0
+# 跨 phase 边界邻域（1023/1024 在 phase 1，1025/1026 在 phase 2）连通。
+# k=5 收满并列组（d=1 与 d=2 各两个），ORDER BY distance, rowid 定序防歧义
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[1024,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]' AND k = 5 ORDER BY distance, rowid;
+  expect:
+  - - 1024
+  - - 1023
+  - - 1025
+  - - 1022
+  - - 1026
+- raw_directive: restart
+# 重开：两阶段构建的段图 open 即用，跨界查询一致（k=3 收满 d=1 并列组）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[1050,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]' AND k = 3 ORDER BY distance, rowid;
+  expect:
+  - - 1050
+  - - 1049
+  - - 1051
