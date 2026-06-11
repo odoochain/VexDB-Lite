@@ -81,3 +81,22 @@ steps:
   expect:
   - - 1
   - - 2
+# M9'b：DiskStore 增量 INSERT 不作废图（段不清，dirty 段 UPSERT 覆盖），
+# 新行立即进图可查、参与过滤，restart 后增量写回的段还原正确
+- statement: INSERT INTO idx(rowid, embedding, category) VALUES (500, vexdb_f32('[0.5,0]'), 'new');
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0]' AND k = 2 ORDER BY distance;
+  expect:
+  - - 500
+    - 0.5
+  - - 1
+    - 1.0
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 3 AND category = 'new';
+  expect:
+  - - 500
+- raw_directive: restart
+- statement: INSERT INTO idx(idx) VALUES ('graph_memory_limit=20000');
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 3 ORDER BY distance;
+  expect:
+  - - 500
+  - - 1
+  - - 2

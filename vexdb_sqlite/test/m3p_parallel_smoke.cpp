@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <utility>
@@ -133,13 +134,28 @@ int main() {
                 double r2 = RecallOf(*g2, data, truth);
                 check(std::fabs(r2 - r) < 1e-9, "v2 round-trip recall identical");
             }
-            // DiskStore：预算压到最小（强制段抖动），recall 仍须逐位一致
-            auto g3 = GraphBridge::OpenV2Disk(reader, nullptr, kDim, 16, 100, VexMetric::L2,
-                                              /*cache_budget=*/1, err);
+            auto rec_reader = [&](int kind, uint32_t seg, size_t offset, size_t len,
+                                  char *dst) -> bool {
+                auto it = segs.find({kind, seg});
+                if (it == segs.end() || offset + len > it->second.size()) return false;
+                std::memcpy(dst, it->second.data() + offset, len);
+                return true;
+            };
+            // DiskStore：预算压到最小（缓存冻结后全程记录直读），recall 仍须逐位一致
+            auto g3 = GraphBridge::OpenV2Disk(reader, nullptr, rec_reader, kDim, 16, 100,
+                                              VexMetric::L2, /*cache_budget=*/1, err);
             check(g3 != nullptr, "v2 disk open ok");
             if (g3) {
                 double r3 = RecallOf(*g3, data, truth);
                 check(std::fabs(r3 - r) < 1e-9, "disk-mode recall identical under min budget");
+            }
+            // 无 read_rec（退化整段 LRU 路径）也必须正确
+            auto g4 = GraphBridge::OpenV2Disk(reader, nullptr, nullptr, kDim, 16, 100,
+                                              VexMetric::L2, /*cache_budget=*/1, err);
+            check(g4 != nullptr, "v2 disk open (no rec reader) ok");
+            if (g4) {
+                double r4 = RecallOf(*g4, data, truth);
+                check(std::fabs(r4 - r) < 1e-9, "disk-mode (seg fallback) recall identical");
             }
         }
     }

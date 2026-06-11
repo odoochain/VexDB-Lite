@@ -540,7 +540,8 @@ std::unique_ptr<GraphBridge> GraphBridge::OpenV2(const SegReadFn &read, uint16_t
 }
 
 std::unique_ptr<GraphBridge> GraphBridge::OpenV2Disk(const SegReadFn &read,
-                                                     const SegWriteFn &write, uint16_t dim,
+                                                     const SegWriteFn &write,
+                                                     const SegRecReadFn &read_rec, uint16_t dim,
                                                      int m, int ef_construction,
                                                      VexMetric metric, size_t cache_budget,
                                                      std::string &err) {
@@ -552,6 +553,7 @@ std::unique_ptr<GraphBridge> GraphBridge::OpenV2Disk(const SegReadFn &read,
     SqliteDiskStore::PageIO io;
     io.read = read;
     io.write = write;
+    io.read_rec = read_rec;
     im.disk = std::make_unique<SqliteDiskStore>(dim, uint_fast16_t(m),
                                                 uint_fast32_t(dim) * sizeof(float),
                                                 std::move(io), cache_budget);

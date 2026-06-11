@@ -797,9 +797,12 @@ public:
     static constexpr size_t SEG_RECORDS = 64;
 
     // read 返回 false=段不存在（构建中的新段，填 INVALID 模板）。
+    // read_rec（M9'b 记录粒度读）：只读段 blob 的 [offset, offset+len) 进 dst
+    //（blob 增量 I/O 只触达 offset 所在页，免整段拷贝）；缺失时退化整段 read。
     struct PageIO {
         std::function<bool(int kind, uint32 seg, std::vector<char> &out)> read;
         std::function<bool(int kind, uint32 seg, const std::vector<char> &data)> write;
+        std::function<bool(int kind, uint32 seg, size_t offset, size_t len, char *dst)> read_rec;
     };
 
     uint_fast16_t dim = 0;
@@ -1118,6 +1121,9 @@ private:
     uint64 tick_ = 0;
     std::vector<uint32> stat_scratch_;
     std::vector<std::vector<char>> val_pool_;
+    // 直读单记录的暂存（per-kind 各一条：算法层在下一次同 kind 访问前必已
+    // 消费完指针——search_layer 拷邻居/逐 id 即取即算的调用序保证）。
+    std::vector<char> base_scratch_, vec_scratch_;
 
     char *pool_alloc(size_t n) {
         val_pool_.emplace_back(n);
@@ -1125,44 +1131,75 @@ private:
     }
 
     char *base_rec(T idx, bool mark_dirty) {
-        Seg &s = load_seg(base_cache_, KIND_BASE, uint32(size_t(idx) / SEG_RECORDS));
-        if (mark_dirty) s.dirty = true;
-        return s.data.data() + (size_t(idx) % SEG_RECORDS) * base_rec_bytes();
+        return rec_ptr(base_cache_, KIND_BASE, idx, base_rec_bytes(), base_scratch_, mark_dirty);
     }
     char *vec_rec(T idx, bool mark_dirty) {
-        Seg &s = load_seg(vec_cache_, KIND_VEC, uint32(size_t(idx) / SEG_RECORDS));
-        if (mark_dirty) s.dirty = true;
-        return s.data.data() + (size_t(idx) % SEG_RECORDS) * size_t(vec_size);
+        return rec_ptr(vec_cache_, KIND_VEC, idx, size_t(vec_size), vec_scratch_, mark_dirty);
     }
 
-    Seg &load_seg(SegCache &c, int kind, uint32 seg) {
+    // 记录访问入口。读 miss 的 admission＝缓存冻结策略：预算未满才整段进
+    // 缓存（HNSW 首查从 entry 出发的访问序天然热度相关——先进缓存的就是
+    // 入口邻域热区），满了之后一律直读单记录到 per-kind scratch——彻底
+    // 消灭 thrash（段式 LRU 在"工作集>预算"的 HNSW 随机访问下每查询反复
+    // 驱逐重读，实测 QPS 崩到个位数）。写 miss 必整段载入（dirty 是段粒度，
+    // evict 时写回），不受冻结限制。
+    char *rec_ptr(SegCache &c, int kind, T idx, size_t rec_size, std::vector<char> &scratch,
+                  bool mark_dirty) {
+        const uint32 seg = uint32(size_t(idx) / SEG_RECORDS);
+        const size_t off = (size_t(idx) % SEG_RECORDS) * rec_size;
         auto it = c.segs.find(seg);
-        if (it == c.segs.end()) {
-            size_t want = seg_bytes(kind);
-            evict_if_needed(want);
-            Seg s;
-            if (!io_.read || !io_.read(kind, seg, s.data) || s.data.size() != want) {
-                fill_invalid(kind, s.data, want);
-            }
-            it = c.segs.emplace(seg, std::move(s)).first;
-            c.bytes += want;
+        if (it != c.segs.end()) {
+            it->second.tick = ++tick_;
+            if (mark_dirty) it->second.dirty = true;
+            return it->second.data.data() + off;
         }
+        const size_t want = seg_bytes(kind);
+        const bool cache_full = base_cache_.bytes + vec_cache_.bytes + want > cache_budget_;
+        if (!mark_dirty && cache_full && io_.read_rec) {
+            scratch.resize(rec_size);
+            if (!io_.read_rec(kind, seg, off, rec_size, scratch.data())) {
+                fill_invalid_rec(kind, scratch.data(), rec_size);  // 段不存在（构建中）
+            }
+            return scratch.data();
+        }
+        Seg &s = admit_seg(c, kind, seg, mark_dirty);
+        return s.data.data() + off;
+    }
+
+    Seg &admit_seg(SegCache &c, int kind, uint32 seg, bool mark_dirty) {
+        const size_t want = seg_bytes(kind);
+        evict_if_needed(want);
+        Seg s;
+        if (!io_.read || !io_.read(kind, seg, s.data) || s.data.size() != want) {
+            fill_invalid(kind, s.data, want);
+        }
+        auto it = c.segs.emplace(seg, std::move(s)).first;
+        c.bytes += want;
         it->second.tick = ++tick_;
+        if (mark_dirty) it->second.dirty = true;
         return it->second;
+    }
+
+    void fill_invalid_rec(int kind, char *rec, size_t rec_size) {
+        if (kind == KIND_BASE) {
+            const size_t nb = size_t(m) * 2;
+            T *neighbors = reinterpret_cast<T *>(rec);
+            float *dists = reinterpret_cast<float *>(rec + nb * sizeof(T));
+            for (size_t i = 0; i < nb; i++) {
+                neighbors[i] = T(INVALID_VECTOR_ID);
+                dists[i] = INVALID_DIST;
+            }
+        } else {
+            std::memset(rec, 0, rec_size);
+        }
     }
 
     void fill_invalid(int kind, std::vector<char> &data, size_t want) {
         data.assign(want, 0);
         if (kind == KIND_BASE) {
             const size_t rec = base_rec_bytes();
-            const size_t nb = size_t(m) * 2;
             for (size_t r = 0; r < SEG_RECORDS; r++) {
-                T *neighbors = reinterpret_cast<T *>(data.data() + r * rec);
-                float *dists = reinterpret_cast<float *>(data.data() + r * rec + nb * sizeof(T));
-                for (size_t i = 0; i < nb; i++) {
-                    neighbors[i] = T(INVALID_VECTOR_ID);
-                    dists[i] = INVALID_DIST;
-                }
+                fill_invalid_rec(kind, data.data() + r * rec, rec);
             }
         }
     }

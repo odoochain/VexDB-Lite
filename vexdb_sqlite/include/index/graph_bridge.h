@@ -54,6 +54,10 @@ public:
     // 记录切段）。read 返回 false=段不存在；write 必须在宿主写事务内调用。
     using SegReadFn = std::function<bool(int kind, uint32_t seg, std::vector<char> &out)>;
     using SegWriteFn = std::function<bool(int kind, uint32_t seg, const std::vector<char> &data)>;
+    // 记录粒度读（M9'b）：只读段 blob 的 [offset, offset+len) 进 dst（建议用
+    // sqlite3_blob_read 增量 I/O——只触达 offset 所在页）。
+    using SegRecReadFn =
+        std::function<bool(int kind, uint32_t seg, size_t offset, size_t len, char *dst)>;
 
     // 是否 DiskStore 模式（OpenV2Disk 打开；内存有界，段 LRU 懒加载）。
     bool IsDiskMode() const;
@@ -73,12 +77,13 @@ public:
                                                std::string &err);
 
     // DiskStore 懒加载打开（内存有界形态）：meta/elems/upper 常驻，base/vec
-    // 段按需 LRU（cache_budget 字节）。write 可为空（只读打开：查询期段永不
-    // dirty，evict 纯丢弃）。
+    // 段进缓存直到预算线（缓存冻结策略），之后读 miss 经 read_rec 直读单
+    // 记录（防 thrash）。write 用于写事务内 dirty 段 evict 写回与 xSync flush；
+    // read_rec 为空时读 miss 退化整段载入+驱逐（不推荐，仅兼容）。
     static std::unique_ptr<GraphBridge> OpenV2Disk(const SegReadFn &read, const SegWriteFn &write,
-                                                   uint16_t dim, int m, int ef_construction,
-                                                   VexMetric metric, size_t cache_budget,
-                                                   std::string &err);
+                                                   const SegRecReadFn &read_rec, uint16_t dim,
+                                                   int m, int ef_construction, VexMetric metric,
+                                                   size_t cache_budget, std::string &err);
 
 private:
     struct Impl;

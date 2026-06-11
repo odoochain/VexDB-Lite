@@ -482,8 +482,13 @@ GraphBridge::SegReadFn MakeSegReader(GraphIndexVtab &vt) {
 
 GraphBridge::SegWriteFn MakeSegWriter(GraphIndexVtab &vt) {
     return [&vt](int kind, uint32_t seg, const std::vector<char> &data) -> bool {
-        char *sql = sqlite3_mprintf("INSERT OR REPLACE INTO %s(kind, seg, data) VALUES (?1, ?2, ?3)",
-                                    vt.ShadowName("graph").c_str());
+        // UPSERT（非 INSERT OR REPLACE）：UPDATE 分支保持段行 rowid 不变——
+        // 记录粒度读的 blob handle 按 rowid 定位，REPLACE 的 delete+insert
+        // 会让同事务内后续 read_rec 的 rowid 缓存失效。
+        char *sql = sqlite3_mprintf(
+            "INSERT INTO %s(kind, seg, data) VALUES (?1, ?2, ?3)"
+            " ON CONFLICT(kind, seg) DO UPDATE SET data = excluded.data",
+            vt.ShadowName("graph").c_str());
         sqlite3_stmt *st = nullptr;
         int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
         sqlite3_free(sql);
@@ -494,6 +499,70 @@ GraphBridge::SegWriteFn MakeSegWriter(GraphIndexVtab &vt) {
         rc = sqlite3_step(st);
         sqlite3_finalize(st);
         return rc == SQLITE_DONE;
+    };
+}
+
+// 记录粒度读（M9'b）：sqlite3_blob 增量 I/O 只触达 offset 所在页，免整段拷贝。
+// (kind,seg)→rowid 持久 stmt 点查 + 缓存；blob handle reopen 复用，语句事务
+// 过期（SQLITE_ABORT）或 rowid 失效时 close 重开/重查兜底。
+GraphBridge::SegRecReadFn MakeRecReader(GraphIndexVtab &vt) {
+    char *sql = sqlite3_mprintf("SELECT rowid FROM %s WHERE kind = ?1 AND seg = ?2",
+                                vt.ShadowName("graph").c_str());
+    sqlite3_stmt *raw = nullptr;
+    int rc = sqlite3_prepare_v2(vt.db, sql, -1, &raw, nullptr);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) return nullptr;
+    std::shared_ptr<sqlite3_stmt> st(raw, sqlite3_finalize);
+
+    struct RecState {
+        std::unordered_map<uint64_t, sqlite3_int64> rowids;
+        sqlite3_blob *blob = nullptr;
+        ~RecState() {
+            if (blob) sqlite3_blob_close(blob);
+        }
+    };
+    auto state = std::make_shared<RecState>();
+    sqlite3 *db = vt.db;
+    std::string zdb = vt.schema;
+    std::string ztable = vt.name + "_graph";
+
+    return [st, state, db, zdb, ztable](int kind, uint32_t seg, size_t offset, size_t len,
+                                        char *dst) -> bool {
+        const uint64_t key = (uint64_t(uint32_t(kind)) << 32) | seg;
+        for (int pass = 0; pass < 2; pass++) {
+            sqlite3_int64 rowid;
+            auto it = state->rowids.find(key);
+            if (it != state->rowids.end() && pass == 0) {
+                rowid = it->second;
+            } else {
+                sqlite3_reset(st.get());
+                sqlite3_bind_int(st.get(), 1, kind);
+                sqlite3_bind_int64(st.get(), 2, sqlite3_int64(seg));
+                if (sqlite3_step(st.get()) != SQLITE_ROW) return false;
+                rowid = sqlite3_column_int64(st.get(), 0);
+                state->rowids[key] = rowid;
+            }
+            for (int attempt = 0; attempt < 2; attempt++) {
+                int rc2;
+                if (!state->blob) {
+                    rc2 = sqlite3_blob_open(db, zdb.c_str(), ztable.c_str(), "data", rowid, 0,
+                                            &state->blob);
+                    if (rc2 != SQLITE_OK) {
+                        state->blob = nullptr;
+                        break;  // rowid 可能失效 → 外层重查
+                    }
+                } else if (sqlite3_blob_reopen(state->blob, rowid) != SQLITE_OK) {
+                    sqlite3_blob_close(state->blob);  // 过期/失效 → 重开
+                    state->blob = nullptr;
+                    continue;
+                }
+                if (sqlite3_blob_read(state->blob, dst, int(len), int(offset)) == SQLITE_OK)
+                    return true;
+                sqlite3_blob_close(state->blob);  // ABORT（事务过期）→ 重开一次
+                state->blob = nullptr;
+            }
+        }
+        return false;
     };
 }
 
@@ -557,9 +626,11 @@ int EnsureGraph(GraphIndexVtab &vt) {
     bool over_limit = vt.graph_memory_limit > 0 &&
                       EstimateGraphBytes(vt, n) > vt.graph_memory_limit;
     if (over_limit) {
-        vt.graph = GraphBridge::OpenV2Disk(reader, nullptr, uint16_t(vt.dim), vt.m,
-                                           vt.ef_construction, vt.metric,
-                                           size_t(vt.graph_memory_limit), err);
+        // write 用于写事务内 dirty 段写回（增量 INSERT/evict）；查询期段永不
+        // dirty，不会触发写。read_rec=记录粒度直读（缓存冻结后的 miss 路径）。
+        vt.graph = GraphBridge::OpenV2Disk(reader, MakeSegWriter(vt), MakeRecReader(vt),
+                                           uint16_t(vt.dim), vt.m, vt.ef_construction,
+                                           vt.metric, size_t(vt.graph_memory_limit), err);
         if (vt.graph) vt.graph_dirty = false;
         return SQLITE_OK;  // graph 仍空 = 暴力退化信号
     }
@@ -1059,22 +1130,27 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
                   : (has_new_rowid ? new_rowid : old_rowid);
     if (is_insert) *pRowid = final_rowid;
 
-    // M3 图维护：持久化 blob 一律作废（xSync 重写）；内存图 INSERT 真增量，
-    // UPDATE 改了已有向量/rowid → 作废重建。例外：meta-only UPDATE（向量与
-    // rowid 都没变）不触及图——向量拓扑未变，图与 blob 均仍有效。
+    // M3 图维护：内存图 INSERT 真增量，UPDATE 改了已有向量/rowid → 作废重建。
+    // 例外：meta-only UPDATE（向量与 rowid 都没变）不触及图——向量拓扑未变，
+    // 图与持久化段均仍有效。
+    // 持久化段处置分模式：MemStore=一律清段（xSync 全量重写协议）；DiskStore
+    // 增量 INSERT=不清段（未动段仍有效，dirty 段 xSync UPSERT 覆盖——清了
+    // 反而丢未动段）。
     bool rowid_changed = !is_insert && has_new_rowid && new_rowid != old_rowid;
     if (vec_nochange && !rowid_changed) return SQLITE_OK;
-    rc = InvalidatePersistedGraph(*vt);
-    if (rc != SQLITE_OK) return rc;
+    bool disk_incremental = is_insert && vt->graph && vt->graph->IsDiskMode();
+    if (!disk_incremental) {
+        rc = InvalidatePersistedGraph(*vt);
+        if (rc != SQLITE_OK) return rc;
+    }
     if (is_insert) {
         if (vt->row_count >= 0) vt->row_count++;
-        if (vt->graph && !vt->graph->IsDiskMode()) {
+        if (vt->graph) {
+            // 两模式均真增量：MemStore 全内存 insert（xSync 全量重写）；
+            // DiskStore 段内 insert（dirty 段+常驻改动，xSync 只写 dirty——
+            // 写事务内 evict 写回合法，write 回调已注入）。
             vt->graph->Insert(v.data, final_rowid);
             vt->graph_dirty = true;
-        } else if (vt->graph) {
-            // M9'a：DiskStore 是只读打开（write 回调为空），增量段写回是
-            // M9'b——先作废，本事务 xSync 恢复路径重建落盘。
-            vt->graph.reset();
         }
     } else {
         vt->graph.reset();
