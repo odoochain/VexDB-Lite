@@ -8,41 +8,7 @@
 #include <cstring>
 #include <new>
 
-#if defined(PG_VEXDB_TARGET_DUCK)
-using MemoryContext = void *;
-static constexpr MemoryContext CurrentMemoryContext = nullptr;
-inline MemoryContext MemoryContextSwitchTo(MemoryContext ctx) { return ctx; }
-inline void *palloc(size_t size) { return std::malloc(size); }
-inline void *palloc0(size_t size) {
-    void *ptr = std::calloc(1, size);
-    if (!ptr) {
-        throw std::bad_alloc();
-    }
-    return ptr;
-}
-inline void *repalloc(void *ptr, size_t size) {
-    void *new_ptr = std::realloc(ptr, size);
-    if (!new_ptr) {
-        throw std::bad_alloc();
-    }
-    return new_ptr;
-}
-inline void pfree(void *ptr) { std::free(ptr); }
-/* MemoryContextAlloc 由 vexdb-duck/include/duck_pg_shim.hpp:56 提供 (避免重定义).
- * 这里补 MemoryContextAllocZero — b042c2c827 引入, duck_pg_shim.hpp 未提供, 否则
- * 编 graph_index_algorithm.h:148 的 Vector<ItemPointerData> temp 时找不到. */
-inline void *MemoryContextAllocZero(MemoryContext /*ctx*/, size_t size) { return palloc0(size); }
-inline void *palloc_aligned(size_t size, size_t align, int /*flags*/) {
-    void *ptr = nullptr;
-    if (posix_memalign(&ptr, align, size) != 0 || !ptr) {
-        throw std::bad_alloc();
-    }
-    return ptr;
-}
-#else
-#include "utils/palloc.h"
-#include "utils/memutils.h"
-#endif
+#include "platform_compat.h"
 
 namespace vtl {
 
@@ -72,12 +38,12 @@ public:
     CtxAllocator(const CtxAllocator &other) : CtxAllocatorBase(other) {}
     template <typename U> CtxAllocator(const CtxAllocator<U> &other) : CtxAllocatorBase(other) {}
 
-    /* 直接指定 _ctx 分配, 不用 MemoryContextSwitchTo 改全局 CurrentMemoryContext。
+    /* 直接指定 _ctx 分配, 不走 CurrentMemoryContext 全局切换。
      * 并行 build 时多 worker thread 并发 allocate/reallocate 各自容器(MemStore::elems、
-     * MemPool::vec/locks 等), 若走 SwitchTo 全局 CurrentMemoryContext 会 race: 一个
-     * worker 的 palloc 可能落到另一 worker 刚 Switch 的 _ctx, chunk 串到错误 context →
+     * MemPool::vec/locks 等), 若走全局 CurrentMemoryContext 会 race: 一个 worker 的分配
+     * 可能落到另一 worker 刚切换的 _ctx, chunk 串到错误 context →
      * MemoryContextDelete 时 double-free（并行建索引堆损坏）。
-     * MemoryContextAlloc / repalloc 不依赖全局 CurrentMemoryContext。 */
+     * vex_ctx_alloc / vex_realloc 指定上下文分配, 不依赖全局 CurrentMemoryContext。 */
     pointer allocate(size_type num, const void* = 0) {
         if (num == 0) return nullptr;
         return (pointer)MemoryContextAlloc(_ctx, num * sizeof(T));
@@ -164,7 +130,6 @@ struct MallocAlloc {
 template <class T, class U> bool operator==(const MallocAlloc<T>&, const MallocAlloc<U>&) { return true; }
 template <class T, class U> bool operator!=(const MallocAlloc<T>&, const MallocAlloc<U>&) { return false; }
 
-/* palloc-based allocator for PG backend (default) */
 template <typename T>
 struct PgAlloc {
     using value_type = T;
@@ -181,8 +146,8 @@ struct PgAlloc {
     template <class U, class... Args> void construct(U* p, Args&&... args) { ::new(p) U(std::forward<Args>(args)...); }
     template <class U> void destroy(U* p) { p->~U(); }
 
-    static pointer aligned_allocate(size_t align, size_t n) { return (pointer)palloc_aligned(n, align, 0); }
-    static void aligned_deallocate(pointer p, size_t) { pfree(p); }
+    static pointer aligned_allocate(size_t align, size_t n) { return (pointer)mem_align_alloc(align, n); }
+    static void aligned_deallocate(pointer p, size_t) { mem_align_free(p); }
 };
 template <class T, class U> bool operator==(const PgAlloc<T>&, const PgAlloc<U>&) { return true; }
 template <class T, class U> bool operator!=(const PgAlloc<T>&, const PgAlloc<U>&) { return false; }

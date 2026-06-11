@@ -1,0 +1,79 @@
+name: halfvec_functions
+tags: [pg-only, migrated, types, halfvec]
+description: |
+  halfvector type: I/O, distance functions, arithmetic, comparison, sorting.
+engines: [pg]
+steps:
+  # I/O and dims
+  - query: SELECT halfvector_dims('[1,2,3]'::halfvector);
+    expect: [["3"]]
+
+  # L2 distance
+  - query: SELECT l2_distance('[0,0,0]'::halfvector, '[3,4,0]'::halfvector);
+    expect: [["5"]]
+  - query: SELECT halfvector_l2_squared_distance('[0,0,0]'::halfvector, '[3,4,0]'::halfvector);
+    expect: [["25"]]
+  - query: SELECT '[0,0,0]'::halfvector <-> '[3,4,0]'::halfvector;
+    expect: [["5"]]
+
+  # Inner product
+  - query: SELECT inner_product('[1,0,0]'::halfvector, '[1,0,0]'::halfvector);
+    expect: [["1"]]
+  - query: SELECT halfvector_negative_inner_product('[1,0,0]'::halfvector, '[1,0,0]'::halfvector);
+    expect: [["-1"]]
+  - query: SELECT '[1,0,0]'::halfvector <#> '[1,0,0]'::halfvector;
+    expect: [["-1"]]
+
+  # Cosine
+  - query: SELECT cosine_distance('[1,0,0]'::halfvector, '[1,0,0]'::halfvector);
+    expect: [["0"]]
+  - query: SELECT '[1,0,0]'::halfvector <=> '[1,0,0]'::halfvector;
+    expect: [["0"]]
+
+  # Spherical
+  - query: SELECT halfvector_spherical_distance('[1,0,0]'::halfvector, '[1,0,0]'::halfvector);
+    expect: [["0"]]
+
+  # Norm and normalize
+  - query: SELECT halfvector_norm('[3,4,0]'::halfvector);
+    expect: [["5"]]
+
+  # Arithmetic
+  - query: SELECT halfvector_add('[1,2,3]'::halfvector, '[4,5,6]'::halfvector);
+    expect: [["[5,7,9]"]]
+  - query: SELECT halfvector_sub('[4,5,6]'::halfvector, '[1,2,3]'::halfvector);
+    expect: [["[3,3,3]"]]
+
+  # Subvector
+  - query: SELECT halfvector_subvector('[1,2,3,4]'::halfvector, 1, 2);
+    expect: [["[2,3]"]]
+
+  # Comparison
+  - query: SELECT '[1,2,3]'::halfvector = '[1,2,3]'::halfvector;
+    expect: [["t"]]
+  - query: SELECT '[1,2,3]'::halfvector <> '[4,5,6]'::halfvector;
+    expect: [["t"]]
+  - query: SELECT '[1,2,3]'::halfvector < '[4,5,6]'::halfvector;
+    expect: [["t"]]
+  - query: SELECT '[1,2,3]'::halfvector <= '[1,2,3]'::halfvector;
+    expect: [["t"]]
+  - query: SELECT '[4,5,6]'::halfvector >= '[1,2,3]'::halfvector;
+    expect: [["t"]]
+  - query: SELECT '[4,5,6]'::halfvector > '[1,2,3]'::halfvector;
+    expect: [["t"]]
+
+  # Sort support
+  - query: SELECT * FROM (VALUES ('[3,3,3]'::halfvector), ('[1,1,1]'::halfvector), ('[2,2,2]'::halfvector)) t(v) ORDER BY v;
+    expect: [["[1,1,1]"], ["[2,2,2]"], ["[3,3,3]"]]
+
+  # Dim mismatch → error
+  - statement: SELECT l2_distance('[1,2]'::halfvector, '[1,2,3]'::halfvector);
+    expect_error: ""
+  - statement: SELECT halfvector_add('[1,2]'::halfvector, '[1,2,3]'::halfvector);
+    expect_error: ""
+
+  # NULL propagation
+  - query: SELECT '[1,2]'::halfvector <-> NULL::halfvector IS NULL;
+    expect: [["t"]]
+  - query: SELECT halfvector_add('[1,2]'::halfvector, NULL::halfvector) IS NULL;
+    expect: [["t"]]

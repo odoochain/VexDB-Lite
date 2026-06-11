@@ -1,0 +1,72 @@
+name: graph_index_halfvec_smoke
+tags: [pg-only, migrated, index, halfvec]
+description: |
+  halfvector index creation and search for all three distance operator
+  classes (L2 / IP / Cosine) with controlled high-dim vectors.
+engines: [pg]
+steps:
+  # ---------- L2 (128 dim, 1000 rows + 5 known) ----------
+  - statement: >
+      CREATE OR REPLACE FUNCTION __rand_halfvec(dim int) RETURNS halfvector
+      LANGUAGE SQL VOLATILE AS
+      'SELECT array_agg((random()*10)::real)::halfvector FROM generate_series(1, dim);'
+  - statement: DROP TABLE IF EXISTS test_half_l2 CASCADE
+  - statement: >
+      CREATE TABLE test_half_l2 (id serial, vec halfvector(128))
+  - statement: >
+      INSERT INTO test_half_l2 (vec) SELECT __rand_halfvec(128) FROM generate_series(1, 1000);
+      INSERT INTO test_half_l2 (vec) VALUES
+        ('[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]'::halfvector),
+        ('[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]'::halfvector),
+        ('[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3]'::halfvector)
+  - statement: >
+      CREATE INDEX ON test_half_l2 USING vexdb_graph (vec halfvector_l2_ops)
+  - query: SELECT count(*) FROM test_half_l2
+    expect: [["1003"]]
+  - query: >
+      SET enable_seqscan = off;
+      SELECT id FROM test_half_l2 ORDER BY vec <-> '[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]'::halfvector LIMIT 3
+    expect: [["1001"], ["1002"], ["1003"]]
+  # L2 dist to [1x128]: id=1001 is 0, id=1002 is sqrt(128) = 11.31, id=1003 is sqrt(512) = 22.63
+
+  # ---------- IP (128 dim, 1000 random + 3 known) ----------
+  - statement: DROP TABLE IF EXISTS test_half_ip CASCADE
+  - statement: >
+      CREATE TABLE test_half_ip (id serial, vec halfvector(128))
+  - statement: >
+      INSERT INTO test_half_ip (vec) SELECT __rand_halfvec(128) FROM generate_series(1, 1000);
+      INSERT INTO test_half_ip (vec) VALUES
+        ('[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]'::halfvector),
+        ('[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]'::halfvector),
+        ('[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3]'::halfvector)
+  - statement: >
+      CREATE INDEX ON test_half_ip USING vexdb_graph (vec halfvector_ip_ops)
+  - query: SELECT count(*) FROM test_half_ip
+    expect: [["1003"]]
+  - query: >
+      SET enable_seqscan = off;
+      SELECT id FROM test_half_ip ORDER BY vec <#> '[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]'::halfvector LIMIT 3
+    expect: [["1003"], ["1002"], ["1001"]]
+  # negative dot to [1x128]: id=1001 is -128, id=1002 is -256, id=1003 is -384
+  # ORDER BY <#> (neg dot) ASC: -384(first), -256, -128(last)
+
+  # ---------- Cosine (128 dim, 1000 random + 3 known) ----------
+  - statement: DROP TABLE IF EXISTS test_half_cos CASCADE
+  - statement: >
+      CREATE TABLE test_half_cos (id serial, vec halfvector(128))
+  - statement: >
+      INSERT INTO test_half_cos (vec) SELECT __rand_halfvec(128) FROM generate_series(1, 1000);
+      INSERT INTO test_half_cos (vec) VALUES
+        ('[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]'::halfvector),
+        ('[1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::halfvector),
+        ('[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::halfvector)
+  - statement: >
+      CREATE INDEX ON test_half_cos USING vexdb_graph (vec halfvector_cosine_ops)
+  - query: SELECT count(*) FROM test_half_cos
+    expect: [["1003"]]
+  - query: >
+      SET enable_seqscan = off;
+      SELECT id FROM test_half_cos ORDER BY vec <=> '[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]'::halfvector LIMIT 2
+    expect: [["1001"], ["1002"]]
+  # cos dist to [1x128]: id=1001 is 0 (same vec), id=1002 is 1 - 2/sqrt(2*128) ≈ 0.875,
+  # id=1003 is 1 - 1/sqrt(128) ≈ 0.912. Order: 1001, 1002, 1003

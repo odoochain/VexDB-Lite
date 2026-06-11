@@ -4,7 +4,7 @@
  * Adapted for PostgreSQL from openGauss src/gausskernel/storage/access/graph_index/graph_index_inspect.cpp
  */
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 #include <boost/preprocessor/seq/for_each.hpp>
 #include <boost/preprocessor/stringize.hpp>

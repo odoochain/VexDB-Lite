@@ -3,7 +3,7 @@
  * Aligned with openGauss
  */
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 #include <vtl/optional>
 #include <vtl/vector>
@@ -15,7 +15,7 @@
 #include "graph_index/graph_index_storage.h"
 #include "graph_index/graph_index_algorithm.h"
 #include "ann_utils.h"
-#include "distance/core/distance_dispatcher.h"
+#include "distance/include/distance_dispatcher.h"
 #include "floatvector.h"
 #include "vector_buffer/local_vec_cache.h"
 
@@ -153,10 +153,12 @@ retry:
             DispatchRunner<true,
                 MetricList<Metric::L2, Metric::INNER_PRODUCT, Metric::FAST_COSINE>,
                 DistPrecisionTypeList<
-                    DistPrecisionType::FLOAT
+                    DistPrecisionType::FLOAT,
+                    DistPrecisionType::HALF,
+                    DistPrecisionType::INT8
                 >, mode>::call(metap, [&](auto &distancer) {
                 distancer.prepare(index, metap);
-                distancer.process(query);
+                distancer.process(query, metap);
                 GraphIndexAlgorithm algo{metap, store, distancer};
                 PointExtensionContext ctx(index, GRAPH_INDEX_PS_BLKNO, false);
                 /* 本地缓存(local_vec_cache)经实测证伪(命中率 0.4%,HNSW search 无时间

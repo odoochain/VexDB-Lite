@@ -14,17 +14,17 @@ static_assert(false, "don't use the file without definition DISTANCE_FUNC_NAME")
 
 #ifdef __SSE_SUPPORT__
 #include <immintrin.h>
-#include "distance/pq/horizontal_sum128.h"
+#include "distance/include/pq/horizontal_sum128.h"
 #endif
 
 #ifdef __AVX_SUPPORT__
-#include "distance/pq/transpose_avx2_inl.h"
-#include "distance/pq/horizontal_sum256.h"
+#include "distance/include/pq/transpose_avx2_inl.h"
+#include "distance/include/pq/horizontal_sum256.h"
 #endif
 
 #ifdef __AVX512_SUPPORT__ 
-#include "distance/pq/transpose_avx512_inl.h"
-#include "distance/pq/horizontal_sum512.h"
+#include "distance/include/pq/transpose_avx512_inl.h"
+#include "distance/include/pq/horizontal_sum512.h"
 #endif
 
 #ifdef __SVE_SUPPORT__

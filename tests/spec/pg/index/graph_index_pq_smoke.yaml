@@ -4,8 +4,9 @@ tags:
 - pq-v1
 description: |
   PQ v1 ship smoke. Verifies build path encode-at-flush, set_enable on
-  metapage, ADC scan, and DML-blocked guard. Requires maintenance_work_mem
-  ≥ 1GB; otherwise CREATE INDEX falls back to plain HNSW with NOTICE.
+  metapage, ADC scan, and post-build INSERT with PQ encoding. Requires
+  maintenance_work_mem ≥ 1GB; otherwise CREATE INDEX falls back to plain
+  HNSW with NOTICE.
 engines:
 - pg
 steps:
@@ -23,5 +24,7 @@ steps:
     - "99"
     - "101"
 - statement: INSERT INTO pq_smoke VALUES (1000, '[1,1,1,1,1,1,1,1]'::floatvector);
-  expect_error: "DML on a PQ-enabled vexdb_graph index"
+- query: SELECT id FROM pq_smoke WHERE id = 1000;
+  expect:
+    - "1000"
 - statement: DROP TABLE pq_smoke;

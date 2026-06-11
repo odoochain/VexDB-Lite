@@ -5,14 +5,7 @@
 #ifndef LINUX_PERF_DEF_H
 #define LINUX_PERF_DEF_H
 
-#if !defined(PG_VEXDB_TARGET_DUCK)
-#include "c.h"
-#else
-#include <cstdint>
-#include <cstddef>
-using uint32 = std::uint32_t;
-using int64 = std::int64_t;
-#endif
+#include "platform_compat.h"
 
 #ifndef ENABLE_HARDWARE_COUNTERS
 #define ENABLE_HARDWARE_COUNTERS 0

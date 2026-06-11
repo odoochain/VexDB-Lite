@@ -6,7 +6,7 @@
  * Copied from openGauss src/gausskernel/storage/access/annvector/module/pg_yield.cpp
  */
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 #ifndef __has_builtin
 #define __has_builtin(x) 0

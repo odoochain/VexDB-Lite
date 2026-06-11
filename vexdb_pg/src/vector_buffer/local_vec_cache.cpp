@@ -3,7 +3,7 @@
  * 见 include/local_vec_cache.h 的方案说明。
  */
 
-#include "pg_compat.h"     /* PG 基础类型(MemoryContext/Datum/palloc 等),须先于下面 */
+#include "platform/platform_compat.h"     /* PG 基础类型(MemoryContext/Datum/palloc 等),须先于下面 */
 
 #include "vector_buffer/local_vec_cache.h"
 #include "vector_buffer/vector_smgr.h"   /* release_vector_buffer */

@@ -1,4 +1,4 @@
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 #include "graph_index/graph_index_struct.h"
 #include "graph_index/graph_index_storage.h"
@@ -166,12 +166,11 @@ void graph_index_state_init(void)
     hash_ctl.keysize = sizeof(Oid);
     hash_ctl.entrysize = sizeof(GIStateEntry);
 
-    gi_state_hash = VexShmemInitHash(
-        "Graph Index State",
-        128,
-        &hash_ctl,
-        HASH_ELEM | HASH_BLOBS
-    );
+#if PG_VERSION_NUM >= 190000
+    gi_state_hash = ShmemInitHash("Graph Index State", 128, &hash_ctl, HASH_ELEM | HASH_BLOBS);
+#else
+    gi_state_hash = ShmemInitHash("Graph Index State", 128, 128, &hash_ctl,HASH_ELEM | HASH_BLOBS);
+#endif
 
     GraphIndexStateLock = &(GetNamedLWLockTranche("graph_index_state")->lock);
 }

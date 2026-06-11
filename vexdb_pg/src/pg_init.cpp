@@ -1,8 +1,8 @@
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 #include <cstdlib>
 #include "global_instance.h"
-#include "distance/core/distance.h"
+#include "distance/include/distance.h"
 #include "vector_buffer/vector_smgr.h"
 #include "guc_config.h"
 #include "graph_index/graph_index_state.h"
@@ -158,16 +158,13 @@ register_vecbuf_workers(void)
     }
 }
 
-void* mem_align_alloc(size_t alignment, size_t size)
-{
-    return palloc_aligned(size, alignment, 0);
-}
-
 bool vexdb_lite_is_preloaded(void) { return vexdb_lite_preloaded; }
 
 extern "C" {
 void _PG_init(void);
 }
+
+GlobalInstance g_instance;
 
 void _PG_init(void)
 {
@@ -183,26 +180,18 @@ void _PG_init(void)
     g_instance.annvec_cxt.negative_inner_product = ann_helper::get_general_distance_func(Metric::INNER_PRODUCT);
     g_instance.annvec_cxt.cosine_distance = ann_helper::get_general_distance_func(Metric::COSINE);
 
-    /* halfvector C++ implementation removed; half_* distance slots are unused. */
-    g_instance.annvec_cxt.half_l2_squared_distance = nullptr;
-    g_instance.annvec_cxt.half_negative_inner_product = nullptr;
-    g_instance.annvec_cxt.half_cosine_distance = nullptr;
+    g_instance.annvec_cxt.half_l2_squared_distance = ann_helper::get_general_half_distance_func(Metric::L2);
+    g_instance.annvec_cxt.half_negative_inner_product = ann_helper::get_general_half_distance_func(Metric::INNER_PRODUCT);
+    g_instance.annvec_cxt.half_cosine_distance = ann_helper::get_general_half_distance_func(Metric::COSINE);
 
     g_instance.annvec_cxt.int8_l2_squared_distance = ann_helper::get_general_int8_distance_func(Metric::L2);
     g_instance.annvec_cxt.int8_negative_inner_product = ann_helper::get_general_int8_distance_func(Metric::INNER_PRODUCT);
     g_instance.annvec_cxt.int8_cosine_distance = ann_helper::get_general_int8_distance_func(Metric::COSINE);
 
-    g_instance.annvec_cxt.float_to_half = nullptr;
-    g_instance.annvec_cxt.half_to_float = nullptr;
-
-    g_instance.annvec_cxt.f_flip_sign = nullptr;
-    g_instance.annvec_cxt.f_kacs_walk = nullptr;
-    g_instance.annvec_cxt.f_warmup_ip_x0_q = nullptr;
-    g_instance.annvec_cxt.f_ip_fxi = nullptr;
-    g_instance.annvec_cxt.f_mask_ip_x0_q = nullptr;
+    g_instance.annvec_cxt.float_to_half = ann_helper::get_float_to_half_func();
+    g_instance.annvec_cxt.half_to_float = ann_helper::get_half_to_float_func();
 
     g_instance.annvec_cxt.ann_cxt = nullptr;
-    g_instance.annvec_cxt.redistrib_elem_tracker = nullptr;
 
     g_instance.diskann_cxt.vector_buffers = vexdb_lite_get_vector_buffers();
     g_instance.diskann_cxt.enable_buffer_manager = vexdb_lite_get_enable_vec_buffer_manager();

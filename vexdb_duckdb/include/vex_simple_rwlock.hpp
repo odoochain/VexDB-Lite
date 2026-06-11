@@ -147,3 +147,80 @@ public:
 };
 
 }  // namespace vex_duck
+
+// ============================================================
+// PG-style concurrency shims (map PG kernel primitives to
+// std::atomic-based equivalents).
+//
+// Single-process / thread model. Not safe across processes.
+// ============================================================
+
+using LWLock = vex_duck::SimpleRWLock;
+
+// Cache-line aligned to avoid false sharing when stored in arrays.
+struct alignas(64) LWLockPadded {
+    LWLock lock;
+};
+
+enum LWLockMode {
+    LW_SHARED,
+    LW_EXCLUSIVE,
+};
+
+// PG tranche IDs — ignored on duck path but symbol must exist for
+// main-lib callers to compile.
+constexpr int LWTRANCHE_EXTEND = 0;
+
+inline void LWLockAcquire(LWLock* l, LWLockMode mode) noexcept {
+    if (mode == LW_SHARED) {
+        l->lock_shared();
+    } else {
+        l->lock();
+    }
+}
+
+inline void LWLockRelease(LWLock* l) noexcept {
+    l->unlock();
+}
+
+inline void LWLockInitialize(LWLock* l, int /*tranche*/) noexcept {
+    l->~LWLock();
+    new (l) LWLock();
+}
+
+inline bool LWLockConditionalAcquire(LWLock* l, LWLockMode mode) noexcept {
+    return mode == LW_SHARED ? l->try_lock_shared() : l->try_lock();
+}
+
+using slock_t = std::atomic_flag;
+
+inline void SpinLockInit(slock_t* s) noexcept {
+    s->clear(std::memory_order_relaxed);
+}
+
+inline void SpinLockAcquire(slock_t* s) noexcept {
+    int spin = 0;
+    while (s->test_and_set(std::memory_order_acquire)) {
+        vex_duck::detail::backoff(spin);
+    }
+}
+
+inline void SpinLockRelease(slock_t* s) noexcept {
+    s->clear(std::memory_order_release);
+}
+
+inline void pg_memory_barrier() noexcept {
+    std::atomic_thread_fence(std::memory_order_acq_rel);
+}
+
+inline void pg_compiler_barrier() noexcept {
+    std::atomic_signal_fence(std::memory_order_acq_rel);
+}
+
+inline void pg_read_barrier() noexcept {
+    std::atomic_thread_fence(std::memory_order_acquire);
+}
+
+inline void pg_write_barrier() noexcept {
+    std::atomic_thread_fence(std::memory_order_release);
+}

@@ -2,7 +2,7 @@
 #ifndef PQ_PG_ADAPTER_H
 #define PQ_PG_ADAPTER_H
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 #include "quantizer/pq_alloc.h"
 
 namespace vex_pg {

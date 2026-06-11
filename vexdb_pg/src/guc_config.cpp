@@ -2,9 +2,8 @@
  * guc_config.cpp - GUC parameter definitions for vexdb_lite
  */
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 #include "guc_config.h"
-#include "distance/distance_guc.h"
 
 /* GUC variables */
 static int vexdb_lite_ef_search = 64;
@@ -125,17 +124,6 @@ vexdb_lite_init_guc(void)
                             PGC_POSTMASTER,
                             GUC_NOT_IN_SAMPLE,
                             NULL, NULL, NULL);
-
-    DefineCustomStringVariable("vexdb.vec_architecture",
-                               "SIMD architecture selection for distance functions.",
-                               "Format: 'usage:arch[, usage:arch, ...]'. "
-                               "Usage: all, float, half, int8, l2, ip, cos, or combinations like float_l2. "
-                               "Arch: scalar, sse, avx, avx512, etc. Empty string means auto-detect.",
-                               &vexdb_lite_vec_architecture,
-                               "",
-                               PGC_SUSET,
-                               GUC_NOT_IN_SAMPLE,
-                               check_vec_arch_str, assign_vec_arch, NULL);
 
     /* Initialize session struct from GUC defaults */
     vexdb_lite_session.attr_storage.ef_search = vexdb_lite_ef_search;

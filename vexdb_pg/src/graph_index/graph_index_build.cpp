@@ -20,7 +20,7 @@
 #endif
 #include <boost/lockfree/queue.hpp>
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 extern "C" {
 #include "access/parallel.h"
@@ -37,10 +37,11 @@ extern "C" {
 #include "graph_index/graph_index_xlog.h"
 #include "ann_utils.h"
 #include "module/timer.h"
-#include "distance/core/distance_dispatcher.h"
+#include "distance/include/distance_dispatcher.h"
 #include "annkmeans.h"
 #include "floatvector.h"
-#include "pq.h"
+#include "data_type/halfvec.h"
+// #include "pq.h"
 #include "rabitq/rabitq_distancer.h"
 #include "rel_utils.h"
 
@@ -103,6 +104,14 @@ struct ThreadWorkQueue {
 
 static DistPrecisionType get_data_type(Relation index)
 {
+    Oid atttype = TupleDescAttr(index->rd_att, 0)->atttypid;
+    Oid floatvector_oid = get_floatvector_oid();
+    Oid halfvector_oid = get_halfvector_oid();
+    Oid int8vector_oid = get_int8vector_oid();
+    if (atttype == halfvector_oid)
+        return DistPrecisionType::HALF;
+    if (atttype == int8vector_oid)
+        return DistPrecisionType::INT8;
     return DistPrecisionType::FLOAT;
 }
 
@@ -179,6 +188,11 @@ public:
             }
         }
 
+        if (precision_type == DistPrecisionType::INT8 && qt_type != QuantizerType::NONE) {
+            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                errmsg("int8vector does not support quantizer")));
+        }
+
         concurrent_quant = true;
         elem_size = vector_size;
 
@@ -198,17 +212,15 @@ public:
 
     BlockNumber build_index(Relation heap, Relation index, IndexInfo *index_info)
     {
-        if (qt_type == QuantizerType::PQ) {
-            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                errmsg("PQ quantizer is not yet supported"),
-                errhint("Remove 'quantizer=pq' from the index options.")));
-        }
-        if (qt_type == QuantizerType::RABITQ) {
-            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                errmsg("RaBitQ quantizer is not yet supported"),
-                errhint("Remove 'quantizer=rabitq' from the index options.")));
-        }
         create_metapage(index);
+        bool quant_trained = init_quantizer(heap, index);
+        if (quant_trained) {
+            metap->quantizer_metainfo.set_enable();
+            MarkBufferDirty(metabuf);
+            elem_size = visit([](auto &q) { return q.code_size(); }, quantizer.value());
+        } else {
+            qt_type = QuantizerType::NONE;
+        }
         build_graph(heap, index, index_info);
         if (RelationNeedsWAL(index) || fork_num == INIT_FORKNUM) {
             log_index(index);
@@ -344,7 +356,6 @@ private:
     IdType id_type;
     QuantizerType qt_type;
     DistPrecisionType precision_type;
-    static constexpr VecStorageType storage_type = VecStorageType::PureVec;
     uint_fast16_t dimension;
     uint_fast16_t m;
     uint_fast16_t ef_construction;
@@ -481,34 +492,28 @@ private:
 
     bool init_quantizer(Relation heap, Relation index)
     {
-        if (qt_type != QuantizerType::PQ) return false;
-        if (heap == NULL) return false;
-        if (build_state != BuildState::MEMORY) {
-            ereport(NOTICE,
-                (errmsg("vexdb_graph: PQ requires memory build; "
-                        "maintenance_work_mem (%dkB) too low — falling back to plain HNSW",
-                        maintenance_work_mem_kb),
-                 errhint("Raise maintenance_work_mem to at least 1GB to enable PQ.")));
+        if (heap == NULL || qt_type == QuantizerType::NONE) {
             return false;
         }
-        const int ksub = 256;
-        int target = (int)std::min<int64>((int64)reltuples, (int64)MAX_SAMPLE_VECTOR_NUM);
-        if (target < ksub) target = ksub;
-        FloatVectorArray samples = FloatVectorArrayInit(target, dimension);
-        ann_sample_rows(samples, heap, index, dimension, target,
-                        false, DistPrecisionType::FLOAT);
-        if (samples->length < ksub) {
+
+        FloatVectorArray samples = graph_index_quantizer_sample_data(heap, index, dimension, need_norm,
+            precision_type, parallel_workers, MAX_SAMPLE_VECTOR_NUM);
+        if (samples->length < GRAPH_INDEX_MIN_QT_SAMPLES_SIZE) {
             FloatVectorArrayFree(samples);
-            ereport(NOTICE, (errmsg("vex PQ: only %d sample rows < ksub=%d, "
-                                    "skipping PQ training", samples->length, ksub)));
             return false;
         }
-        {
-            PQDistancer tmp;
-            tmp.train(index, samples, dimension, metric, false,
-                      parallel_workers, maintenance_work_mem_kb);
-            tmp.flush(index, qtcode_block, false);
+
+        if (qt_type == QuantizerType::PQ) {
+            quantizer.emplace(PQDistancer{});
+        } else if (qt_type == QuantizerType::RABITQ) {
+            quantizer.emplace(RabitqDistancer{});
         }
+
+        visit([&](auto &q) {
+            q.train(index, samples, dimension, metric, need_norm, parallel_workers, maintenance_work_mem);
+            q.flush(index, qtcode_block);
+        }, quantizer.value());
+
         FloatVectorArrayFree(samples);
         return true;
     }
@@ -525,7 +530,7 @@ private:
     template <typename D>
     void insert_on_disk(BuildCallbackDataBase &data, D &d, const char *query, ItemPointer tid)
     {
-        d.process(query);
+        d.process(query, metap);
         if (id_type == IdType::U32) {
             auto &ds = data.disk_store.template get<DiskStore<uint32>>();
             GraphIndexAlgorithm algo{ef_construction, m, ds, d};
@@ -675,7 +680,9 @@ private:
         DispatchRunner<true,
             MetricList<Metric::L2, Metric::INNER_PRODUCT, Metric::FAST_COSINE>,
             DistPrecisionTypeList<
-                DistPrecisionType::FLOAT
+                DistPrecisionType::FLOAT,
+                DistPrecisionType::HALF,
+                DistPrecisionType::INT8
             >, DispatcherMode::BUILD_PAIR>::call(
             metric, precision_type, dimension, qt_type, run_build_index);
     }
@@ -849,29 +856,35 @@ private:
         uint32 num_vectors = store.get_vector_num();
         uint32 one_chunk_elem_nums = vector_pool.get_one_chunk_elem_nums();
 
-        bool pq_on = (qt_type == QuantizerType::PQ);
-        if (pq_on) {
-            PQDistancer encoder;
-            if (!encoder.load_from_cache(index, metap->metric)) {
-                ereport(ERROR, (errmsg("PQ codebook not in cache during flush_graph")));
+        if (quantizer.has_value()) {
+            metap->quantizer_metainfo.set_enable();
+            char *code_buf = (char *)palloc(one_chunk_elem_nums * elem_size);
+            float *float_buf = NULL;
+            if (precision_type == DistPrecisionType::HALF) {
+                float_buf = alloc_floatvector(dimension);
             }
-            const size_t code_size = encoder.code_size();
-            char *code_chunk = (char *)palloc(one_chunk_elem_nums * code_size);
             for (size_t i = 0; i < vec.size(); ++i) {
                 size_t batch_offset = i * one_chunk_elem_nums;
                 size_t actual_copy_num = Min(one_chunk_elem_nums, num_vectors - batch_offset);
                 if (actual_copy_num == 0) break;
                 for (size_t j = 0; j < actual_copy_num; ++j) {
-                    float *raw_vec = (float *)(vec[i].buf + j * vector_size);
-                    char *code_dest = code_chunk + j * code_size;
-                    encoder.compute_code(raw_vec, code_dest);
+                    visit([&](auto &q) {
+                        char *vec_idx = vec[i].buf + j * vector_size;
+                        char *code_idx = code_buf + j * elem_size;
+                        if (precision_type == DistPrecisionType::HALF) {
+                            halfs_to_floats((half *)vec_idx, float_buf, dimension);
+                            q.compute_code(float_buf, code_idx);
+                        } else {
+                            q.compute_code((float *)vec_idx, code_idx);
+                        }
+                    }, quantizer.value());
                 }
-                off_t offset = batch_offset * code_size;
-                size_t nbytes = actual_copy_num * code_size;
-                vec_write(index->rd_smgr, offset, nbytes, code_chunk, false, VecStorageType::PureCode);
+                off_t offset = batch_offset * elem_size;
+                size_t nbytes = actual_copy_num * elem_size;
+                vec_write(index->rd_smgr, offset, nbytes, code_buf, false);
             }
-            pfree(code_chunk);
-            encoder.destroy();
+            if (float_buf) free_vector(float_buf);
+            pfree(code_buf);
         } else {
             for (size_t i = 0; i < vec.size(); ++i) {
                 size_t batch_offset = i * one_chunk_elem_nums;
@@ -879,15 +892,12 @@ private:
                 if (actual_copy_num == 0) break;
                 off_t offset = batch_offset * vector_size;
                 size_t nbytes = actual_copy_num * vector_size;
-                vec_write(index->rd_smgr, offset, nbytes, vec[i].buf, false, storage_type);
+                vec_write(index->rd_smgr, offset, nbytes, vec[i].buf, false);
             }
         }
 
         flush_timer.report("Flush Finished");
         LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
-        if (pq_on) {
-            metap->quantizer_metainfo.set_enable();
-        }
         MarkBufferDirty(metabuf);
         LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
         flush_timer.destroy();
@@ -911,9 +921,12 @@ private:
 
         DispatchRunner<true,
             MetricList<Metric::L2, Metric::INNER_PRODUCT, Metric::FAST_COSINE>,
-            DistPrecisionTypeList<DistPrecisionType::FLOAT>,
-            DispatcherMode::DEFAULT>::call(
-            build->metric, DistPrecisionType::FLOAT, build->dimension,
+            DistPrecisionTypeList<
+                DistPrecisionType::FLOAT,
+                DistPrecisionType::HALF,
+                DistPrecisionType::INT8
+            >, DispatcherMode::DEFAULT>::call(
+            build->metric, build->precision_type, build->dimension,
             QuantizerType::NONE, [&](auto &distancer) {
             (void)worker_id;
 
@@ -997,9 +1010,9 @@ graph_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
                 }
 
                 Pointer vec_p;
-                char *v = DatumGetVector(values[0], DistPrecisionType::FLOAT, &vec_p);
+                char *v = DatumGetVector(values[0], metap->precision_type, &vec_p);
 
-                cbdata.disk_distancer.process(v);
+                cbdata.disk_distancer.process(v, metap);
                 if (GRAPH_INDEX_PAGE_GET_META(BufferGetPage(cbdata.own_metabuf))->id_type == IdType::U32) {
                     auto &ds = cbdata.disk_store.template get<DiskStore<uint32>>();
                     GraphIndexAlgorithm algo{GRAPH_INDEX_PAGE_GET_META(BufferGetPage(cbdata.own_metabuf))->ef_construction,
@@ -1031,11 +1044,15 @@ graph_index_parallel_build_main(dsm_segment *seg, shm_toc *toc)
             data.destroy();
         };
 
+        GraphIndexMetaPage metap = GRAPH_INDEX_PAGE_GET_META(BufferGetPage(metabuf));
         DispatchRunner<true,
             MetricList<Metric::L2, Metric::INNER_PRODUCT, Metric::FAST_COSINE>,
-            DistPrecisionTypeList<DistPrecisionType::FLOAT>,
-            DispatcherMode::BUILD_PAIR>::call(
-            get_metric_from_index(indexRel), DistPrecisionType::FLOAT,
+            DistPrecisionTypeList<
+                DistPrecisionType::FLOAT,
+                DistPrecisionType::HALF,
+                DistPrecisionType::INT8
+            >, DispatcherMode::BUILD_PAIR>::call(
+            get_metric_from_index(indexRel), metap->precision_type,
             TupleDescAttr(indexRel->rd_att, 0)->atttypmod > 0 ? (uint_fast16_t)TupleDescAttr(indexRel->rd_att, 0)->atttypmod : 0,
             QuantizerType::NONE, run_build_index);
 

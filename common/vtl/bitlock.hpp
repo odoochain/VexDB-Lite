@@ -8,7 +8,7 @@
 #include <atomic>
 #include <vtl/vector>
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 struct DummyLocker {
     DummyLocker(size_t size = 0) {}

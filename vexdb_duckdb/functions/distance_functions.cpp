@@ -1,7 +1,7 @@
 #include "vex_functions.hpp"
 
-#include "distance/core/distance.h"
-#include "distance/core/distance_dispatcher.h"
+#include "distance/include/distance.h"
+#include "distance/include/distance_dispatcher.h"
 #include "distance/core/distance_utils_core.h"
 
 #include "duckdb/common/exception.hpp"

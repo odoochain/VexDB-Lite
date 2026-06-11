@@ -1,6 +1,8 @@
 #include "ann_utils.h"
 #include "floatvector.h"
-#include "pg_compat.h"
+#include "data_type/halfvec.h"
+#include "data_type/int8vec.h"
+#include "platform/platform_compat.h"
 
 extern "C" {
 #include "catalog/namespace.h"
@@ -21,6 +23,7 @@ static Oid lookup_extension_type_oid(const char *name)
 }
 
 Oid get_floatvector_oid(void) { return lookup_extension_type_oid("floatvector"); }
+Oid get_halfvector_oid(void)  { return lookup_extension_type_oid("halfvector"); }
 Oid get_int8vector_oid(void)  { return lookup_extension_type_oid("int8vector"); }
 
 size_t get_relstats_reltuples(Relation rel)
@@ -66,18 +69,25 @@ void AnnCommitBuffer(Buffer buf)
 void check_ann_attributes(Relation index)
 {
     Assert(RelationGetDescr(index)->natts >= 1);
-    Oid floatvector_oid = get_floatvector_oid();
+    Oid vector_oids[] = {get_floatvector_oid(), get_halfvector_oid(), get_int8vector_oid()};
     int natts = RelationGetDescr(index)->natts;
     Oid first_attr_oid = TupleDescAttr(RelationGetDescr(index), 0)->atttypid;
 
-    if (first_attr_oid != floatvector_oid) {
+    bool is_vector = false;
+    for (Oid oid : vector_oids) {
+        if (first_attr_oid == oid) { is_vector = true; break; }
+    }
+    if (!is_vector) {
         ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                        errmsg("The first attribute of index must be floatvector.")));
+                        errmsg("The first attribute of index must be floatvector, "
+                               "halfvector, or int8vector.")));
     }
     for (int i = 1; i < natts; ++i) {
-        if (TupleDescAttr(RelationGetDescr(index), i)->atttypid == floatvector_oid) {
-            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                            errmsg("only the first column may be a vector type")));
+        for (Oid oid : vector_oids) {
+            if (TupleDescAttr(RelationGetDescr(index), i)->atttypid == oid) {
+                ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                                errmsg("only the first column may be a vector type")));
+            }
         }
     }
     // Reject duplicate underlying-table attributes — PG does not catch
@@ -141,9 +151,15 @@ char *DatumGetVector(Datum value, DistPrecisionType type, Pointer *vec_out)
         FloatVector *tempvec = DatumGetFloatVector(value);
         *vec_out = (Pointer)tempvec;
         vector = (char *)tempvec->x;
+    } else if (type == DistPrecisionType::HALF) {
+        HalfVector *tempvec = DatumGetHalfVector(value);
+        *vec_out = (Pointer)tempvec;
+        vector = (char *)tempvec->x;
     } else {
-        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                        errmsg("Int8Vector not yet supported")));
+        Assert(type == DistPrecisionType::INT8);
+        Int8Vector *tempvec = DatumGetInt8Vector(value);
+        *vec_out = (Pointer)tempvec;
+        vector = (char *)tempvec->x;
     }
     return vector;
 }

@@ -64,7 +64,7 @@ extern "C" {
 
 #include "global_instance.h"
 #include "module/parallel_counter.h"
-#include "distance/core/distance.h"
+#include "distance/include/distance.h"
 #include "vector_buffer/vecbuf_shared.h"
 #include "floatvector.h"  /* FLOATVECTOR_MAX_DIM — pool[] must size to cover any valid floatvector dim */
 
@@ -391,8 +391,8 @@ struct VecBufferManager {
     bool find_eviction_min_max_freq_offset(int16 &min_offset, int16 &max_offset);
     void redistribute_block(int16 src_pool_offset, int16 dest_pool_offset);
     void async_expand_or_recollect_space(int16 pool_offset);
-    Pair<AsyncVecBufState, VecBuffer> async_alloc_cache_slot(Relation rel, size_t loc, uint32 elem_size, VecStorageType st);
-    VecBuffer get_buffer(Relation rel, size_t loc, uint32 elem_size, VecStorageType st, bool &success);
+    Pair<AsyncVecBufState, VecBuffer> async_alloc_cache_slot(Relation rel, size_t loc, uint32 elem_size);
+    VecBuffer get_buffer(Relation rel, size_t loc, uint32 elem_size, bool &success);
 };
 
 extern bool vector_shutdown_requested;

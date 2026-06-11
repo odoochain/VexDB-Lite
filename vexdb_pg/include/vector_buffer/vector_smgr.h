@@ -16,7 +16,6 @@ extern "C" {
 }
 #endif
 
-#include "vector_buffer/buffer_base.h"
 #include "vector_buffer/vector_buffer_manager.h"
 
 #define VERIFY_BUFFER false
@@ -34,7 +33,6 @@ struct BufferParams {
     size_t loc;
     size_t elem_size;
     int16 pool_offset;
-    VecStorageType storage_type;
     uint32 buf_offset;
     uint32 offset;
     SMGR_READ_STATUS status;
@@ -77,15 +75,15 @@ extern bool enable_vec_buffer_manager();
 extern bool vexdb_lite_is_preloaded();
 
 /* Main API */
-extern VecBuffer vec_read_buffer(Relation rel, size_t loc, size_t vec_size, VecStorageType st = VecStorageType::PureVec);
+extern VecBuffer vec_read_buffer(Relation rel, size_t loc, size_t vec_size);
 
 /* Low-level I/O */
-extern SMGR_READ_STATUS vec_read(SMgrRelation reln, off_t offset, size_t nbytes, char *buffer, VecStorageType st = VecStorageType::PureVec);
-extern void vec_write(SMgrRelation reln, off_t offset, size_t nbytes, const char *buffer, bool skip_fsync, VecStorageType st = VecStorageType::PureVec);
+extern SMGR_READ_STATUS vec_read(SMgrRelation reln, off_t offset, size_t nbytes, char *buffer);
+extern void vec_write(SMgrRelation reln, off_t offset, size_t nbytes, const char *buffer, bool skip_fsync);
 
 /* Helper functions */
-extern void read_vec_buf(Relation rel, size_t loc, size_t elem_size, char *buf, VecStorageType st = VecStorageType::PureVec);
-extern void write_vector(Relation rel, size_t loc, size_t elem_size, const char *buf, VecStorageType st = VecStorageType::PureVec);
+extern void read_vec_buf(Relation rel, size_t loc, size_t elem_size, char *buf);
+extern void write_vector(Relation rel, size_t loc, size_t elem_size, const char *buf);
 
 /* File management */
 extern void create_vec_data(Relation rel, bool need_wal);
@@ -95,20 +93,10 @@ extern void truncate_vector_file(Relation rel);
 extern void vec_invalidate_buffer_cache(Oid relNode, size_t loc, size_t elem_size);
 extern void vec_invalidate_buffer_cache(Oid relNode, size_t elem_size);
 
-/* Async I/O */
-extern void async_vec_read_batch(Relation rel, VecStorageType st, size_t elem_size, VecReadRequest *requests, int count);
-extern uint16 async_vec_wait_batch(VecReadRequest *requests, uint16 *completed_indices, uint16 *uncompleted_indices, uint16 *uncompleted_count);
-
 /* Buffer verification */
 extern size_t vec_buffer_verify(size_t elem_size, size_t &total_slot);
 
 /* Internal helpers */
 extern void release_vector_buffer(const VecBufferLoc &loc);
-
-/* AIO helpers */
-inline bool is_aio_beneficial()
-{
-    return false;
-}
 
 #endif /* VECTOR_SMGR_H */

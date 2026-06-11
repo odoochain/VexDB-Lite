@@ -80,15 +80,17 @@ include_directories(
     ${REPO_ROOT}/thirdparties   # patched Boost, takes priority over system
     ${PG_INCLUDE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${REPO_ROOT}/common/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/data_type
+    ${REPO_ROOT}/common/data_type
+    ${REPO_ROOT}/common/graph_index
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${REPO_ROOT}/common
-    ${REPO_ROOT}/common/distance/core
-    ${CMAKE_CURRENT_SOURCE_DIR}/distance
-    ${REPO_ROOT}/common/distance/pq
-    ${REPO_ROOT}/common/distance/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/distance
-    ${REPO_ROOT}/common/rabitq
+    ${REPO_ROOT}/common/platform
+    ${REPO_ROOT}/common/distance/include
+    ${REPO_ROOT}/common/distance/include/pq
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/distance
+    ${REPO_ROOT}/common/quantizer
+    ${REPO_ROOT}/common/quantizer/rabitq
     ${REPO_ROOT}/common/module
     /usr/include
 )
@@ -155,14 +157,14 @@ set(GRAPH_INDEX_SRCS
     src/graph_index/graph_index_scan.cpp
     src/graph_index/graph_index_utils.cpp
     src/graph_index/graph_index_vacuum.cpp
-    src/floatvector.cpp
+    src/data_type/floatvector.cpp
+    src/data_type/halfvec.cpp
+    src/data_type/int8vec.cpp
     src/ann_utils.cpp
     src/pg_yield.cpp
     src/vector_buffer/vector_smgr.cpp
     src/vector_buffer/local_vec_cache.cpp
-    src/pq.cpp
-    src/rabitq_distancer.cpp
-    src/quantizer_stubs.cpp
+    src/quantizer/annkmeans.cpp
     src/vector_buffer/shared_alloc_set.cpp
     src/vector_buffer/vecbuf_worker.cpp
     src/pg_init.cpp
@@ -170,30 +172,38 @@ set(GRAPH_INDEX_SRCS
 
 set(DISTANCE_SRCS
     ${REPO_ROOT}/common/distance/src/architecture.cpp
-    ${REPO_ROOT}/common/distance/src/general_dispatcher.cpp
-    ${REPO_ROOT}/common/distance/src/pq_dispatcher.cpp
-    src/distance/distance.cpp
-    src/distance/general.cpp
+    ${REPO_ROOT}/common/distance/src/general/general_dispatcher.cpp
+    ${REPO_ROOT}/common/distance/src/distance.cpp
 )
 
 set(QUANTIZER_SRCS
     ${REPO_ROOT}/common/quantizer/annkmeans.cpp
-    ${REPO_ROOT}/common/quantizer/pq_alloc.cpp
+    ${REPO_ROOT}/common/quantizer/quantizer.cpp
+    ${REPO_ROOT}/common/quantizer/pq/pq.cpp
+    ${REPO_ROOT}/common/quantizer/pq/pq_distancer.cpp
+    ${REPO_ROOT}/common/quantizer/rabitq/rabitq.cpp
+    ${REPO_ROOT}/common/quantizer/rabitq/rabitq_distancer.cpp
+    ${REPO_ROOT}/common/quantizer/rabitq/rotator.cpp
+    ${REPO_ROOT}/common/quantizer/rabitq/estimator.cpp
+    src/quantizer/rabitq_adapter.cpp
+    src/quantizer/pq_adapter.cpp
 )
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
     list(APPEND DISTANCE_SRCS
-        ${REPO_ROOT}/common/distance/src/sse_dispatcher.cpp
-        ${REPO_ROOT}/common/distance/src/avx_dispatcher.cpp
-        ${REPO_ROOT}/common/distance/src/avx512_dispatcher.cpp
-        src/distance/sse.cpp
-        src/distance/avx.cpp
-        src/distance/avx512.cpp
+        ${REPO_ROOT}/common/distance/src/general/general.cpp
+        ${REPO_ROOT}/common/distance/src/x86/sse/sse_dispatcher.cpp
+        ${REPO_ROOT}/common/distance/src/x86/sse/sse.cpp
+        ${REPO_ROOT}/common/distance/src/x86/avx/avx_dispatcher.cpp
+        ${REPO_ROOT}/common/distance/src/x86/avx/avx.cpp
+        ${REPO_ROOT}/common/distance/src/x86/avx512/avx512_dispatcher.cpp
+        ${REPO_ROOT}/common/distance/src/x86/avx512/avx512.cpp
     )
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     list(APPEND DISTANCE_SRCS
-        ${REPO_ROOT}/common/distance/src/neon_dispatcher.cpp
-        src/distance/neon.cpp
+        ${REPO_ROOT}/common/distance/src/general/general.cpp
+        ${REPO_ROOT}/common/distance/src/armv8/neon/neon_dispatcher.cpp
+        ${REPO_ROOT}/common/distance/src/armv8/neon/armv8neon.cpp
     )
 endif()
 
@@ -203,12 +213,24 @@ add_library(vexdb_lite SHARED ${GRAPH_INDEX_SRCS} ${DISTANCE_SRCS} ${QUANTIZER_S
 set_target_properties(vexdb_lite PROPERTIES PREFIX "")
 target_link_libraries(vexdb_lite PRIVATE stdc++ Threads::Threads)
 
-set_source_files_properties(src/distance/sse.cpp ${REPO_ROOT}/common/distance/src/sse_dispatcher.cpp PROPERTIES COMPILE_FLAGS "${SSE_FLAGS}")
-set_source_files_properties(src/distance/avx.cpp ${REPO_ROOT}/common/distance/src/avx_dispatcher.cpp PROPERTIES COMPILE_FLAGS "${AVX_FLAGS}")
-set_source_files_properties(src/distance/avx512.cpp ${REPO_ROOT}/common/distance/src/avx512_dispatcher.cpp PROPERTIES COMPILE_FLAGS "${AVX512_FLAGS}")
-set_source_files_properties(${REPO_ROOT}/common/quantizer/annkmeans.cpp PROPERTIES COMPILE_FLAGS "-include pg_compat.h")
+set_source_files_properties(
+    ${REPO_ROOT}/common/distance/src/x86/sse/sse.cpp
+    ${REPO_ROOT}/common/distance/src/x86/sse/sse_dispatcher.cpp
+    PROPERTIES COMPILE_FLAGS "${SSE_FLAGS}")
+set_source_files_properties(
+    ${REPO_ROOT}/common/distance/src/x86/avx/avx.cpp
+    ${REPO_ROOT}/common/distance/src/x86/avx/avx_dispatcher.cpp
+    PROPERTIES COMPILE_FLAGS "${AVX_FLAGS}")
+set_source_files_properties(
+    ${REPO_ROOT}/common/distance/src/x86/avx512/avx512.cpp
+    ${REPO_ROOT}/common/distance/src/x86/avx512/avx512_dispatcher.cpp
+    PROPERTIES COMPILE_FLAGS "${AVX512_FLAGS}")
+set_source_files_properties(${REPO_ROOT}/common/quantizer/annkmeans.cpp PROPERTIES COMPILE_FLAGS "-include platform_compat.h")
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-    set_source_files_properties(src/distance/neon.cpp ${REPO_ROOT}/common/distance/src/neon_dispatcher.cpp PROPERTIES COMPILE_FLAGS "${NEON_FLAGS}")
+    set_source_files_properties(
+        ${REPO_ROOT}/common/distance/src/armv8/neon/neon_dispatcher.cpp
+        ${REPO_ROOT}/common/distance/src/armv8/neon/armv8neon.cpp
+        PROPERTIES COMPILE_FLAGS "${NEON_FLAGS}")
 endif()
 
 install(TARGETS vexdb_lite LIBRARY DESTINATION "${PG_PKGLIB_DIR}")

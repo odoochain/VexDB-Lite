@@ -3,7 +3,7 @@
  * Handles buffer expansion, eviction, and redistribution
  */
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 #include <atomic>
 

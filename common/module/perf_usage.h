@@ -70,13 +70,7 @@
 #include <vtl/expr_helper>
 #endif
 
-#if !defined(PG_VEXDB_TARGET_DUCK)
-#include "c.h"
-#else
-#ifndef FORCE_INLINE
-#define FORCE_INLINE inline __attribute__((always_inline))
-#endif
-#endif
+#include "platform_compat.h"
 #include "linux_perf_def.h"
 #if PERF_USAGE_EVENT
 #include "linux_perf.h"

@@ -1,0 +1,77 @@
+name: int8vec_functions
+tags: [pg-only, migrated, types, int8vec]
+description: |
+  int8vector type: I/O, distance functions, arithmetic, comparison, sorting.
+engines: [pg]
+steps:
+  # I/O and dims
+  - query: SELECT int8vector_dims('[1,2,3]'::int8vector);
+    expect: [["3"]]
+
+  # L2 distance
+  - query: SELECT l2_distance('[0,0,0]'::int8vector, '[3,4,0]'::int8vector);
+    expect: [["5"]]
+  - query: SELECT int8vector_l2_squared_distance('[0,0,0]'::int8vector, '[3,4,0]'::int8vector);
+    expect: [["25"]]
+  - query: SELECT '[0,0,0]'::int8vector <-> '[3,4,0]'::int8vector;
+    expect: [["5"]]
+
+  # Inner product
+  - query: SELECT inner_product('[1,0,0]'::int8vector, '[1,0,0]'::int8vector);
+    expect: [["1"]]
+  - query: SELECT int8vector_negative_inner_product('[1,0,0]'::int8vector, '[1,0,0]'::int8vector);
+    expect: [["-1"]]
+  - query: SELECT '[1,0,0]'::int8vector <#> '[1,0,0]'::int8vector;
+    expect: [["-1"]]
+
+  # Cosine
+  - query: SELECT cosine_distance('[1,0,0]'::int8vector, '[1,0,0]'::int8vector);
+    expect: [["0"]]
+  - query: SELECT '[1,0,0]'::int8vector <=> '[1,0,0]'::int8vector;
+    expect: [["0"]]
+
+  # Spherical
+  - query: SELECT int8vector_spherical_distance('[1,0,0]'::int8vector, '[1,0,0]'::int8vector);
+    expect: [["0"]]
+
+  # Norm
+  - query: SELECT int8vector_norm('[3,4,0]'::int8vector);
+    expect: [["5"]]
+
+  # Arithmetic
+  - query: SELECT int8vector_add('[1,2,3]'::int8vector, '[4,5,6]'::int8vector);
+    expect: [["[5,7,9]"]]
+  - query: SELECT int8vector_sub('[4,5,6]'::int8vector, '[1,2,3]'::int8vector);
+    expect: [["[3,3,3]"]]
+
+  # Subvector
+  - query: SELECT int8vector_subvector('[1,2,3,4]'::int8vector, 1, 2);
+    expect: [["[2,3]"]]
+
+  # Comparison
+  - query: SELECT '[1,2,3]'::int8vector = '[1,2,3]'::int8vector;
+    expect: [["t"]]
+  - query: SELECT '[1,2,3]'::int8vector <> '[4,5,6]'::int8vector;
+    expect: [["t"]]
+  - query: SELECT '[1,2,3]'::int8vector < '[4,5,6]'::int8vector;
+    expect: [["t"]]
+  - query: SELECT '[1,2,3]'::int8vector <= '[1,2,3]'::int8vector;
+    expect: [["t"]]
+  - query: SELECT '[4,5,6]'::int8vector >= '[1,2,3]'::int8vector;
+    expect: [["t"]]
+  - query: SELECT '[4,5,6]'::int8vector > '[1,2,3]'::int8vector;
+    expect: [["t"]]
+
+  # Sort support
+  - query: SELECT * FROM (VALUES ('[3,3,3]'::int8vector), ('[1,1,1]'::int8vector), ('[2,2,2]'::int8vector)) t(v) ORDER BY v;
+    expect: [["[1,1,1]"], ["[2,2,2]"], ["[3,3,3]"]]
+
+  # Dim mismatch → error
+  - statement: SELECT l2_distance('[1,2]'::int8vector, '[1,2,3]'::int8vector);
+    expect_error: ""
+  - statement: SELECT int8vector_add('[1,2]'::int8vector, '[1,2,3]'::int8vector);
+    expect_error: ""
+
+  # NULL propagation
+  - query: SELECT '[1,2]'::int8vector <-> NULL::int8vector IS NULL;
+    expect: [["t"]]

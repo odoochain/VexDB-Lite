@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "graph_index/graph_index_algorithm.h"
-#include "distance/core/distance_dispatcher.h"
+#include "distance/include/distance_dispatcher.h"
 
 #include "vex/vex_disk_block_store.hpp"
 #include "vex_distance.hpp"

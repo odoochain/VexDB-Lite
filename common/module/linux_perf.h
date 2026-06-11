@@ -24,11 +24,7 @@ static_assert(false, "linux_perf.h must be compiled with c++17 or greater");
 #include <array>
 #include <type_traits>
 
-#if !defined(PG_VEXDB_TARGET_DUCK)
-#include "c.h"
-#else
-using int64 = long long;
-#endif
+#include "platform_compat.h"
 #include <vtl/expr_helper>
 
 #include "linux_perf_def.h"

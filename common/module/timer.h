@@ -13,7 +13,6 @@
 #include "c.h"
 #include "utils/elog.h"
 #include "postmaster/bgworker.h"
-#include "leak_checker.h"
 
 /* PostgreSQL compatibility: IsBgWorkerProcess */
 #ifndef IsBgWorkerProcess
@@ -21,7 +20,7 @@
 #endif
 
 namespace ann_helper {
-class Timer : public LeakChecker {
+class Timer {
 public:
     constexpr static size_t time_buf_len = 64ul;
     char buf[time_buf_len];
@@ -40,9 +39,13 @@ public:
     Timer() : _start(std::chrono::high_resolution_clock::now()) {}
     explicit Timer(size_t nloop)
         : _start(std::chrono::high_resolution_clock::now()), _nloop(nloop) {}
-    Timer(size_t nloop, size_t step_size, char* index_name = NULL, char* part_index_name = NULL);
+    Timer(size_t nloop = 0, size_t step_size = 0, char* /*index_name*/ = NULL, char* /*part_index_name*/ = NULL)
+        : _start(std::chrono::high_resolution_clock::now()),
+          _nloop(nloop),
+          _step_size(step_size) {}
     void reset() { _start = std::chrono::high_resolution_clock::now(); }
-    void set_stage(char* stage);
+    void set_stage(char* /*stage*/) {}
+    void destroy() {}
     void reset_step(size_t new_step_size)
     {
         _step_size = new_step_size;
@@ -185,6 +188,17 @@ public:
     }
 
     template <typename... Args>
+    void inc_n_loop_count_forground_report(size_t n, const char *msg, Args &&...args)
+    {
+        size_t cur_nloop_count = __atomic_add_fetch(&_nloop_count, n, __ATOMIC_RELAXED);
+        if (cur_nloop_count % _step_size == 0) {
+            _need_report = true;
+        }
+
+        forground_report(msg, std::forward<Args>(args)...);
+    }
+
+    template <typename... Args>
     void forground_report(const char *msg, Args &&...args)
     {
         if(_need_report && !IsBgWorkerProcess()) {
@@ -202,8 +216,6 @@ public:
             _need_report = false;
         }
     }
-    
-    void destroy();
 
 };
 } /* namespace ann_helper */

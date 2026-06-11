@@ -7,7 +7,7 @@
  * so we can reuse it for vector storage without additional mechanisms.
  */
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 #include <algorithm>
 #include <atomic>
@@ -56,7 +56,7 @@
 #include "vector_buffer/vector_smgr.h"
 #include "vector_buffer/vector_buffer_manager.h"
 #include "vector_buffer/local_vec_cache.h"
-#include "distance/core/distance.h"
+#include "distance/include/distance.h"
 #include "module/parallel_counter.h"
 #include "module/size_format.h"
 #include "global_instance.h"
@@ -579,7 +579,7 @@ void VecBufferManager::async_expand_or_recollect_space(int16 pool_offset)
     }
 }
 
-Pair<AsyncVecBufState, VecBuffer> VecBufferManager::async_alloc_cache_slot(Relation rel, size_t loc, uint32 elem_size, VecStorageType st)
+Pair<AsyncVecBufState, VecBuffer> VecBufferManager::async_alloc_cache_slot(Relation rel, size_t loc, uint32 elem_size)
 {
     uint32 dim = get_effective_dim(elem_size);
     int16 pool_offset = get_pool_offset(dim);
@@ -638,7 +638,7 @@ retry:
     return { AsyncVecBufState::CACHE_HIT_ACTIVE_READ, VecBuffer(pool_offset, new_loc.buf_offset, new_loc.offset, buf) };
 }
 
-VecBuffer VecBufferManager::get_buffer(Relation rel, size_t loc, uint32 elem_size, VecStorageType st, bool &success)
+VecBuffer VecBufferManager::get_buffer(Relation rel, size_t loc, uint32 elem_size, bool &success)
 {
     uint32 dim = get_effective_dim(elem_size);
     if (dim < min_cached_dim) {
@@ -657,7 +657,7 @@ VecBuffer VecBufferManager::get_buffer(Relation rel, size_t loc, uint32 elem_siz
     }
     VecBufferPool &cur_pool = *pool[pool_offset];
     BufferSignature sig = {rel->rd_smgr->smgr_rlocator.locator.relNumber, loc};
-    BufferParams params = {rel, loc, elem_size, pool_offset, st};
+    BufferParams params = {rel, loc, elem_size, pool_offset};
     uint32 retry_count = 0;
     constexpr uint32 max_retry = 16u;
 retry:
@@ -794,7 +794,7 @@ VecBufferLoc::VecBufferLoc(BufferParams &params)
     size_t dim = (params.elem_size + 3) / 4;
     char *temp = mgr.get_vector(loc.buf_offset, loc.offset, dim);
     off_t offset = (off_t)params.loc * params.elem_size;
-    params.status = vec_read(params.rel->rd_smgr, offset, params.elem_size, temp, params.storage_type);
+    params.status = vec_read(params.rel->rd_smgr, offset, params.elem_size, temp);
     if (unlikely(params.status != SMGR_RD_OK)) {
         if (pool.try_push_freelist(loc)) {
             loc.set_empty();
@@ -877,7 +877,7 @@ void init_vector_smgr()
 }
 
 /* Main API: vec_read_buffer */
-VecBuffer vec_read_buffer(Relation rel, size_t loc, size_t vec_size, VecStorageType st)
+VecBuffer vec_read_buffer(Relation rel, size_t loc, size_t vec_size)
 {
     bool success;
     if (unlikely(!rel->rd_smgr)) {
@@ -898,21 +898,21 @@ VecBuffer vec_read_buffer(Relation rel, size_t loc, size_t vec_size, VecStorageT
             return VecBuffer(VECBUF_LOCAL_BORROW, cloc.buf_offset, cloc.offset, buf);
         }
         g_local_vec_cache.note_miss();
-        VecBuffer res = VecBufMgr->get_buffer(rel, loc, vec_size, st, success);
+        VecBuffer res = VecBufMgr->get_buffer(rel, loc, vec_size, success);
         if (success) {
             g_local_vec_cache.insert(sig, res.loc, res.pool_offset, dim);
             return VecBuffer(VECBUF_LOCAL_BORROW, res.loc.buf_offset, res.loc.offset, res.buf);
         }
         res.pool_offset = -1;
         res.buf = alloc_vector(vec_size);
-        read_vec_buf(rel, loc, vec_size, res.buf, st);
+        read_vec_buf(rel, loc, vec_size, res.buf);
         return res;
     }
-    VecBuffer res = VecBufMgr->get_buffer(rel, loc, vec_size, st, success);
+    VecBuffer res = VecBufMgr->get_buffer(rel, loc, vec_size, success);
     if (!success) {
         res.pool_offset = -1;
         res.buf = alloc_vector(vec_size);
-        read_vec_buf(rel, loc, vec_size, res.buf, st);
+        read_vec_buf(rel, loc, vec_size, res.buf);
     }
     return res;
 }
@@ -1034,11 +1034,9 @@ void release_vector_buffer(const VecBufferLoc &loc)
  * Returns SMGR_RD_OK on success, SMGR_RD_NO_BLOCK if file not found,
  * SMGR_RD_CRC_ERROR on read error.
  */
-SMGR_READ_STATUS vec_read(SMgrRelation reln, off_t offset, size_t nbytes, 
-                          char *buffer, VecStorageType vec_storage_type)
+SMGR_READ_STATUS vec_read(SMgrRelation reln, off_t offset, size_t nbytes, char *buffer)
 {
     size_t read_bytes = 0;
-    (void)vec_storage_type;  /* unused for now */
     
     while (read_bytes < nbytes) {
         /* Calculate block number and get segment */
@@ -1180,11 +1178,9 @@ SMGR_READ_STATUS vec_read(SMgrRelation reln, off_t offset, size_t nbytes,
  * vec_write - write vector data directly to file
  * Can throw ERROR on write failure.
  */
-void vec_write(SMgrRelation reln, off_t offset, size_t nbytes,
-                const char *buffer, bool skip_fsync, VecStorageType vec_storage_type)
+void vec_write(SMgrRelation reln, off_t offset, size_t nbytes, const char *buffer, bool skip_fsync)
 {
     size_t written = 0;
-    (void)vec_storage_type;
     (void)skip_fsync;
     
     while (written < nbytes) {
@@ -1325,19 +1321,19 @@ void vec_write(SMgrRelation reln, off_t offset, size_t nbytes,
     }
 }
 
-void read_vec_buf(Relation rel, size_t loc, size_t elem_size, char *buf, VecStorageType vec_storage_type)
+void read_vec_buf(Relation rel, size_t loc, size_t elem_size, char *buf)
 {
     off_t offset = loc * elem_size;
-    SMGR_READ_STATUS status = vec_read(rel->rd_smgr, offset, elem_size, buf, vec_storage_type);
+    SMGR_READ_STATUS status = vec_read(rel->rd_smgr, offset, elem_size, buf);
     if (unlikely(status != SMGR_RD_OK)) {
         report_read_vector_error(status, rel, loc);
     }
 }
 
-void write_vector(Relation rel, size_t loc, size_t elem_size, const char *buf, VecStorageType vec_storage_type)
+void write_vector(Relation rel, size_t loc, size_t elem_size, const char *buf)
 {
     off_t offset = loc * elem_size;
-    vec_write(rel->rd_smgr, offset, elem_size, buf, false, vec_storage_type);
+    vec_write(rel->rd_smgr, offset, elem_size, buf, false);
 }
 
 /* Create/truncate vector file */
@@ -1379,11 +1375,11 @@ void truncate_vector_file(Relation rel)
 }
 
 /* Async I/O - simplified for PostgreSQL (sync fallback) */
-void async_vec_read_batch(Relation rel, VecStorageType st, size_t elem_size, VecReadRequest *requests, int count)
+void async_vec_read_batch(Relation rel, size_t elem_size, VecReadRequest *requests, int count)
 {
     for (int i = 0; i < count; ++i) {
         VecReadRequest *req = &requests[i];
-        VecBuffer vec_buf = vec_read_buffer(rel, req->loc, elem_size, st);
+        VecBuffer vec_buf = vec_read_buffer(rel, req->loc, elem_size);
         req->io_ready = true;
         req->vector_buf = vec_buf;
         req->buf = vec_buf.buf;

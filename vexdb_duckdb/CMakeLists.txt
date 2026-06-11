@@ -12,7 +12,9 @@ include_directories(
     include
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../common
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/data_type
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/graph_index
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common/platform
     ${Boost_INCLUDE_DIRS}
 )
 

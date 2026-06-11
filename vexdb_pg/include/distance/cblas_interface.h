@@ -7,7 +7,7 @@
 #define CBLAS_INTERFACE_H
 
 #include "pg_config.h"
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 #ifdef ENABLE_OPENBLAS
 #include <cblas.h>
 

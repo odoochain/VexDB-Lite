@@ -2,15 +2,17 @@
 #define ANN_UTILS_H
 
 #include <cstddef>
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 #include "floatvector.h"
-#include "distance/core/distance.h"
+#include "distance/include/distance.h"
 
 #define VEC_ELEM_SIZE(precision_type) \
-    (precision_type == DistPrecisionType::FLOAT ? sizeof(float) : sizeof(int8_t))
+    (precision_type == DistPrecisionType::HALF ? sizeof(int16) : \
+     precision_type == DistPrecisionType::FLOAT ? sizeof(float) : sizeof(int8_t))
 
 /* Type OID helpers - runtime lookup */
 extern Oid get_floatvector_oid(void);
+extern Oid get_halfvector_oid(void);
 extern Oid get_int8vector_oid(void);
 
 extern size_t get_relstats_reltuples(Relation rel);

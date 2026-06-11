@@ -12,18 +12,6 @@
 #include <vtl/pair>
 #include <vtl/internal/expr.hpp>
 
-#if defined(VTL_TESTING) || defined(VTL_BENCHMARK)
-#define VTL_TEST_REQUIRE_MOCKS
-#include "mock/c.h"
-#include "mock/utils/dynahash.h"
-#include "mock/utils/palloc.h"
-#include "mock/utils/elog.h"
-#include "mock/utils/memtrace.h"
-#elif defined(PG_VEXDB_TARGET_DUCK)
-#else
-#include "utils/palloc.h"
-#endif
-
 namespace impl {
 template <typename T, typename = void>
 struct DefaultHasher {

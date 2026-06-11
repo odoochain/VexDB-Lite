@@ -1,49 +1,50 @@
-// K-means clustering for codebook training, ported from openGauss
-// src/include/access/annvector/annkmeans.h.
-//
-// Backend-neutral. The PG-only sampling helpers (setupKmeansState,
-// ann_sample_rows, GetSampleNumbers) are NOT ported — the caller supplies a
-// PQFloatArray of samples already (each backend has its own way to fetch
-// rows from the table).
-//
-// Algorithm: Elkan's accelerated K-means with k-means++ initialization, plus
-// the QuickCenters fast path when samples.length <= centers.maxlen.
-//
-// Reference:
-//   Elkan, "Using the Triangle Inequality to Accelerate k-Means", ICML 2003
-//   Arthur & Vassilvitskii, "k-means++", SODA 2007
+// K-means clustering with k-means++ initialization and Elkan's accelerated
+// algorithm.  Platform-agnostic — uses palloc/pfree/ereport via
+// platform_compat.h.  Parallelism via std::thread.
+
 #pragma once
 
-#include "quantizer/pq_alloc.h"
+#include "data_type/floatvector.h"
+#include "distance/include/distance.h"
+#include "distance/include/distance_func.h"
 
-#include <cstdint>
+/// Lightweight k-means clusterer with k-means++ initialization and Elkan's
+/// accelerated algorithm (triangle inequality pruning).
+///
+/// Usage:
+///   KMeans kmeans(samples, K, metric, /*ispq=*/false, work_mem, nthreads);
+///   kmeans.train();
+///   FloatVectorArray centers = kmeans.get_centroids();
+///   kmeans.destroy();
+class KMeans {
+public:
+    /// @param samples     Input vectors (borrowed; must outlive this object)
+    /// @param cluster_num Number of clusters to produce (K)
+    /// @param metric      Distance metric (used when ispq=false)
+    /// @param ispq        true = PQ sub-vector training (always L2_SQRT, no norm)
+    /// @param work_mem    Per-call memory limit in KB (0 = no limit)
+    /// @param nthreads    Parallel threads for Elkan's algorithm (1 = sequential)
+    KMeans(FloatVectorArray samples, int cluster_num, Metric metric, bool ispq,
+           int work_mem = 0, int nthreads = 1);
 
-namespace vex {
-namespace quantizer {
+    /// Run k-means.  Allocates and computes `cluster_num` centroids.
+    /// Uses Elkan's algorithm when samples > K, QuickCenters otherwise.
+    void train();
 
-// Distance function compatible with the existing src/distance/core/ dispatcher.
-// Wraps the function pointer so K-means stays decoupled from the dispatcher's
-// exact symbol names (the duck adapter currently aliases this to
-// `ann_helper::distance_func`; PG aliases to its own typedef).
-using KMeansDistanceFn = float (*)(const void *a, const void *b, uint16_t dim);
+    /// Result centroids (FloatVectorArray, maxlen == cluster_num).
+    /// Valid only after train().
+    FloatVectorArray get_centroids() { return centers; }
 
-struct KMeansState {
-    KMeansDistanceFn distance_fn = nullptr;
-    KMeansDistanceFn norm_fn     = nullptr;  // optional: apply unit-norm to centers (cosine)
-    bool             skip_check_duplicate = false;
+    /// Free internally allocated resources (centroids buffer).
+    void destroy();
+
+private:
+    FloatVectorArray samples;
+    int cluster_num;
+    int work_mem;
+    int nthreads;
+    Metric metric;
+    ann_helper::distance_func dist_func{nullptr};
+    ann_helper::distance_func norm_func{nullptr};
+    FloatVectorArray centers{nullptr};
 };
-
-// Run k-means on `samples`, write `centers->maxlen` centroids into `centers`.
-// On entry: centers->data must point to caller-allocated buffer of size
-//           centers->maxlen * centers->dim, centers->length must be 0.
-// On exit:  centers->length == centers->maxlen.
-// `avg_work_mem_kb` caps internal scratch allocations; openGauss passes
-// maintenance_work_mem.
-void AnnKmeans(const KMeansState &state,
-               PQFloatArray samples,
-               PQFloatArray &centers,
-               int avg_work_mem_kb,
-               const PQContext &ctx);
-
-} // namespace quantizer
-} // namespace vex

@@ -9,7 +9,7 @@
 #include "vex/vex_duck_memstore.hpp"
 #include "vex/vex_duckdb_compat.hpp"
 #include "vex_hnsw_node.hpp"
-#include "duck_pg_shim.hpp"
+#include "vex_simple_rwlock.hpp"
 
 #include <cfloat>
 #include <cstddef>
@@ -41,9 +41,6 @@ using int32 = int32_t;
 using int64 = int64_t;
 using uint = unsigned int;
 using Size = size_t;
-
-class BaseObject {
-};
 
 struct PointExtensionContext;
 

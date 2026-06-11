@@ -1,4 +1,4 @@
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 extern "C" {
 #include "optimizer/optimizer.h"

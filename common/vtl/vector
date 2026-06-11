@@ -17,10 +17,6 @@ using Vector = std::vector<T, Allocator>;
 #include <algorithm>    /* min, max */
 #include <initializer_list>
 #include <vtl/internal/expr.hpp>
-#if !defined(PG_VEXDB_TARGET_DUCK)
-#include "utils/palloc.h"
-#include "utils/memutils.h"
-#endif
 
 template <typename T, class Allocator = DEFAULT_ALLOCATOR<T>, bool auto_init = true>
 class Vector {

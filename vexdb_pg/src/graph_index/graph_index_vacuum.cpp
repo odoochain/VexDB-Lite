@@ -2,14 +2,14 @@
  * graph_index_vacuum.cpp - Graph index vacuum implementation (single-process)
  */
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 #include "graph_index/graph_index.h"
 #include "graph_index/graph_index_storage.h"
 #include "graph_index/graph_index_algorithm.h"
 #include "graph_index/graph_index_struct.h"
 #include "ann_utils.h"
-#include "distance/core/distance_dispatcher.h"
+#include "distance/include/distance_dispatcher.h"
 
 class GraphIndexVacuum {
 public:
@@ -122,7 +122,9 @@ private:
             DispatchRunner<true,
                 MetricList<Metric::L2, Metric::INNER_PRODUCT, Metric::FAST_COSINE>,
                 DistPrecisionTypeList<
-                    DistPrecisionType::FLOAT
+                    DistPrecisionType::FLOAT,
+                    DistPrecisionType::HALF,
+                    DistPrecisionType::INT8
                 >, mode>::call(metap, [&](auto &distancer) {
                     distancer.prepare(index, metap);
                     GraphIndexAlgorithm algo{metap, store, distancer};

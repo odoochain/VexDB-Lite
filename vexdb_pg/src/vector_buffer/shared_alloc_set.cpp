@@ -2,7 +2,7 @@
  * SharedAllocSet - MemoryContext backed by main shared memory
  */
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 
 #include <string.h>
 

@@ -11,7 +11,7 @@
 #include <cmath>
 #include <utility>
 
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 #include "module/size_format.h"
 
 struct IndexInspectResult {

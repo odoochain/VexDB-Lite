@@ -1,4 +1,4 @@
-#include "pg_compat.h"
+#include "platform/platform_compat.h"
 #include "graph_index/graph_index_param.h"
 #include "graph_index/graph_index.h"
 #include "graph_index/graph_index_state.h"

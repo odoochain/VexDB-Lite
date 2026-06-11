@@ -2,7 +2,7 @@
 static_assert(false, "don't use the file without definition DISTANCE_FUNC_NAME");
 #endif
 
-#include "distance/pq/pq_endecode.h"
+#include "distance/include/pq/pq_endecode.h"
 
 
 /// Returns the distance to a single code.
@@ -95,8 +95,8 @@ void distance_four_codes_generic(
 #endif
 
 namespace {
-#include "distance/pq/horizontal_sum128.h"
-#include "distance/pq/horizontal_sum256.h"
+#include "distance/include/pq/horizontal_sum128.h"
+#include "distance/include/pq/horizontal_sum256.h"
 
 // processes a single code for M=4, ksub=256, nbits=8
 float distance_single_code_avx2_pqdecoder8_m4(

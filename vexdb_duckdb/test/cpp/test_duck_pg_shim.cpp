@@ -1,4 +1,4 @@
-// Unit test for duck_pg_shim.hpp
+// Unit test for vex_simple_rwlock.hpp (PG-style concurrency shims)
 //
 // 编译：c++ -std=c++17 -O2 -pthread test_duck_pg_shim.cpp \
 //          -I../../include -o test_duck_pg_shim
@@ -6,7 +6,7 @@
 //
 // 验证：模拟主库 MemStore 的锁使用模式，确保 shim 正确工作。
 
-#include "duck_pg_shim.hpp"
+#include "vex_simple_rwlock.hpp"
 
 #include <atomic>
 #include <cassert>

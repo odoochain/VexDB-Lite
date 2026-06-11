@@ -7,9 +7,6 @@
 
 #include <vtl/allocator>
 #include <vtl/internal/expr.hpp>
-#if !defined(PG_VEXDB_TARGET_DUCK)
-#include "utils/palloc.h"
-#endif
 
 template <class Allocator = DEFAULT_ALLOCATOR<uint64>>
 class BitVector : public Allocator {
