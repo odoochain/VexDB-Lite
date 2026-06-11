@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -39,15 +40,45 @@ public:
     void Search(const float *query, size_t k, uint32_t ef_search,
                 std::vector<std::pair<double, int64_t>> &out);
 
+    // 带谓词 KNN（M7' 图内过滤）：filter 返回 false 的 rowid 不进结果，
+    // 但其节点仍参与图遍历导航（filtered-HNSW 标准语义，连通性不受谓词影响）。
+    // ef_search 由调用方按选择性补偿后传入；filter 为空等价无过滤。
+    void Search(const float *query, size_t k, uint32_t ef_search,
+                const std::function<bool(int64_t)> &filter,
+                std::vector<std::pair<double, int64_t>> &out);
+
     size_t Count() const;
 
-    // 序列化整图为单 blob（格式版本见 cpp 内 kGraphBlobVersion）。
-    void SerializeToBlob(std::vector<char> &out) const;
+    // ---- 格式 v2：段式（M9'，%_graph(kind, seg, data)）----
+    // kind：0=meta 1=elems 2=upper 3=base 段 4=vec 段（base/vec 按 4096 条定长
+    // 记录切段）。read 返回 false=段不存在；write 必须在宿主写事务内调用。
+    using SegReadFn = std::function<bool(int kind, uint32_t seg, std::vector<char> &out)>;
+    using SegWriteFn = std::function<bool(int kind, uint32_t seg, const std::vector<char> &data)>;
 
-    // 从 blob 还原。参数（dim/m/metric）不匹配或格式不识别返回 nullptr 并填 err。
-    static std::unique_ptr<GraphBridge> LoadFromBlob(const char *data, size_t len,
-                                                     uint16_t dim, int m, int ef_construction,
-                                                     VexMetric metric, std::string &err);
+    // 是否 DiskStore 模式（OpenV2Disk 打开；内存有界，段 LRU 懒加载）。
+    bool IsDiskMode() const;
+    // DiskStore 模式专用：有未落盘的 dirty 段/常驻改动（全内存模式恒 false，
+    // dirty 由 vtab 的 graph_dirty 管）。
+    bool HasDirty() const;
+
+    // 序列化写出 v2 段。全内存模式=全量切段；DiskStore 模式=dirty 段 +
+    // meta/elems/upper（常驻部分体量小，全量重写）。返回 false=write 回调失败。
+    // 非 const：DiskStore 模式写出后清 dirty 标记。
+    bool SerializeV2(const SegWriteFn &write);
+
+    // 从 v2 段全量载入（全内存模式，性能形态）。无 meta 段/校验失败返回
+    // nullptr 并填 err。
+    static std::unique_ptr<GraphBridge> OpenV2(const SegReadFn &read, uint16_t dim, int m,
+                                               int ef_construction, VexMetric metric,
+                                               std::string &err);
+
+    // DiskStore 懒加载打开（内存有界形态）：meta/elems/upper 常驻，base/vec
+    // 段按需 LRU（cache_budget 字节）。write 可为空（只读打开：查询期段永不
+    // dirty，evict 纯丢弃）。
+    static std::unique_ptr<GraphBridge> OpenV2Disk(const SegReadFn &read, const SegWriteFn &write,
+                                                   uint16_t dim, int m, int ef_construction,
+                                                   VexMetric metric, size_t cache_budget,
+                                                   std::string &err);
 
 private:
     struct Impl;

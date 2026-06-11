@@ -22,10 +22,14 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <new>
 #include <shared_mutex>
+#include <stdexcept>
+#include <tuple>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -738,6 +742,464 @@ private:
         bp.stat_words.assign((m * 2 + 31) / 32, 0);
         return bp;
     }
+    UpperPointRec MakeUpperPoint() const {
+        UpperPointRec up;
+        up.neighbors_info.assign(m * 2, T(INVALID_VECTOR_ID));
+        up.dists.assign(m, INVALID_DIST);
+        up.stat_words.assign((m + 31) / 32, 0);
+        return up;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// DiskStore（M9'：内存有界的段式磁盘 store，对齐 PG 双层设计的 SQLite 版）。
+//
+// 数据分层（1M 行 128 维 m=16 量化）：
+//   常驻：meta/entry（KB）、elems/rowid 映射（~16MB）、upper 层（~13MB）
+//   段式 LRU：base 邻居+dists（~256MB）、向量（~512MB）—— 按 SEG_RECORDS 条
+//   定长记录切段，经注入的 PageIO 回调读写 %_graph(kind, seg, data) shadow 行。
+//
+// 设计要点：
+//   - 单线程（SQLite 串行模型）：锁全 no-op；不支持并行 BuildBulk。
+//   - store 不持 sqlite3 句柄：I/O 经 PageIO std::function 注入，全程主线程。
+//   - 指针生命期：get_distance_batch/get_distance 内部直取段指针即取即算
+//     （零拷贝、绝不跨段存活）；get_data（喂 cand.val 的 get_neighbors_data
+//     路径）走 val pool 拷贝，reset_neighbors_val_pool 整体释放——对齐 PG
+//     DiskStore 的 val pool 语义。get_point_info 返回的段内指针靠"每 cache
+//     pin 最近访问段"保护（算法层在下一次段访问前必已消费完，见 search_layer
+//     拷贝邻居的调用序）。
+//   - dirty 段只在写事务内产生（构建/增量插入）；只读打开 write 回调为空，
+//     evict dirty 段时 write 缺失视为协议违规（抛错）。
+// ---------------------------------------------------------------------------
+template <typename IdType = uint32, typename elem_type = GraphIndexPoint>
+class DiskStore {
+public:
+    using T = IdType;
+    using point_type = elem_type;
+    using BasePointRec = typename MemStore<IdType, elem_type>::BasePointRec;
+    using UpperPointRec = typename MemStore<IdType, elem_type>::UpperPointRec;
+
+    static constexpr bool use_dist_cache = false;
+    static constexpr bool has_occlusion_cache = true;
+    static constexpr bool clustered = false;
+
+    // %_graph(kind, seg, data) 的 kind 取值（格式 v2，GraphBridge 序列化共用）
+    static constexpr int KIND_META = 0;
+    static constexpr int KIND_ELEMS = 1;
+    static constexpr int KIND_UPPER = 2;
+    static constexpr int KIND_BASE = 3;
+    static constexpr int KIND_VEC = 4;
+    // 段粒度：HNSW 查询是随机点查，段越大 I/O 放大越狠（读整段只用一条记录，
+    // miss 成本=整段 blob 读）。64 条 → vec 段 32KB（128 维）/ base 段 16KB
+    //（m=16），向 PG 8KB page 的取向靠拢；1M 行 ≈ 15625 段/类，%_graph 行数
+    // 与 SegCache map 均无压力。实测 4096 条（2MB 段）在 8MB 预算下换页
+    // 放大到 QPS≈1 不可用。
+    static constexpr size_t SEG_RECORDS = 64;
+
+    // read 返回 false=段不存在（构建中的新段，填 INVALID 模板）。
+    struct PageIO {
+        std::function<bool(int kind, uint32 seg, std::vector<char> &out)> read;
+        std::function<bool(int kind, uint32 seg, const std::vector<char> &data)> write;
+    };
+
+    uint_fast16_t dim = 0;
+    uint_fast16_t m = 0;
+    uint_fast32_t vec_size = 0;
+    bool normalize_vectors_ = false;
+
+    GraphIndexEntryInfo entry_info;
+    std::vector<point_type> elems;          // 常驻：id → rowids
+    std::vector<UpperPointRec> upper_points;  // 常驻：upper 层全量
+    bool upper_dirty = false;               // upper/elems/meta 的写改标记（xSync 全量重写，体量小）
+
+    size_t next_base_id_ = 0;
+    size_t next_upper_id_ = 0;
+
+    DiskStore(uint_fast16_t dim_in, uint_fast16_t m_in, uint_fast32_t vec_size_in,
+              PageIO io, size_t cache_budget_bytes)
+        : dim(dim_in), m(m_in), vec_size(vec_size_in), io_(std::move(io)),
+          cache_budget_(cache_budget_bytes) {
+        entry_info.set(INVALID_VECTOR_ID, INVALID_VECTOR_ID, -1);
+        stat_scratch_.assign((size_t(m) * 2 + 31) / 32, 0);
+        // 预算下限：base/vec 各至少 2 段（pin 最近段 + 载入新段），防饿死
+        size_t min_budget = 2 * (seg_bytes(KIND_BASE) + seg_bytes(KIND_VEC));
+        if (cache_budget_ < min_budget) cache_budget_ = min_budget;
+    }
+
+    size_t base_rec_bytes() const { return size_t(m) * 2 * (sizeof(T) + sizeof(float)); }
+    size_t seg_bytes(int kind) const {
+        return SEG_RECORDS * (kind == KIND_BASE ? base_rec_bytes() : size_t(vec_size));
+    }
+
+    // ---- entry（常驻，单线程无锁） ----
+    template <bool exclusive = false, bool bottom_only = false>
+    std::pair<GraphIndexEntryInfo, bool> get_entry(int_fast8_t = 0) {
+        return {entry_info, true};
+    }
+    void release_entry_lock(bool) {}
+    void set_entrypoint(T id, T cur_layer_idx, int_fast8_t level) {
+        entry_info.set(id, cur_layer_idx, level);
+        upper_dirty = true;
+    }
+
+    // ---- id 分配 / 元素（写路径，M9'b/c） ----
+    template <bool is_base_layer>
+    T assign_vector_id() {
+        if constexpr (is_base_layer) {
+            T id = T(next_base_id_++);
+            if (elems.size() < next_base_id_) elems.resize(next_base_id_);
+            return id;
+        } else {
+            T idx = T(next_upper_id_++);
+            if (upper_points.size() < next_upper_id_)
+                upper_points.resize(next_upper_id_, MakeUpperPoint());
+            return idx;
+        }
+    }
+    void add_async_id(T) {}
+    template <typename Func>
+    void for_each_async_id(Func &&) {}
+
+    void add_elem(PointExtensionContext &, T id, const ItemPointerData &tid) {
+        if (elems.size() <= size_t(id)) elems.resize(size_t(id) + 1);
+        elems[id].tids.push_back(tid);
+        upper_dirty = true;
+    }
+    void add_elem(PointExtensionContext &, T id, Span<const ItemPointerData> tids) {
+        if (elems.size() <= size_t(id)) elems.resize(size_t(id) + 1);
+        for (const auto &tid : tids) elems[id].tids.push_back(tid);
+        upper_dirty = true;
+    }
+    template <typename Func>
+    bool apply_elem(T id, Func &&func) { return func(elems[id]); }
+    template <typename Func>
+    void get_itempointer(T id, Func &&func) { func(&elems[id]); }
+
+    // ---- 向量（vec 段） ----
+    void add_vector(T id, const char *query) {
+        const char *store_data = query;
+        std::vector<char> normalized;
+        if (normalize_vectors_) {
+            normalized.resize(vec_size);
+            auto *dst = reinterpret_cast<float *>(normalized.data());
+            auto *src = reinterpret_cast<const float *>(query);
+            float norm2 = 0.0f;
+            for (uint_fast16_t i = 0; i < dim; i++) norm2 += src[i] * src[i];
+            if (norm2 > 0.0f) {
+                float inv = 1.0f / std::sqrt(norm2);
+                for (uint_fast16_t i = 0; i < dim; i++) dst[i] = src[i] * inv;
+            } else {
+                std::memcpy(dst, src, vec_size);
+            }
+            store_data = normalized.data();
+        }
+        char *rec = vec_rec(id, /*mark_dirty=*/true);
+        std::memcpy(rec, store_data, vec_size);
+    }
+    template <typename Distancer>
+    void add_vector(Distancer &, T id, const char *query) { add_vector(id, query); }
+
+    // get_data：喂 cand.val（get_neighbors_data 路径，指针跨多次段访问存活）
+    // → val pool 拷贝。热路径距离计算不走这里（见 get_distance*）。
+    char *get_data(T id) {
+        char *buf = pool_alloc(vec_size);
+        std::memcpy(buf, vec_rec(id, false), vec_size);
+        return buf;
+    }
+    void reset_neighbors_val_pool() { val_pool_.clear(); }
+
+    struct my_buf {
+        std::vector<char> owned;
+        char *get_vecbuf() const { return const_cast<char *>(owned.data()); }
+        void release() {}
+    };
+    my_buf read_data(T id) {
+        my_buf b;
+        b.owned.assign(vec_rec(id, false), vec_rec(id, false) + vec_size);
+        return b;
+    }
+
+    template <typename Distancer, typename IdVec>
+    void get_distance_batch(const Distancer &distancer, const char *query, const IdVec &ids,
+                            float *dists) {
+        // 逐 id 即取即算：段指针绝不跨次存活（vals 收集式的 MemStore 模式在
+        // 段 LRU 下会 dangling——第二段载入可能 evict 第一段）。
+        for (size_t i = 0; i < ids.size(); ++i) {
+            dists[i] = distancer.get_distance_single(query, vec_rec(ids[i], false), uint16(dim));
+        }
+    }
+    template <typename Distancer>
+    float get_distance(const Distancer &distancer, const char *query, T id) {
+        return distancer.get_distance_single(query, vec_rec(id, false), uint16(dim));
+    }
+    template <typename Distancer>
+    float get_distance(const Distancer &distancer, const char *query, const char *val) {
+        return distancer.get_distance_single(query, val, uint16(dim));
+    }
+    template <typename Distancer>
+    float get_distance_precise(const Distancer &distancer, const char *query, const char *val) {
+        return distancer.get_distance_single(query, val, uint16(dim));
+    }
+    template <typename Distancer>
+    float get_distance_est(const Distancer &distancer, const char *query, T id) {
+        return get_distance(distancer, query, id);
+    }
+
+    bool fetch_vec_from_heap(ItemPointerData tid, char *dest) {
+        auto id = static_cast<size_t>(tid.row_id);
+        if (id >= next_base_id_) return false;
+        std::memcpy(dest, vec_rec(T(id), false), vec_size);
+        return true;
+    }
+    bool fetch_vec_from_heap(PointExtensionContext &, T id, char *dest) {
+        if (size_t(id) >= next_base_id_) return false;
+        std::memcpy(dest, vec_rec(id, false), vec_size);
+        return true;
+    }
+
+    // ---- 锁（单线程全 no-op） ----
+    template <bool is_base_layer, bool shared_lock>
+    void lock_point(T) {}
+    template <bool is_base_layer, bool shared_lock>
+    void unlock_point(T) {}
+
+    // ---- 图结构访问 ----
+    template <bool is_base_layer>
+    auto get_point_info(T idx) {
+        if constexpr (is_base_layer) {
+            char *rec = base_rec(idx, false);
+            return std::make_tuple(reinterpret_cast<T *>(rec), idx, idx);
+        } else {
+            auto &up = upper_points[idx];
+            return std::make_tuple(up.neighbors_info.data(), up.lower_layer_idx, up.id);
+        }
+    }
+
+    template <bool is_base_layer, typename CandVec, typename CandType>
+    void get_neighbors(CandVec &out, const CandType &cand) {
+        if constexpr (is_base_layer) {
+            char *rec = base_rec(cand.cur_layer_idx, false);
+            const T *neighbors = reinterpret_cast<const T *>(rec);
+            const float *dists = reinterpret_cast<const float *>(rec + size_t(m) * 2 * sizeof(T));
+            out.reserve(m * 2);
+            for (size_t i = 0; i < size_t(m) * 2; ++i) {
+                if (neighbors[i] == T(INVALID_VECTOR_ID)) break;
+                out.emplace_back(neighbors[i], neighbors[i], dists[i]);
+            }
+        } else {
+            auto &up = upper_points[cand.cur_layer_idx];
+            const T *neighbors = up.neighbors_info.data();
+            const T *cur_layer_idxs = neighbors + m;
+            const float *dists = up.dists.data();
+            out.reserve(m);
+            for (size_t i = 0; i < size_t(m); ++i) {
+                if (neighbors[i] == T(INVALID_VECTOR_ID)) break;
+                out.emplace_back(neighbors[i], cur_layer_idxs[i], dists[i]);
+            }
+        }
+    }
+
+    // stat_words 是 dead 写（has_stat 恒 false，select_neighbors 把它当 scratch
+    // 写但从不回读跨调用），给共享 scratch buffer，不进段格式。
+    template <bool is_base_layer>
+    auto get_neighbor_stats(T idx) {
+        if constexpr (is_base_layer) {
+            char *rec = base_rec(idx, true);  // update_reverse_edges 会写 dists[pruned]
+            auto *dists = reinterpret_cast<float *>(rec + size_t(m) * 2 * sizeof(T));
+            return std::make_pair(dists, BitSpan<uint32>(stat_scratch_.data(), size_t(m) * 2));
+        } else {
+            auto &up = upper_points[idx];
+            upper_dirty = true;
+            return std::make_pair(up.dists.data(), BitSpan<uint32>(stat_scratch_.data(), size_t(m)));
+        }
+    }
+    bool has_stat(BitSpan<uint32>) const { return false; }
+    void set_stat(BitSpan<uint32>) {}
+
+    template <bool is_base_layer>
+    void set_neighbor(T cur_layer_idx, int16 pruned, T newpoint_id, T newpoint_cur_layer_idx) {
+        if (pruned < 0) return;
+        if constexpr (is_base_layer) {
+            if (size_t(pruned) < size_t(m) * 2) {
+                char *rec = base_rec(cur_layer_idx, true);
+                reinterpret_cast<T *>(rec)[pruned] = newpoint_id;
+            }
+        } else {
+            if (size_t(pruned) < size_t(m)) {
+                auto &up = upper_points[cur_layer_idx];
+                up.neighbors_info[pruned] = newpoint_id;
+                up.neighbors_info[size_t(m) + size_t(pruned)] = newpoint_cur_layer_idx;
+                upper_dirty = true;
+            }
+        }
+    }
+    void set_base_neighbors(T id, const T *neighbors_id) {
+        char *rec = base_rec(id, true);
+        std::memcpy(rec, neighbors_id, size_t(m) * 2 * sizeof(T));
+    }
+    void set_upper_neighbors(T idx, const T *neighbors_info) {
+        upper_points[idx].neighbors_info.assign(neighbors_info, neighbors_info + size_t(m) * 2);
+        upper_dirty = true;
+    }
+    void add_basepoint(T id, const T *neighbors_id) {
+        if (size_t(id) >= next_base_id_) next_base_id_ = size_t(id) + 1;
+        set_base_neighbors(id, neighbors_id);
+    }
+    void add_upperpoint(T cur_layer_idx, T lower_layer_idx, T id, const T *neighbors_info) {
+        if (size_t(cur_layer_idx) >= upper_points.size()) {
+            upper_points.resize(size_t(cur_layer_idx) + 1, MakeUpperPoint());
+            next_upper_id_ = upper_points.size();
+        }
+        auto &up = upper_points[cur_layer_idx];
+        up.lower_layer_idx = lower_layer_idx;
+        up.id = id;
+        up.neighbors_info.assign(neighbors_info, neighbors_info + size_t(m) * 2);
+        upper_dirty = true;
+    }
+
+    // ---- 杂项接口（对齐 MemStore） ----
+    void *get_index() const { return nullptr; }
+    DistPrecisionType get_precision() const { return static_cast<DistPrecisionType>(0); }
+    uint16 get_dim() const { return uint16(dim); }
+    uint32 get_vecsize() const { return uint32(vec_size); }
+    uint32 get_elemsize() const { return uint32(vec_size); }
+    size_t get_vector_num() const { return elems.size(); }
+    template <bool is_base_layer>
+    size_t max_id() const {
+        return (is_base_layer ? next_base_id_ : next_upper_id_) + 16;
+    }
+    void reset_capacity(size_t base_n, size_t upper_n) {
+        next_base_id_ = base_n;
+        next_upper_id_ = upper_n;
+        if (elems.size() < base_n) elems.resize(base_n);
+        if (upper_points.size() < upper_n) upper_points.resize(upper_n, MakeUpperPoint());
+    }
+    void destroy() {}
+
+    // ---- dirty 段写回（xSync 调用；写事务内才合法） ----
+    template <typename WriteFn>
+    void flush_dirty_segs(WriteFn &&write_fn) {
+        for (auto &kv : base_cache_.segs) {
+            if (kv.second.dirty) {
+                write_fn(KIND_BASE, kv.first, kv.second.data);
+                kv.second.dirty = false;
+            }
+        }
+        for (auto &kv : vec_cache_.segs) {
+            if (kv.second.dirty) {
+                write_fn(KIND_VEC, kv.first, kv.second.data);
+                kv.second.dirty = false;
+            }
+        }
+    }
+    bool has_dirty() const {
+        if (upper_dirty) return true;
+        for (auto &kv : base_cache_.segs)
+            if (kv.second.dirty) return true;
+        for (auto &kv : vec_cache_.segs)
+            if (kv.second.dirty) return true;
+        return false;
+    }
+
+private:
+    struct Seg {
+        std::vector<char> data;
+        bool dirty = false;
+        uint64 tick = 0;
+    };
+    struct SegCache {
+        std::unordered_map<uint32, Seg> segs;
+        size_t bytes = 0;
+    };
+
+    PageIO io_;
+    size_t cache_budget_ = 0;
+    SegCache base_cache_, vec_cache_;
+    uint64 tick_ = 0;
+    std::vector<uint32> stat_scratch_;
+    std::vector<std::vector<char>> val_pool_;
+
+    char *pool_alloc(size_t n) {
+        val_pool_.emplace_back(n);
+        return val_pool_.back().data();
+    }
+
+    char *base_rec(T idx, bool mark_dirty) {
+        Seg &s = load_seg(base_cache_, KIND_BASE, uint32(size_t(idx) / SEG_RECORDS));
+        if (mark_dirty) s.dirty = true;
+        return s.data.data() + (size_t(idx) % SEG_RECORDS) * base_rec_bytes();
+    }
+    char *vec_rec(T idx, bool mark_dirty) {
+        Seg &s = load_seg(vec_cache_, KIND_VEC, uint32(size_t(idx) / SEG_RECORDS));
+        if (mark_dirty) s.dirty = true;
+        return s.data.data() + (size_t(idx) % SEG_RECORDS) * size_t(vec_size);
+    }
+
+    Seg &load_seg(SegCache &c, int kind, uint32 seg) {
+        auto it = c.segs.find(seg);
+        if (it == c.segs.end()) {
+            size_t want = seg_bytes(kind);
+            evict_if_needed(want);
+            Seg s;
+            if (!io_.read || !io_.read(kind, seg, s.data) || s.data.size() != want) {
+                fill_invalid(kind, s.data, want);
+            }
+            it = c.segs.emplace(seg, std::move(s)).first;
+            c.bytes += want;
+        }
+        it->second.tick = ++tick_;
+        return it->second;
+    }
+
+    void fill_invalid(int kind, std::vector<char> &data, size_t want) {
+        data.assign(want, 0);
+        if (kind == KIND_BASE) {
+            const size_t rec = base_rec_bytes();
+            const size_t nb = size_t(m) * 2;
+            for (size_t r = 0; r < SEG_RECORDS; r++) {
+                T *neighbors = reinterpret_cast<T *>(data.data() + r * rec);
+                float *dists = reinterpret_cast<float *>(data.data() + r * rec + nb * sizeof(T));
+                for (size_t i = 0; i < nb; i++) {
+                    neighbors[i] = T(INVALID_VECTOR_ID);
+                    dists[i] = INVALID_DIST;
+                }
+            }
+        }
+    }
+
+    void evict_if_needed(size_t incoming) {
+        if (base_cache_.bytes + vec_cache_.bytes + incoming <= cache_budget_) return;
+        // 一次扫描收集 (tick, cache, seg)，按 tick 升序批量驱逐到预算 75%——
+        // 避免逐段驱逐时每次全扫 map 的 O(n²)（段粒度小、段数多时是热路径）。
+        std::vector<std::tuple<uint64, SegCache *, uint32>> order;
+        order.reserve(base_cache_.segs.size() + vec_cache_.segs.size());
+        for (SegCache *c : {&base_cache_, &vec_cache_}) {
+            uint64 newest = 0;
+            for (auto &kv : c->segs) newest = std::max(newest, kv.second.tick);
+            for (auto &kv : c->segs) {
+                if (kv.second.tick == newest) continue;  // pin 最近段：保护
+                // get_point_info 返回的段内指针在算法消费窗口内有效
+                order.emplace_back(kv.second.tick, c, kv.first);
+            }
+        }
+        std::sort(order.begin(), order.end());
+        const size_t target = cache_budget_ - std::min(cache_budget_, cache_budget_ / 4);
+        for (const auto &[tick, c, seg] : order) {
+            if (base_cache_.bytes + vec_cache_.bytes + incoming <= target) break;
+            auto vit = c->segs.find(seg);
+            if (vit == c->segs.end()) continue;
+            if (vit->second.dirty) {
+                // dirty 段只在写事务内产生；只读打开不可能到达这里
+                if (!io_.write || !io_.write(c == &base_cache_ ? KIND_BASE : KIND_VEC, seg,
+                                             vit->second.data)) {
+                    throw std::runtime_error("vexdb-sqlite: dirty segment evict without write IO");
+                }
+            }
+            c->bytes -= vit->second.data.size();
+            c->segs.erase(vit);
+        }
+    }
+
     UpperPointRec MakeUpperPoint() const {
         UpperPointRec up;
         up.neighbors_info.assign(m * 2, T(INVALID_VECTOR_ID));

@@ -12,18 +12,25 @@ steps:
   expect:
   - - 50
 - raw_directive: restart
-# 损坏持久化 blob（垃圾字节）。shadow 表对 vtab 方法外的普通 SQL 默认可写。
-- statement: UPDATE idx_graph SET data = X'DEADBEEF' WHERE blk = 0;
+# 损坏 v2 meta 段（垃圾字节）。shadow 表对 vtab 方法外的普通 SQL 默认可写。
+- statement: UPDATE idx_graph SET data = X'DEADBEEF' WHERE kind = 0;
 - raw_directive: restart
 # load 失败（bad magic）→ 静默 fall-through 从 %_vectors 重建 → 查询仍正确
 - query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[50,50]' AND k = 1;
   expect:
   - - 50
     - 0.0
-# 截断式损坏（合法 magic 但截断）同样兜得住
+# 截断式损坏（合法 magic 但 meta 截断）同样兜得住
 - raw_directive: restart
-- statement: UPDATE idx_graph SET data = X'56585347' WHERE blk = 0;
+- statement: UPDATE idx_graph SET data = X'56585347' WHERE kind = 0;
 - raw_directive: restart
 - query: SELECT rowid FROM idx WHERE embedding MATCH '[77,77]' AND k = 1;
   expect:
   - - 77
+# 段缺失式损坏：删 vec 段 → OpenV2 段缺失报错 fall-through 重建
+- raw_directive: restart
+- statement: DELETE FROM idx_graph WHERE kind = 4;
+- raw_directive: restart
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[50,50]' AND k = 1;
+  expect:
+  - - 50

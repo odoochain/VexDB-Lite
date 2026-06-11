@@ -1,0 +1,83 @@
+name: sqlite__vtab_diskstore
+tags: [vex, sqlite]
+description: M9'a DiskStore（graph_memory_limit 超限走段式懒加载；v2 段落盘/查询正确性/事务内暴力退化/xSync 恢复重建/模式切换/restart）
+steps:
+# limit=20000 字节：200 行 2 维图估算 ~65KB 超限 → 查询期 DiskStore 形态
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], category TEXT, metric=l2, graph_memory_limit=20000);
+- statement: |
+    WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 200)
+    INSERT INTO idx(rowid, embedding, category)
+    SELECT i, vexdb_f32('[' || i || ',0]'), CASE WHEN i%2=0 THEN 'even' ELSE 'odd' END FROM c;
+# INSERT 事务的 xSync 已落盘 v2 段：5 种 kind（meta/elems/upper/base/vec）齐全
+# （base/vec 段数随 SEG_RECORDS 调参漂移，只断言存在性）
+- query: SELECT kind, count(*) > 0 FROM idx_graph GROUP BY kind ORDER BY kind;
+  expect:
+  - - 0
+    - 1
+  - - 1
+    - 1
+  - - 2
+    - 1
+  - - 3
+    - 1
+  - - 4
+    - 1
+# DiskStore 懒加载查询：结果与全内存模式逐位一致
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0]' AND k = 3 ORDER BY distance;
+  expect:
+  - - 1
+    - 1.0
+  - - 2
+    - 2.0
+  - - 3
+    - 3.0
+# DiskStore × M7' 图内过滤正交（filter 钩子在算法层，store 无感）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND category = 'even' ORDER BY distance;
+  expect:
+  - - 2
+  - - 4
+  - - 6
+  - - 8
+  - - 10
+# 事务内：DELETE 清段作废图 → 同事务查询走暴力退化（无图也正确）
+- statement: BEGIN;
+- statement: DELETE FROM idx WHERE rowid = 200;
+- query: SELECT count(*) FROM idx_graph;
+  expect:
+  - - 0
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 3 ORDER BY distance;
+  expect:
+  - - 1
+  - - 2
+  - - 3
+- statement: COMMIT;
+# COMMIT 的 xSync 恢复路径：超限+无段+行数>阈值 → 全内存重建+落盘
+- query: SELECT count(*) > 0 FROM idx_graph;
+  expect:
+  - - 1
+# 恢复后 DiskStore 查询（rowid 200 已删不出现）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[199,0]' AND k = 2 ORDER BY distance;
+  expect:
+  - - 199
+  - - 198
+# 运行时切回无限制 → 全内存模式（v2 段重新 open，结果一致）
+- statement: INSERT INTO idx(idx) VALUES ('graph_memory_limit=0');
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 3 ORDER BY distance;
+  expect:
+  - - 1
+  - - 2
+  - - 3
+- raw_directive: restart
+# 重开（config 恢复 limit=0 → 全内存）：v2 段 open 正确
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0]' AND k = 2 ORDER BY distance;
+  expect:
+  - - 1
+    - 1.0
+  - - 2
+    - 2.0
+# 重开后切 DiskStore 形态，查询仍一致
+- statement: INSERT INTO idx(idx) VALUES ('graph_memory_limit=20000');
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 2 ORDER BY distance;
+  expect:
+  - - 1
+  - - 2

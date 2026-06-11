@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <map>
+#include <string>
+#include <utility>
 #include <vector>
 
 using vexdb_sqlite::GraphBridge;
@@ -109,16 +112,34 @@ int main() {
         check(r >= recall_serial - 0.02, "parallel recall aligns serial baseline");
 
         if (round == 0) {
-            // 并行图序列化 round-trip：load 后 recall 不变
-            std::vector<char> blob;
-            g.SerializeToBlob(blob);
+            // 并行图 v2 段式序列化 round-trip（内存 map 模拟 %_graph 段存储）：
+            // 全内存 load 与 DiskStore 懒加载两条路径 recall 都必须不变。
+            std::map<std::pair<int, uint32_t>, std::vector<char>> segs;
+            bool ser_ok = g.SerializeV2([&](int kind, uint32_t seg, const std::vector<char> &d) {
+                segs[{kind, seg}] = d;
+                return true;
+            });
+            check(ser_ok, "v2 serialize ok");
+            auto reader = [&](int kind, uint32_t seg, std::vector<char> &out) -> bool {
+                auto it = segs.find({kind, seg});
+                if (it == segs.end()) return false;
+                out = it->second;
+                return true;
+            };
             std::string err;
-            auto g2 = GraphBridge::LoadFromBlob(blob.data(), blob.size(), kDim, 16, 100,
-                                                VexMetric::L2, err);
-            check(g2 != nullptr, "parallel blob loads");
+            auto g2 = GraphBridge::OpenV2(reader, kDim, 16, 100, VexMetric::L2, err);
+            check(g2 != nullptr, "v2 full load ok");
             if (g2) {
                 double r2 = RecallOf(*g2, data, truth);
-                check(std::fabs(r2 - r) < 1e-9, "blob round-trip recall identical");
+                check(std::fabs(r2 - r) < 1e-9, "v2 round-trip recall identical");
+            }
+            // DiskStore：预算压到最小（强制段抖动），recall 仍须逐位一致
+            auto g3 = GraphBridge::OpenV2Disk(reader, nullptr, kDim, 16, 100, VexMetric::L2,
+                                              /*cache_budget=*/1, err);
+            check(g3 != nullptr, "v2 disk open ok");
+            if (g3) {
+                double r3 = RecallOf(*g3, data, truth);
+                check(std::fabs(r3 - r) < 1e-9, "disk-mode recall identical under min budget");
             }
         }
     }

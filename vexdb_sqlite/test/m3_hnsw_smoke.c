@@ -172,7 +172,8 @@ int main(void) {
         sqlite3_prepare_v2(db, "SELECT count(*) FROM idx_graph", -1, &st, NULL);
         sqlite3_int64 blobs = (sqlite3_step(st) == SQLITE_ROW) ? sqlite3_column_int64(st, 0) : -1;
         sqlite3_finalize(st);
-        check(blobs == 1, "graph blob persisted by xSync");
+        /* v2 段式（M9'）：meta/elems/upper/base/vec 至少 5 行 */
+        check(blobs >= 5, "graph v2 segments persisted by xSync");
     }
     sqlite3_close(db);
     db = NULL;
