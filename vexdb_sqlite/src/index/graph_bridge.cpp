@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 
@@ -177,9 +178,25 @@ void GraphBridge::Insert(const float *vec, int64_t rowid) {
 void GraphBridge::BuildBulk(const float *vecs, const int64_t *rowids, size_t n, int n_threads) {
     auto &im = *impl_;
     if (n == 0) return;
+    if (im.disk) {
+        // 仅全内存模式（disk 模式两阶段构建经 vtab 组装）。误调用会建进
+        // 空置的 mem store 而 Search/Count 读 disk store——静默数据丢失。
+        throw std::logic_error("BuildBulk is mem-mode only (graph opened via OpenV2Disk)");
+    }
     // 构建期关闭段级 dirty 追踪（8 线程标记会 race 且无意义——全新图首次
-    // 落盘必然全量）；构建后标 full_dirty 走全量重写协议。
+    // 落盘必然全量）；构建后标 full_dirty 走全量重写协议。异常路径（worker
+    // rethrow）同样必须恢复追踪并标 full——RAII 确保。
     im.store.track_dirty_ = false;
+    struct RestoreGuard {
+        Impl &im;
+        ~RestoreGuard() {
+            im.store.track_dirty_ = true;
+            im.store.dirty_base_segs_.clear();
+            im.store.dirty_vec_segs_.clear();
+            im.full_dirty = true;
+            im.rowid_map_built = false;
+        }
+    } guard{im};
 
     RunWithAlgo(im.core_metric, im.dim, im.ef_construction, im.m, im.store, [&](auto &algo) {
         using AlgoT = std::decay_t<decltype(algo)>;
@@ -238,12 +255,6 @@ void GraphBridge::BuildBulk(const float *vecs, const int64_t *rowids, size_t n, 
         if (first_error) std::rethrow_exception(first_error);
         return 0;
     });
-    // 恢复增量追踪 + 全新图首次落盘走全量；rowid map 已不可信
-    im.store.track_dirty_ = true;
-    im.store.dirty_base_segs_.clear();
-    im.store.dirty_vec_segs_.clear();
-    im.full_dirty = true;
-    im.rowid_map_built = false;
 }
 
 void GraphBridge::Search(const float *query, size_t k, uint32_t ef_search,

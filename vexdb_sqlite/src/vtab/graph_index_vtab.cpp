@@ -518,8 +518,12 @@ GraphBridge::SegReadFn MakeSegReader(GraphIndexVtab &vt) {
         bool ok = false;
         if (sqlite3_step(st.get()) == SQLITE_ROW) {
             const char *blob = static_cast<const char *>(sqlite3_column_blob(st.get(), 0));
-            out.assign(blob, blob + sqlite3_column_bytes(st.get(), 0));
-            ok = true;
+            // NULL 防御（schema 是 NOT NULL，但手编/损坏库或 OOM 可返回 NULL；
+            // nullptr+0 指针算术是 UB）
+            if (blob) {
+                out.assign(blob, blob + sqlite3_column_bytes(st.get(), 0));
+                ok = true;
+            }
         }
         // 用后立即 reset：停在 ROW 态的活跃语句会钉住连接的隐式读事务
         //（连接空闲期阻塞他端写 / WAL checkpoint 永不能 restart）。
