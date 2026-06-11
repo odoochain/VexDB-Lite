@@ -5,6 +5,8 @@
 #   bash build_sqlite.sh build    # 配置 + 编译双形态 + smoke test 二进制
 #   bash build_sqlite.sh test     # build + 跑五层测试（smoke ×4 + spec）
 #   bash build_sqlite.sh package  # Release 编 macOS arm64+x86_64 → dist/ tarball + SHA256
+#   bash build_sqlite.sh ios      # Stage C：device+sim 静态库 → XCFramework（+sim smoke）
+#   bash build_sqlite.sh android  # Stage C：NDK arm64-v8a/x86_64 静态库 + loadable .so
 #   bash build_sqlite.sh vendor   # 仅拉取 SQLite amalgamation
 #   bash build_sqlite.sh clean    # 删 build 目录
 set -e
@@ -81,12 +83,93 @@ case "$CMD" in
         echo ""
         ls -la "$DIST"/*.tar.gz "$DIST/SHA256SUMS"
         ;;
+    ios)
+        # Stage C M9-iOS：arm64 device + arm64 simulator 静态库 → XCFramework。
+        # 静态注册形态（VEXDB_SQLITE_CORE）：App 自备 SQLite（系统 libsqlite3
+        # 禁扩展加载），链接时解析 sqlite3_* 符号。sim 构建带 smoke 二进制，
+        # 有可用模拟器则 simctl spawn 跑通静态注册链路。
+        [ -f "$DIR/third_party/sqlite/sqlite3ext.h" ] || bash "$DIR/vendor_sqlite.sh"
+        VERSION="${VEXDB_SQLITE_VERSION:-0.1.0}"
+        DIST="$DIR/../dist/sqlite"
+        mkdir -p "$DIST"
+        IOS_MIN="${IOS_DEPLOYMENT_TARGET:-13.0}"
+        for VARIANT in device sim; do
+            BD="$DIR/build-ios-$VARIANT"
+            if [ "$VARIANT" = "device" ]; then
+                SYSROOT=iphoneos; TESTS=OFF
+            else
+                SYSROOT=iphonesimulator; TESTS=ON
+            fi
+            "$CMAKE" -S "$DIR" -B "$BD" -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
+                -DCMAKE_OSX_SYSROOT=$SYSROOT \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_MIN" \
+                -DVEXDB_SQLITE_BUILD_TESTS=$TESTS
+            "$CMAKE" --build "$BD" -j "$NCPU"
+        done
+        XCF="$DIST/vexdb_lite.xcframework"
+        rm -rf "$XCF"
+        HDRS="$DIR/build-ios-headers"
+        rm -rf "$HDRS" && mkdir -p "$HDRS"
+        cp "$DIR/include/vexdb_sqlite.h" "$HDRS/"
+        xcodebuild -create-xcframework \
+            -library "$DIR/build-ios-device/libvexdb_lite_static.a" -headers "$HDRS" \
+            -library "$DIR/build-ios-sim/libvexdb_lite_static.a" -headers "$HDRS" \
+            -output "$XCF"
+        echo ""
+        echo "=== XCFramework ==="
+        du -sh "$XCF"
+        lipo -info "$DIR/build-ios-device/libvexdb_lite_static.a"
+        # sim smoke（best effort：需要一台已启动的模拟器）
+        BOOTED=$(xcrun simctl list devices booted 2>/dev/null | grep -c Booted || true)
+        if [ "$BOOTED" -gt 0 ]; then
+            echo "=== iOS Simulator 静态注册冒烟 ==="
+            xcrun simctl spawn booted "$DIR/build-ios-sim/m0_static_smoke" && \
+            xcrun simctl spawn booted "$DIR/build-ios-sim/m3_hnsw_smoke" || \
+                echo "sim smoke 失败（产物本身已构建成功）"
+        else
+            echo "（无已启动的模拟器，跳过 sim smoke：xcrun simctl boot <device> 后重跑）"
+        fi
+        ;;
+    android)
+        # Stage C M10-Android：NDK 交叉 arm64-v8a + x86_64。
+        # 产物：libvexdb_lite_static.a（静态集成）+ vexdb_lite.so（loadable，
+        # 给 requery 等开 load_extension 的自带-SQLite 宿主）。
+        [ -f "$DIR/third_party/sqlite/sqlite3ext.h" ] || bash "$DIR/vendor_sqlite.sh"
+        NDK="${ANDROID_NDK_HOME:-$(ls -d "$HOME"/Library/Android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)}"
+        [ -d "$NDK" ] || { echo "找不到 Android NDK：设 ANDROID_NDK_HOME" >&2; exit 1; }
+        echo "NDK: $NDK"
+        VERSION="${VEXDB_SQLITE_VERSION:-0.1.0}"
+        DIST="$DIR/../dist/sqlite/android"
+        ANDROID_API="${ANDROID_PLATFORM:-24}"
+        for ABI in arm64-v8a x86_64; do
+            BD="$DIR/build-android-$ABI"
+            # NDK toolchain 默认注入 -g（debug info 留给 ndk-stack，AGP 打包才
+            # strip）；直接交付产物用 -g0 后置覆盖（.a 35-70MB → ~3MB）。
+            "$CMAKE" -S "$DIR" -B "$BD" -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+                -DANDROID_ABI=$ABI -DANDROID_PLATFORM=android-$ANDROID_API \
+                -DCMAKE_C_FLAGS_RELEASE="-O2 -DNDEBUG -g0" \
+                -DCMAKE_CXX_FLAGS_RELEASE="-O2 -DNDEBUG -g0" \
+                -DVEXDB_SQLITE_BUILD_TESTS=OFF
+            "$CMAKE" --build "$BD" -j "$NCPU"
+            mkdir -p "$DIST/$ABI"
+            cp "$BD/libvexdb_lite_static.a" "$BD/vexdb_lite.so" "$DIST/$ABI/"
+            STRIP="$(ls "$NDK"/toolchains/llvm/prebuilt/*/bin/llvm-strip 2>/dev/null | head -1)"
+            [ -x "$STRIP" ] && "$STRIP" --strip-unneeded "$DIST/$ABI/vexdb_lite.so" \
+                            && "$STRIP" --strip-debug "$DIST/$ABI/libvexdb_lite_static.a"
+        done
+        cp "$DIR/include/vexdb_sqlite.h" "$DIST/"
+        echo ""
+        echo "=== Android 产物 ==="
+        ls -la "$DIST"/*/
+        ;;
     clean)
-        rm -rf "$BUILD_DIR" "$DIR"/build-pkg-*
+        rm -rf "$BUILD_DIR" "$DIR"/build-pkg-* "$DIR"/build-ios-* "$DIR"/build-android-*
         echo "已清理 build 目录"
         ;;
     *)
-        echo "Usage: $0 [build|test|package|vendor|clean]"
+        echo "Usage: $0 [build|test|package|ios|android|vendor|clean]"
         exit 1
         ;;
 esac

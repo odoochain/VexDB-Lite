@@ -120,7 +120,10 @@ static double recall_check(sqlite3 *db, const char *table, const char *fn,
 }
 
 int main(void) {
-    const char *dbpath = "/tmp/vexdb_m3_smoke.db";
+    /* Android 无 /tmp（用 TMPDIR=/data/local/tmp 覆盖）；桌面默认 /tmp */
+    const char *tmpdir = getenv("TMPDIR");
+    char dbpath[512];
+    snprintf(dbpath, sizeof(dbpath), "%s/vexdb_m3_smoke.db", tmpdir ? tmpdir : "/tmp");
     unlink(dbpath);
     sqlite3 *db = NULL;
     if (sqlite3_open(dbpath, &db) != SQLITE_OK) return 1;

@@ -27,7 +27,8 @@ find_package(Threads REQUIRED)
 # ② 在 Rosetta(x86_64) 进程里 `uname -m` 会谎报 x86_64。都会编出与系统 arm64
 # sqlite3 不匹配的库。用 sysctl hw.optional.arm64 探真实硬件（不被 Rosetta 欺骗）。
 # 交叉编译（Stage C iOS/Android toolchain 文件）时不介入，arch 全权交 toolchain。
-if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_TOOLCHAIN_FILE)
+if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES AND NOT CMAKE_TOOLCHAIN_FILE
+   AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     execute_process(COMMAND sysctl -n hw.optional.arm64
         OUTPUT_VARIABLE _IS_ARM64 OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     if(_IS_ARM64 STREQUAL "1")
@@ -134,8 +135,9 @@ add_compile_definitions(
     VEXDB_SQLITE_BUILD_TIME="${VEXDB_SQLITE_BUILD_TIME}")
 
 # SQLite 端靠 C++ 异常在边界 catch 转 SQLITE_ERROR（与 PG 的 -fno-exceptions 不同，
-# 不可关异常）。
-add_compile_options(-g -Wall)
+# 不可关异常）。debug info 交给 CMAKE_BUILD_TYPE（Release 不带 -g——静态库
+# 满载 debug info 时 XCFramework 膨胀到 46MB，去掉后 ~6MB）。
+add_compile_options(-Wall)
 
 # common 的宿主分支宏：SQLITE 与 DUCK 同走"纯 STL 环境"语义分支（不引
 # pg_compat.h/postgres.h），但不拉 DuckDB 的 store 头——见
@@ -144,7 +146,12 @@ add_compile_definitions(PG_VEXDB_TARGET_SQLITE)
 
 # SIMD per-file flags（对齐 vexdb_pg/vexdb_duckdb：模板核 -fno-exceptions 纯计算）。
 # set_source_files_properties 是目录级作用域，对 loadable/static 两 target 同时生效。
-set(SIMD_COMMON_FLAGS "-ftree-vectorize -fassociative-math -fno-signed-zeros -fno-trapping-math -floop-interchange -fno-exceptions -funroll-loops -g1 -Wno-ignored-attributes")
+set(SIMD_COMMON_FLAGS "-ftree-vectorize -fassociative-math -fno-signed-zeros -fno-trapping-math -fno-exceptions -funroll-loops -Wno-ignored-attributes")
+# -floop-interchange 是 GCC 专属（NDK clang 报 unknown argument 硬错；apple
+# clang 容忍）——仅 GCC 加。
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set(SIMD_COMMON_FLAGS "${SIMD_COMMON_FLAGS} -floop-interchange")
+endif()
 if(NOT CMAKE_BUILD_TYPE MATCHES "[Dd]ebug")
     set(SIMD_COMMON_FLAGS "${SIMD_COMMON_FLAGS} -O3 -ffp-contract=fast")
 endif()
@@ -157,27 +164,41 @@ if(_VEX_TARGET_ARCH MATCHES "x86_64|amd64|AMD64")
     set_source_files_properties(${REPO_ROOT}/common/distance/src/avx512_dispatcher.cpp src/distance/avx512.cpp
         PROPERTIES COMPILE_FLAGS "${SIMD_COMMON_FLAGS} -mavx512f -mavx512dq -mavx512bw -mavx512vl -mavx -mavx2 -mfma -mf16c")
 elseif(_VEX_TARGET_ARCH MATCHES "aarch64|arm64")
-    # ARMv8.2 基线（Kunpeng/TaiShan v110；v8.0 老核 SIGILL on LSE），对齐 pg/duck。
-    if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "8.0")
+    if(ANDROID)
+        # Android 端侧基线 = armv8-a（NDK 默认；大量在役设备是 v8.0 老核，
+        # +lse/+fp16 会 SIGILL——服务器侧的 v8.2 基线是 Kunpeng 场景取舍）。
+        set(NEON_FLAGS "${SIMD_COMMON_FLAGS}")
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        # iOS arm64 = A12+（armv8.3+），v8.2 特性全集安全。
         set(NEON_FLAGS "${SIMD_COMMON_FLAGS} -march=armv8.2-a+lse+fp16+dotprod+crc")
     else()
-        set(NEON_FLAGS "${SIMD_COMMON_FLAGS} -march=armv8.2-a+lse+fp16")
-    endif()
-    check_cxx_compiler_flag("-mtune=tsv110" HAS_MTUNE_TSV110)
-    if(HAS_MTUNE_TSV110)
-        set(NEON_FLAGS "${NEON_FLAGS} -mtune=tsv110")
+        # 服务器/桌面 ARMv8.2 基线（Kunpeng/TaiShan v110；v8.0 老核 SIGILL on
+        # LSE），对齐 pg/duck。
+        if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL "8.0")
+            set(NEON_FLAGS "${SIMD_COMMON_FLAGS} -march=armv8.2-a+lse+fp16+dotprod+crc")
+        else()
+            set(NEON_FLAGS "${SIMD_COMMON_FLAGS} -march=armv8.2-a+lse+fp16")
+        endif()
+        check_cxx_compiler_flag("-mtune=tsv110" HAS_MTUNE_TSV110)
+        if(HAS_MTUNE_TSV110)
+            set(NEON_FLAGS "${NEON_FLAGS} -mtune=tsv110")
+        endif()
     endif()
     set_source_files_properties(${REPO_ROOT}/common/distance/src/neon_dispatcher.cpp src/distance/neon.cpp
         PROPERTIES COMPILE_FLAGS "${NEON_FLAGS}")
 endif()
 
 # ---- 形态 1：loadable 扩展（.so/.dylib），不链 sqlite3，运行时用宿主 API ----
-add_library(vexdb_lite_loadable SHARED ${VEXDB_SQLITE_SRCS})
-target_include_directories(vexdb_lite_loadable PRIVATE ${VEXDB_SQLITE_INCLUDES})
-set_target_properties(vexdb_lite_loadable PROPERTIES OUTPUT_NAME "vexdb_lite" PREFIX "")
-if(APPLE)
-    # 扩展符号 sqlite3_* 在加载时由宿主进程解析。
-    target_link_options(vexdb_lite_loadable PRIVATE -undefined dynamic_lookup)
+# iOS 禁运行时加载（系统 libsqlite3 关 load_extension + App Store 动态代码限制），
+# 不产此形态；Android 保留（requery 等自带 SQLite 的宿主支持 load_extension）。
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    add_library(vexdb_lite_loadable SHARED ${VEXDB_SQLITE_SRCS})
+    target_include_directories(vexdb_lite_loadable PRIVATE ${VEXDB_SQLITE_INCLUDES})
+    set_target_properties(vexdb_lite_loadable PROPERTIES OUTPUT_NAME "vexdb_lite" PREFIX "")
+    if(APPLE)
+        # 扩展符号 sqlite3_* 在加载时由宿主进程解析。
+        target_link_options(vexdb_lite_loadable PRIVATE -undefined dynamic_lookup)
+    endif()
 endif()
 
 # ---- 形态 2：静态注册（.a），移动端唯一可行形态，直接链宿主 sqlite3 符号 ----
