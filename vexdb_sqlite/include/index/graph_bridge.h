@@ -87,6 +87,11 @@ public:
                                                int ef_construction, VexMetric metric,
                                                std::string &err);
 
+    // 读持久化 meta 头的节点数（含空壳；-1=无段/不可读）。over_limit 模式
+    // 分流用：实际加载体量由持久化 base_count 决定，存活行数在删除后会低估
+    //（差额最大 = 重建阈值 20%），用行数判会在边界上选错模式、超限载入。
+    static int64_t PeekPersistedNodeCount(const SegReadFn &read);
+
     // DiskStore 懒加载打开（内存有界形态）：meta/elems/upper 常驻，base/vec
     // 段进缓存直到预算线（缓存冻结策略），之后读 miss 经 read_rec 直读单
     // 记录（防 thrash）。write 用于写事务内 dirty 段 evict 写回与 xSync flush；

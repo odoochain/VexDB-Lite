@@ -55,8 +55,11 @@ constexpr sqlite3_int64 kDefaultGraphChunk = 256LL * 1024 * 1024;
 // 动态列号经 GraphIndexVtab::ColDistance()/ColK()/ColCmd() 取。
 enum Col { COL_EMBEDDING = 0 };
 
-// xBestIndex/xFilter 间的计划标记。
-enum Plan { PLAN_SCAN = 0, PLAN_KNN = 1 };
+// xBestIndex/xFilter 间的计划标记。低 8 位=计划类型，高位=KNN 修饰 flag。
+enum Plan { PLAN_SCAN = 0, PLAN_KNN = 1, PLAN_ROWID = 2 };
+constexpr int KNN_HAS_OFFSET = 0x100;    // argv 含 OFFSET（紧随 k 之后）
+constexpr int KNN_K_FROM_LIMIT = 0x200;  // k 来自 LIMIT 下推（k<=0 = 不限）
+inline int PlanOf(int idx_num) { return idx_num & 0xff; }
 
 // metadata 列（Stage B：标量列随向量存 %_vectors 同表，supports filtered search）。
 struct MetaCol {
@@ -90,6 +93,12 @@ struct GraphIndexVtab {
     // 行数缓存：-1=未知（首查时 count 一次），之后随 INSERT/DELETE 增减维护。
     // 1M 行表上每次 KNN 都 count(*) 全表扫（~80ms）会淹没 HNSW 本身（μs 级）。
     sqlite3_int64 row_count = -1;
+    // 跨连接失效 cookie（FTS5 iCookie 同理）：%_config 'cookie' 整数，任何
+    // 连接的图/段变更事务在 xSync bump；本连接在查询/写入口比对，变了就作废
+    // 缓存的图与行数——否则他端提交的写永远不可见，且本端的 stale 图写回
+    // 会把他端的行从持久化图中抹掉。
+    sqlite3_int64 cookie_seen = -1;
+    bool cookie_bump_pending = false;
 
     // 动态列号（meta 列数决定 distance/k/cmd 偏移）
     int ColDistance() const { return 1 + int(meta_cols.size()); }
@@ -119,6 +128,10 @@ struct GraphIndexCursor {
     struct Hit { double dist; sqlite3_int64 rowid; };
     std::vector<Hit> hits;
     size_t pos = 0;
+    // KNN 模式 meta 列点查缓存（持久 stmt + 当前行）：免每 行×列 重 prepare
+    sqlite3_stmt *meta_stmt = nullptr;
+    sqlite3_int64 meta_rowid = -1;
+    bool meta_row_ok = false;
 };
 
 GraphIndexVtab *asVtab(sqlite3_vtab *v) { return reinterpret_cast<GraphIndexVtab *>(v); }
@@ -213,6 +226,12 @@ bool ParseCreateArgs(int argc, const char *const *argv, GraphIndexVtab &vt,
                 err = "vector column must be declared before metadata columns";
                 return false;
             }
+            // ':' 与 ',' 是 meta_cols 的 config 序列化分隔符（"name:TYPE,..."），
+            // 列名含它们会在重连解析时错位 → DeclareSchema 失败把表永久砖死。
+            if (cname.find(':') != std::string::npos || cname.find(',') != std::string::npos) {
+                err = "metadata column name must not contain ':' or ','";
+                return false;
+            }
             vt.meta_cols.push_back({cname, upper == "INT" ? "INTEGER" : upper});
             continue;
         }
@@ -245,8 +264,13 @@ bool ConfigGet(GraphIndexVtab &vt, const char *key, std::string &out) {
     bool ok = false;
     if (sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr) == SQLITE_OK &&
         sqlite3_step(st) == SQLITE_ROW) {
-        out = reinterpret_cast<const char *>(sqlite3_column_text(st, 0));
-        ok = true;
+        // NULL 防御（手编/损坏的 config 行、或 OOM 下 column_text 返回 NULL）：
+        // std::string 由空指针构造是 UB，会把"打开表"变成进程崩溃。
+        const char *txt = reinterpret_cast<const char *>(sqlite3_column_text(st, 0));
+        if (txt) {
+            out = txt;
+            ok = true;
+        }
     }
     sqlite3_finalize(st);
     sqlite3_free(sql);
@@ -304,6 +328,9 @@ void ParseMetaCols(const std::string &s, std::vector<MetaCol> &out) {
 // false 时从 config 恢复参数。
 int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
                 sqlite3_vtab **ppVtab, char **pzErr, bool create) {
+    // 声明约束支持：xUpdate 返回 SQLITE_CONSTRAINT 时由核心按 OR 子句处理
+    //（INSERT OR IGNORE 跳行继续）。不声明则任何 OR 子句都直接 abort。
+    sqlite3_vtab_config(db, SQLITE_VTAB_CONSTRAINT_SUPPORT, 1);
     auto *vt = new (std::nothrow) GraphIndexVtab();
     if (!vt) return SQLITE_NOMEM;
     vt->db = db;
@@ -347,6 +374,7 @@ int ConnectImpl(sqlite3 *db, int argc, const char *const *argv,
         ConfigSet(*vt, "graph_chunk_size", std::to_string(vt->graph_chunk_size));
         ConfigSet(*vt, "graph_memory_limit", std::to_string(vt->graph_memory_limit));
         ConfigSet(*vt, "column", col_name);
+        ConfigSet(*vt, "cookie", "0");
         if (!vt->meta_cols.empty())
             ConfigSet(*vt, "meta_cols", SerializeMetaCols(vt->meta_cols));
     } else {
@@ -426,8 +454,12 @@ int vtabDestroy(sqlite3_vtab *pVtab) {
         vt->ShadowName("graph").c_str());
     int rc = ExecFmt(vt->db, sql);
     sqlite3_free(sql);
+    // DROP 失败（如 SQLITE_LOCKED）时核心保留 pVtab 指针并随后调 xDisconnect
+    //（sqlite3VtabCallDestroy 仅在 rc==OK 时清指针）——此时绝不能先 delete，
+    // 否则 xDisconnect 二次释放。
+    if (rc != SQLITE_OK) return rc;
     delete vt;
-    return rc;
+    return SQLITE_OK;
 }
 
 // ---------- M3：内存图生命周期 ----------
@@ -447,11 +479,13 @@ sqlite3_int64 CountVectors(GraphIndexVtab &vt) {
     return n;
 }
 
-// 任何写路径调用：作废持久化图（宿主事务内，随事务回滚）。
+// 任何写路径调用：作废持久化图（宿主事务内，随事务回滚）。段变更需在事务
+// 提交时 bump 跨连接 cookie（xSync 统一执行）。
 int InvalidatePersistedGraph(GraphIndexVtab &vt) {
     char *sql = sqlite3_mprintf("DELETE FROM %s", vt.ShadowName("graph").c_str());
     int rc = ExecFmt(vt.db, sql);
     sqlite3_free(sql);
+    vt.cookie_bump_pending = true;
     return rc;
 }
 
@@ -467,7 +501,6 @@ GraphBridge::SegReadFn MakeSegReader(GraphIndexVtab &vt) {
     if (rc != SQLITE_OK) return nullptr;
     std::shared_ptr<sqlite3_stmt> st(raw, sqlite3_finalize);
     return [st](int kind, uint32_t seg, std::vector<char> &out) -> bool {
-        sqlite3_reset(st.get());
         sqlite3_bind_int(st.get(), 1, kind);
         sqlite3_bind_int64(st.get(), 2, sqlite3_int64(seg));
         bool ok = false;
@@ -476,6 +509,9 @@ GraphBridge::SegReadFn MakeSegReader(GraphIndexVtab &vt) {
             out.assign(blob, blob + sqlite3_column_bytes(st.get(), 0));
             ok = true;
         }
+        // 用后立即 reset：停在 ROW 态的活跃语句会钉住连接的隐式读事务
+        //（连接空闲期阻塞他端写 / WAL checkpoint 永不能 restart）。
+        sqlite3_reset(st.get());
         return ok;
     };
 }
@@ -529,40 +565,43 @@ GraphBridge::SegRecReadFn MakeRecReader(GraphIndexVtab &vt) {
     return [st, state, db, zdb, ztable](int kind, uint32_t seg, size_t offset, size_t len,
                                         char *dst) -> bool {
         const uint64_t key = (uint64_t(uint32_t(kind)) << 32) | seg;
-        for (int pass = 0; pass < 2; pass++) {
+        bool ok = false;
+        for (int pass = 0; pass < 2 && !ok; pass++) {
             sqlite3_int64 rowid;
             auto it = state->rowids.find(key);
             if (it != state->rowids.end() && pass == 0) {
                 rowid = it->second;
             } else {
-                sqlite3_reset(st.get());
                 sqlite3_bind_int(st.get(), 1, kind);
                 sqlite3_bind_int64(st.get(), 2, sqlite3_int64(seg));
-                if (sqlite3_step(st.get()) != SQLITE_ROW) return false;
+                int src = sqlite3_step(st.get());
+                if (src != SQLITE_ROW) {
+                    sqlite3_reset(st.get());
+                    return false;
+                }
                 rowid = sqlite3_column_int64(st.get(), 0);
+                sqlite3_reset(st.get());  // 用后即 reset：活跃语句钉读事务
                 state->rowids[key] = rowid;
             }
             for (int attempt = 0; attempt < 2; attempt++) {
-                int rc2;
-                if (!state->blob) {
-                    rc2 = sqlite3_blob_open(db, zdb.c_str(), ztable.c_str(), "data", rowid, 0,
-                                            &state->blob);
-                    if (rc2 != SQLITE_OK) {
-                        state->blob = nullptr;
-                        break;  // rowid 可能失效 → 外层重查
-                    }
-                } else if (sqlite3_blob_reopen(state->blob, rowid) != SQLITE_OK) {
-                    sqlite3_blob_close(state->blob);  // 过期/失效 → 重开
+                if (sqlite3_blob_open(db, zdb.c_str(), ztable.c_str(), "data", rowid, 0,
+                                      &state->blob) != SQLITE_OK) {
                     state->blob = nullptr;
-                    continue;
+                    break;  // rowid 可能失效 → 外层重查
                 }
-                if (sqlite3_blob_read(state->blob, dst, int(len), int(offset)) == SQLITE_OK)
-                    return true;
-                sqlite3_blob_close(state->blob);  // ABORT（事务过期）→ 重开一次
+                int rc2 = sqlite3_blob_read(state->blob, dst, int(len), int(offset));
+                // blob handle 用后立即关闭：打开的 handle 内部是停在 ROW 的
+                // 语句，同样钉住读事务（reopen 复用的微优化让位正确性）。
+                sqlite3_blob_close(state->blob);
                 state->blob = nullptr;
+                if (rc2 == SQLITE_OK) {
+                    ok = true;
+                    break;
+                }
+                if (rc2 != SQLITE_ABORT) break;  // ABORT=事务过期重试一次，其余失败
             }
         }
-        return false;
+        return ok;
     };
 }
 
@@ -573,6 +612,32 @@ sqlite3_int64 EstimateGraphBytes(const GraphIndexVtab &vt, sqlite3_int64 n) {
                       + 48;                                  // elems/tids/容器头
     sqlite3_int64 upper = (n / std::max(1, vt.m)) * (sqlite3_int64(vt.m) * 3 * 4 + 64);
     return n * per + upper;
+}
+
+// 模式分流判定（统一三处调用点防漂移）。体量取 max(存活行数, 持久化节点数)：
+// 删除标记保留空壳节点（≤20%），实际加载体量由 base_count 决定，只看行数会在
+// 阈值边界低估 ~25% 并误选全内存模式、超限载入。
+bool OverLimit(GraphIndexVtab &vt) {
+    if (vt.graph_memory_limit <= 0) return false;
+    sqlite3_int64 n = CountVectors(vt);
+    sqlite3_int64 persisted = GraphBridge::PeekPersistedNodeCount(MakeSegReader(vt));
+    if (persisted > n) n = persisted;
+    return EstimateGraphBytes(vt, n) > vt.graph_memory_limit;
+}
+
+// 跨连接缓存失效：%_config 'cookie' 变了 → 他端提交过图/段变更，作废本端
+// 缓存（图+row_count）。查询与写入口各调一次（一次 config 点查 ~µs 级）。
+void CheckCookie(GraphIndexVtab &vt) {
+    std::string v;
+    sqlite3_int64 cur = ConfigGet(vt, "cookie", v) ? atoll(v.c_str()) : 0;
+    if (cur != vt.cookie_seen) {
+        if (vt.cookie_seen >= 0) {  // 首查（-1）只记录，无需作废
+            vt.graph.reset();
+            vt.graph_dirty = false;
+            vt.row_count = -1;
+        }
+        vt.cookie_seen = cur;
+    }
 }
 
 // 从 %_vectors 全量重建（全内存）。两段式：先串行 SQL 预读全部 (rowid, vec) 进
@@ -713,18 +778,21 @@ void TryOpenGraph(GraphIndexVtab &vt) {
     auto reader = MakeSegReader(vt);
     if (!reader) return;
     std::string err;
-    sqlite3_int64 n = CountVectors(vt);
-    bool over_limit = vt.graph_memory_limit > 0 &&
-                      EstimateGraphBytes(vt, n) > vt.graph_memory_limit;
-    if (over_limit) {
-        // write 用于写事务内 dirty 段写回（增量 INSERT/evict）；查询期段永不
-        // dirty，不会触发写。read_rec=记录粒度直读（缓存冻结后的 miss 路径）。
-        vt.graph = GraphBridge::OpenV2Disk(reader, MakeSegWriter(vt), MakeRecReader(vt),
-                                           uint16_t(vt.dim), vt.m, vt.ef_construction,
-                                           vt.metric, size_t(vt.graph_memory_limit), err);
-    } else {
-        vt.graph = GraphBridge::OpenV2(reader, uint16_t(vt.dim), vt.m, vt.ef_construction,
-                                       vt.metric, err);
+    try {
+        if (OverLimit(vt)) {
+            // write 用于写事务内 dirty 段写回（增量 INSERT/evict）；查询期段永不
+            // dirty，不会触发写。read_rec=记录粒度直读（缓存冻结后的 miss 路径）。
+            vt.graph = GraphBridge::OpenV2Disk(reader, MakeSegWriter(vt), MakeRecReader(vt),
+                                               uint16_t(vt.dim), vt.m, vt.ef_construction,
+                                               vt.metric, size_t(vt.graph_memory_limit), err);
+        } else {
+            vt.graph = GraphBridge::OpenV2(reader, uint16_t(vt.dim), vt.m, vt.ef_construction,
+                                           vt.metric, err);
+        }
+    } catch (const std::exception &) {
+        // bad_alloc 等：open 失败按"无图"处理（调用方有暴力退化/重建兜底），
+        // 异常不得穿 SQLite C 帧。
+        vt.graph.reset();
     }
     if (vt.graph) vt.graph_dirty = false;
 }
@@ -738,10 +806,7 @@ int EnsureGraph(GraphIndexVtab &vt) {
     if (vt.graph) return SQLITE_OK;
     TryOpenGraph(vt);
     if (vt.graph) return SQLITE_OK;
-    sqlite3_int64 n = CountVectors(vt);
-    bool over_limit = vt.graph_memory_limit > 0 &&
-                      EstimateGraphBytes(vt, n) > vt.graph_memory_limit;
-    if (over_limit) return SQLITE_OK;  // graph 仍空 = 暴力退化信号
+    if (OverLimit(vt)) return SQLITE_OK;  // graph 仍空 = 暴力退化信号
     // 无 v2 段/损坏/参数不符 → fall through 重建（标 dirty 待写事务落盘）
     return RebuildInMemory(vt);
 }
@@ -772,40 +837,79 @@ const char *MetaOpSql(char code) {
 int vtabBestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *info) {
     auto *vt = asVtab(pVtab);
     const int n_meta = int(vt->meta_cols.size());
-    int match_idx = -1, k_idx = -1, limit_idx = -1;
+    int match_idx = -1, k_idx = -1, limit_idx = -1, offset_idx = -1, rowid_idx = -1;
     // (constraint 下标, meta 列下标, op 码)。EQ/GT/GE/LT/LE 都下推——白名单
     // 预查机制与谓词形态无关（SQL WHERE 拼接），同列多约束（范围双边）自然
     // AND 叠加。
     std::vector<std::tuple<int, int, char>> meta_preds;
+    // 存在我们无法消费的 usable 约束（不可下推 op 的 meta 谓词、distance 列
+    // 谓词、rowid 谓词等）时，引擎会对 vtab 输出再过滤——此时 LIMIT 不能当
+    // k（vtab 只回 LIMIT 行，过滤后必少于 LIMIT，错误的 SQL 语义）。
+    bool has_unconsumed = false;
     for (int i = 0; i < info->nConstraint; i++) {
         const auto &c = info->aConstraint[i];
         if (!c.usable) continue;
-        if (c.iColumn == COL_EMBEDDING && c.op == SQLITE_INDEX_CONSTRAINT_MATCH)
+        if (c.iColumn == COL_EMBEDDING && c.op == SQLITE_INDEX_CONSTRAINT_MATCH) {
             match_idx = i;
-        if (c.iColumn == vt->ColK() && c.op == SQLITE_INDEX_CONSTRAINT_EQ)
+            continue;
+        }
+        if (c.iColumn == vt->ColK() && c.op == SQLITE_INDEX_CONSTRAINT_EQ) {
             k_idx = i;
-        if (c.op == SQLITE_INDEX_CONSTRAINT_LIMIT)
+            continue;
+        }
+        if (c.op == SQLITE_INDEX_CONSTRAINT_LIMIT) {
             limit_idx = i;
+            continue;
+        }
+        if (c.op == SQLITE_INDEX_CONSTRAINT_OFFSET) {
+            offset_idx = i;
+            continue;
+        }
+        if (c.iColumn < 0 && c.op == SQLITE_INDEX_CONSTRAINT_EQ) {
+            rowid_idx = i;  // rowid 点查（PLAN_ROWID 用；KNN 下算未消费）
+            has_unconsumed = true;
+            continue;
+        }
         if (c.iColumn >= 1 && c.iColumn <= n_meta) {
             char op = MetaOpCode(c.op);
-            if (op) meta_preds.emplace_back(i, c.iColumn - 1, op);
+            if (op) {
+                meta_preds.emplace_back(i, c.iColumn - 1, op);
+                continue;
+            }
         }
+        has_unconsumed = true;
     }
     // k 来源二选一：显式 k=?，或 LIMIT 下推（SQLite ≥3.38，sqlite-vec 习惯写法
-    // `... MATCH ? ORDER BY distance LIMIT n`）。显式 k 优先。
-    int k_src = k_idx >= 0 ? k_idx : limit_idx;
+    // `... MATCH ? ORDER BY distance LIMIT n`）。显式 k 优先；LIMIT 仅在引擎
+    // 不会再过滤输出时才安全（见 has_unconsumed）。
+    int k_src = k_idx;
+    bool k_from_limit = false;
+    if (k_src < 0 && limit_idx >= 0 && !has_unconsumed) {
+        k_src = limit_idx;
+        k_from_limit = true;
+    }
     if (match_idx >= 0 && k_src >= 0) {
         info->aConstraintUsage[match_idx].argvIndex = 1;
         info->aConstraintUsage[match_idx].omit = 1;
         info->aConstraintUsage[k_src].argvIndex = 2;
         info->aConstraintUsage[k_src].omit = 1;
-        // M7'：meta 列约束（EQ + 范围 GT/GE/LT/LE）下推进图内过滤（argv 3 起，
-        // idxStr 每项 "<meta 下标><op 码>" 逗号分隔，如 "0=,1g"）。omit 保持 0：
+        int idx_num = PLAN_KNN;
+        if (k_from_limit) idx_num |= KNN_K_FROM_LIMIT;
+        int argv_i = 3;
+        // LIMIT 当 k 且带 OFFSET：必须一并消费（omit=1 → 核心置零 OFFSET
+        // 计数器），vtab 取 limit+offset 个最近邻再跳过前 offset 个。只消费
+        // LIMIT 不消费 OFFSET 时核心会对已截断的 top-k 再跳行 → 错误结果。
+        if (k_from_limit && offset_idx >= 0) {
+            info->aConstraintUsage[offset_idx].argvIndex = argv_i++;
+            info->aConstraintUsage[offset_idx].omit = 1;
+            idx_num |= KNN_HAS_OFFSET;
+        }
+        // M7'：meta 列约束（EQ + 范围 GT/GE/LT/LE）下推进图内过滤（idxStr
+        // 每项 "<meta 下标><op 码>" 逗号分隔，如 "0=,1g"）。omit 保持 0：
         // 引擎仍按 xColumn 复核谓词——图内过滤是性能优化非正确性来源，dedup
         // 多行节点/类型亲和/collation 边界全由引擎兜底。
         if (!meta_preds.empty()) {
             std::string enc;
-            int argv_i = 3;
             for (const auto &mp : meta_preds) {
                 info->aConstraintUsage[std::get<0>(mp)].argvIndex = argv_i++;
                 if (!enc.empty()) enc += ',';
@@ -817,7 +921,7 @@ int vtabBestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *info) {
             memcpy(info->idxStr, enc.c_str(), enc.size() + 1);
             info->needToFreeIdxStr = 1;
         }
-        info->idxNum = PLAN_KNN;
+        info->idxNum = idx_num;
         info->estimatedCost = 100.0;
         info->estimatedRows = 10;
         // KNN 结果已按 distance 升序物化
@@ -828,8 +932,17 @@ int vtabBestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *info) {
         return SQLITE_OK;
     }
     if (match_idx >= 0) {
-        // 有 MATCH 没 k/LIMIT：明确报错好过静默全扫
+        // 有 MATCH 没 k（或 LIMIT 因未消费谓词不能当 k）：明确报错好过静默全扫
         return SQLITE_CONSTRAINT;
+    }
+    if (rowid_idx >= 0) {
+        // rowid 点查计划：DELETE/UPDATE/SELECT ... WHERE rowid=N 免全表扫
+        //（此前 1M 行表删一行要流式读完全部向量 blob）。
+        info->aConstraintUsage[rowid_idx].argvIndex = 1;
+        info->idxNum = PLAN_ROWID;
+        info->estimatedCost = 1.0;
+        info->estimatedRows = 1;
+        return SQLITE_OK;
     }
     info->idxNum = PLAN_SCAN;
     info->estimatedCost = 1e6;
@@ -846,6 +959,7 @@ int vtabOpen(sqlite3_vtab *, sqlite3_vtab_cursor **ppCur) {
 int vtabClose(sqlite3_vtab_cursor *cur) {
     auto *c = asCursor(cur);
     sqlite3_finalize(c->scan_stmt);
+    sqlite3_finalize(c->meta_stmt);
     delete c;
     return SQLITE_OK;
 }
@@ -906,8 +1020,15 @@ int KnnBruteOverSet(GraphIndexVtab &vt, GraphIndexCursor &cur, const VectorView 
     for (sqlite3_int64 rid : rowids) {
         sqlite3_reset(st);
         sqlite3_bind_int64(st, 1, rid);
-        if (sqlite3_step(st) != SQLITE_ROW || sqlite3_column_bytes(st, 0) != vt.dim * 4)
-            continue;
+        int src = sqlite3_step(st);
+        if (src != SQLITE_ROW) {
+            if (src != SQLITE_DONE) {  // BUSY/IOERR/INTERRUPT 等必须上抛，
+                sqlite3_finalize(st);  // 否则静默返回截断的 top-k
+                return src;
+            }
+            continue;  // DONE=行不存在（白名单与 %_vectors 瞬时漂移），跳过
+        }
+        if (sqlite3_column_bytes(st, 0) != vt.dim * 4) continue;
         const float *vec = static_cast<const float *>(sqlite3_column_blob(st, 0));
         double d = dist_fn(q.data, vec, static_cast<uint16_t>(vt.dim));
         if (heap.size() < static_cast<size_t>(k)) {
@@ -925,8 +1046,8 @@ int KnnBruteOverSet(GraphIndexVtab &vt, GraphIndexCursor &cur, const VectorView 
     return SQLITE_OK;
 }
 
-int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, const char *idxStr, int argc,
-              sqlite3_value **argv) {
+int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, int idx_num, const char *idxStr,
+              int argc, sqlite3_value **argv) {
     VectorView q;
     std::string err;
     if (!GetVector(argv[0], q, err)) return vt.SetError(err.c_str());
@@ -936,10 +1057,31 @@ int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, const char *idxStr, int
         return vt.SetError(err.c_str());
     }
     sqlite3_int64 k = sqlite3_value_int64(argv[1]);
-    if (k <= 0) return vt.SetError("k must be positive");
+    if (k <= 0) {
+        // LIMIT 下推来源：负 LIMIT 是 SQL 的"全部行"惯例（LIMIT -1）→ k=N；
+        // 显式 k= 仍要求正数。
+        if (idx_num & KNN_K_FROM_LIMIT) {
+            k = CountVectors(vt);
+            if (k <= 0) {
+                cur.pos = 0;
+                return SQLITE_OK;  // 空表
+            }
+        } else {
+            return vt.SetError("k must be positive");
+        }
+    }
+    // OFFSET 一并下推时（仅 LIMIT 当 k 的形态）：取 k+offset 个最近邻，
+    // 输出从第 offset 个起（核心已被 omit 告知不再跳行）。
+    sqlite3_int64 offset = 0;
+    int next_argv = 2;
+    if (idx_num & KNN_HAS_OFFSET) {
+        offset = std::max<sqlite3_int64>(0, sqlite3_value_int64(argv[2]));
+        next_argv = 3;
+        k += offset;
+    }
 
-    // M7'：解析 idxStr 的 meta 谓词（"<下标><op 码>" 逗号分隔，argv 3 起对位；
-    // op 码见 MetaOpCode——EQ 与范围 GT/GE/LT/LE 都下推）。
+    // M7'：解析 idxStr 的 meta 谓词（"<下标><op 码>" 逗号分隔，argv 对位紧随
+    // k/offset 之后；op 码见 MetaOpCode——EQ 与范围 GT/GE/LT/LE 都下推）。
     struct MetaPred {
         int col;
         char op;
@@ -954,7 +1096,8 @@ int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, const char *idxStr, int
         meta_preds.push_back(mp);
         p = (*p == ',') ? p + 1 : nullptr;
     }
-    if (argc < 2 + int(meta_preds.size()))
+    const int meta_argv_base = next_argv;
+    if (argc < meta_argv_base + int(meta_preds.size()))
         return vt.SetError("internal: KNN argv/idxStr mismatch");
 
     // 谓词预查：rowid 白名单（hash set 给图内过滤，list 给集合暴力保序遍历）。
@@ -974,7 +1117,7 @@ int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, const char *idxStr, int
         sqlite3_free(sql);
         if (rc != SQLITE_OK) return rc;
         for (size_t i = 0; i < meta_preds.size(); i++)
-            sqlite3_bind_value(st, int(i) + 1, argv[2 + i]);
+            sqlite3_bind_value(st, int(i) + 1, argv[size_t(meta_argv_base) + i]);
         while ((rc = sqlite3_step(st)) == SQLITE_ROW)
             allowed_list.push_back(sqlite3_column_int64(st, 0));
         sqlite3_finalize(st);
@@ -994,6 +1137,14 @@ int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, const char *idxStr, int
         allowed.insert(allowed_list.begin(), allowed_list.end());
     }
 
+    // 出口统一收口：OFFSET 下推时输出从第 offset 个命中起（hits 已物化
+    // k+offset 个）。
+    auto finish = [&](int rc2) {
+        if (rc2 == SQLITE_OK && offset > 0)
+            cur.pos = std::min<size_t>(size_t(offset), cur.hits.size());
+        return rc2;
+    };
+
     // M3：行数超过阈值走 HNSW 图（懒加载）；小表保持暴力（精度优先）。
     // 注：带谓词且到达此处时 |白名单| > 暴力阈值，全表行数必然也超阈值。
     if (CountVectors(vt) > vt.brute_force_threshold) {
@@ -1003,20 +1154,29 @@ int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, const char *idxStr, int
             // M9' DiskStore 模式且无 v2 段（写作废后未恢复）：查询路径不重建
             // （重建峰值违背 graph_memory_limit），退化暴力——带谓词时白名单
             // 点查，否则全表扫。恢复=下一次写事务 xSync 重建落盘。
-            if (!allowed_list.empty()) return KnnBruteOverSet(vt, cur, q, k, allowed_list);
-            return KnnBruteScan(vt, cur, q, k);
+            if (!allowed_list.empty())
+                return finish(KnnBruteOverSet(vt, cur, q, k, allowed_list));
+            return finish(KnnBruteScan(vt, cur, q, k));
         }
         std::vector<std::pair<double, int64_t>> hits;
-        if (!allowed.empty()) {
-            // ef 选择性补偿：通过率越低，图遍历途经的"废点"越多，按
-            // N/|set| 放大 ef（上限 10×，防极端谓词把成本推到全图）。
-            double sel = double(CountVectors(vt)) / double(allowed.size());
-            uint32_t ef_eff =
-                uint32_t(double(vt.ef_search) * std::min(10.0, std::max(1.0, sel)));
-            vt.graph->Search(q.data, size_t(k), ef_eff,
-                             [&](int64_t rid) { return allowed.count(rid) > 0; }, hits);
-        } else {
-            vt.graph->Search(q.data, size_t(k), uint32_t(vt.ef_search), hits);
+        // DiskStore 段 I/O 可 throw（如写事务内 evict 脏段写回失败）——必须在
+        // C 边界内 catch 转 SQL 错误，否则异常穿 SQLite C 帧 = UB/terminate。
+        try {
+            if (!allowed.empty()) {
+                // ef 选择性补偿：通过率越低，图遍历途经的"废点"越多，按
+                // N/|set| 放大 ef（上限 10×，防极端谓词把成本推到全图）。
+                // 基数取 max(k, ef_search)：bridge 内部 ef=max(k, 传入值)，
+                // 若只放大 ef_search，k 较大时补偿会被 max 整个吞掉。
+                double sel = double(CountVectors(vt)) / double(allowed.size());
+                double base_ef = std::max<double>(double(k), double(vt.ef_search));
+                uint32_t ef_eff = uint32_t(base_ef * std::min(10.0, std::max(1.0, sel)));
+                vt.graph->Search(q.data, size_t(k), ef_eff,
+                                 [&](int64_t rid) { return allowed.count(rid) > 0; }, hits);
+            } else {
+                vt.graph->Search(q.data, size_t(k), uint32_t(vt.ef_search), hits);
+            }
+        } catch (const std::exception &e) {
+            return vt.SetError(e.what());
         }
         // distance 列重算为用户语义（与暴力路径/标量函数严格一致）。
         // 算法返回的 dist 是内核原始值，且 common 的 Distancer 主模板与各
@@ -1049,33 +1209,43 @@ int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, const char *idxStr, int
                       return a.dist < b.dist;
                   });
         cur.pos = 0;
-        return SQLITE_OK;
+        return finish(SQLITE_OK);
     }
 
-    return KnnBruteScan(vt, cur, q, k);
+    return finish(KnnBruteScan(vt, cur, q, k));
 }
 
 int vtabFilter(sqlite3_vtab_cursor *pCur, int idxNum, const char *idxStr, int argc,
                sqlite3_value **argv) {
     auto *cur = asCursor(pCur);
     auto *vt = asVtab(pCur->pVtab);
-    cur->plan = idxNum;
+    CheckCookie(*vt);  // 他端连接提交过图变更 → 作废本端缓存
+    cur->plan = PlanOf(idxNum);
     sqlite3_finalize(cur->scan_stmt);
     cur->scan_stmt = nullptr;
     cur->hits.clear();
     cur->pos = 0;
+    cur->meta_rowid = -1;  // meta 行缓存失效（meta_stmt 本身可跨 Filter 复用）
 
-    if (idxNum == PLAN_KNN) {
+    if (cur->plan == PLAN_KNN) {
         if (argc < 2) return vt->SetError("internal: KNN plan expects 2 args");
-        return FilterKnn(*vt, *cur, idxStr, argc, argv);
+        return FilterKnn(*vt, *cur, idxNum, idxStr, argc, argv);
     }
     std::string meta_sel;
     for (const auto &mc : vt->meta_cols) meta_sel += ", " + QuotedCol(mc.name);
-    char *sql = sqlite3_mprintf("SELECT rowid, vec%s FROM %s ORDER BY rowid",
-                                meta_sel.c_str(), vt->ShadowName("vectors").c_str());
+    char *sql;
+    if (cur->plan == PLAN_ROWID) {
+        // rowid 点查计划：单行结果，复用 scan 游标机制
+        sql = sqlite3_mprintf("SELECT rowid, vec%s FROM %s WHERE rowid = ?1",
+                              meta_sel.c_str(), vt->ShadowName("vectors").c_str());
+    } else {
+        sql = sqlite3_mprintf("SELECT rowid, vec%s FROM %s ORDER BY rowid",
+                              meta_sel.c_str(), vt->ShadowName("vectors").c_str());
+    }
     int rc = sqlite3_prepare_v2(vt->db, sql, -1, &cur->scan_stmt, nullptr);
     sqlite3_free(sql);
     if (rc != SQLITE_OK) return rc;
+    if (cur->plan == PLAN_ROWID && argc >= 1) sqlite3_bind_value(cur->scan_stmt, 1, argv[0]);
     cur->scan_eof = (sqlite3_step(cur->scan_stmt) != SQLITE_ROW);
     return SQLITE_OK;
 }
@@ -1098,6 +1268,12 @@ int vtabEof(sqlite3_vtab_cursor *pCur) {
 int vtabColumn(sqlite3_vtab_cursor *pCur, sqlite3_context *ctx, int col) {
     auto *cur = asCursor(pCur);
     auto *vt = asVtab(pCur->pVtab);
+    // UPDATE 取未变列值（OPFLAG_NOCHNG）时不设结果——保持 nochange 标记，
+    // 让 xUpdate 的 sqlite3_value_nochange 生效。否则 result_value/null 会
+    // 消除标记：meta-only UPDATE 的跳图快路径变死代码（每次标签变更付全
+    // 向量摘除+重插+全量重写），且 KNN 计划的 UPDATE 因 embedding 列回
+    // NULL 直接报错。
+    if (sqlite3_vtab_nochange(ctx)) return SQLITE_OK;
     const int n_meta = int(vt->meta_cols.size());
     if (cur->plan == PLAN_KNN) {
         if (col == vt->ColDistance()) {
@@ -1105,19 +1281,35 @@ int vtabColumn(sqlite3_vtab_cursor *pCur, sqlite3_context *ctx, int col) {
         } else if (col >= 1 && col <= n_meta) {
             // KNN 模式 meta 列点查回吐：供 SQLite 引擎层评估未下推的 WHERE
             // 谓词（M6' 的 KNN+后过滤形态；M7' 升级为图内过滤）。
-            char *sql = sqlite3_mprintf("SELECT %s FROM %s WHERE rowid = %lld",
-                                        QuotedCol(vt->meta_cols[col - 1].name).c_str(),
-                                        vt->ShadowName("vectors").c_str(),
-                                        cur->hits[cur->pos].rowid);
-            sqlite3_stmt *st = nullptr;
-            if (sqlite3_prepare_v2(vt->db, sql, -1, &st, nullptr) == SQLITE_OK &&
-                sqlite3_step(st) == SQLITE_ROW) {
-                sqlite3_result_value(ctx, sqlite3_column_value(st, 0));
+            // 持久化 stmt（取全部 meta 列）+ 当前行缓存：此前每 行×列 一次
+            // mprintf+prepare+finalize，k=100×3 列即 300 次编译同一 SQL。
+            if (!cur->meta_stmt) {
+                std::string cols;
+                for (const auto &mc : vt->meta_cols) {
+                    if (!cols.empty()) cols += ", ";
+                    cols += QuotedCol(mc.name);
+                }
+                char *sql = sqlite3_mprintf("SELECT %s FROM %s WHERE rowid = ?1",
+                                            cols.c_str(), vt->ShadowName("vectors").c_str());
+                int rc = sqlite3_prepare_v2(vt->db, sql, -1, &cur->meta_stmt, nullptr);
+                sqlite3_free(sql);
+                if (rc != SQLITE_OK) {
+                    sqlite3_result_null(ctx);
+                    return SQLITE_OK;
+                }
+            }
+            sqlite3_int64 rid = cur->hits[cur->pos].rowid;
+            if (cur->meta_rowid != rid) {
+                sqlite3_reset(cur->meta_stmt);
+                sqlite3_bind_int64(cur->meta_stmt, 1, rid);
+                cur->meta_row_ok = (sqlite3_step(cur->meta_stmt) == SQLITE_ROW);
+                cur->meta_rowid = rid;
+            }
+            if (cur->meta_row_ok) {
+                sqlite3_result_value(ctx, sqlite3_column_value(cur->meta_stmt, col - 1));
             } else {
                 sqlite3_result_null(ctx);
             }
-            sqlite3_finalize(st);
-            sqlite3_free(sql);
         } else {
             sqlite3_result_null(ctx);  // KNN 模式不回吐向量本体（用 rowid join 原表）
         }
@@ -1140,6 +1332,14 @@ int vtabRowid(sqlite3_vtab_cursor *pCur, sqlite3_int64 *pRowid) {
     return SQLITE_OK;
 }
 
+// 作废内存图与持久化段（写事务内；shadow 段删除随宿主事务原子）。下次
+// 查询/写事务按协议重建。row_count 不动（与 %_vectors 仍一致）。
+int DropGraph(GraphIndexVtab &vt) {
+    vt.graph.reset();
+    vt.graph_dirty = false;
+    return InvalidatePersistedGraph(vt);
+}
+
 // INSERT/DELETE/UPDATE。argv 布局（SQLite vtab 约定）：
 //   DELETE: argc=1, argv[0]=旧 rowid
 //   INSERT: argc=N+2, argv[0]=NULL, argv[1]=新 rowid（或 NULL 自动分配）, argv[2..]=列值
@@ -1147,6 +1347,7 @@ int vtabRowid(sqlite3_vtab_cursor *pCur, sqlite3_int64 *pRowid) {
 int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
                sqlite3_int64 *pRowid) {
     auto *vt = asVtab(pVtab);
+    CheckCookie(*vt);  // 用 stale 图做增量写会把他端已提交的行从持久化图抹掉
     // DELETE：tid 摘除（MySQL 二级索引 delete-mark 范式的精确版）——把 rowid
     // 从其节点的 tids 摘掉，空壳节点仍参与 HNSW 导航（保连通性）但天然零输出，
     // elems 变更随 xSync 落盘。空壳占比 ≥20% 时图质量与空间退化 → 作废重建
@@ -1170,14 +1371,19 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
             }
             // 空壳占比 ≥20% → 作废重建
         }
-        vt->graph.reset();
-        vt->graph_dirty = false;
-        return InvalidatePersistedGraph(*vt);
+        return DropGraph(*vt);
     }
     // special insert（fts5 风格）：INSERT INTO t(t) VALUES('ef_search=N')
     // 运行时改参，同连接即时生效并持久化进 config，不触碰数据与内存图。
+    // 仅接受纯命令 INSERT：UPDATE SET <t>='cmd' 或携带数据列的混合形态拒绝
+    //（防 UPDATE 误改配置丢行更新 / INSERT 静默丢数据行）。
     const int col_cmd = vt->ColCmd();
-    if (argc > 2 + col_cmd && sqlite3_value_type(argv[2 + col_cmd]) == SQLITE_TEXT) {
+    if (argc > 2 + col_cmd && !sqlite3_value_nochange(argv[2 + col_cmd]) &&
+        sqlite3_value_type(argv[2 + col_cmd]) == SQLITE_TEXT) {
+        if (sqlite3_value_type(argv[0]) != SQLITE_NULL)
+            return vt->SetError("config command must use INSERT INTO t(t) VALUES('key=value')");
+        if (sqlite3_value_type(argv[2 + COL_EMBEDDING]) != SQLITE_NULL)
+            return vt->SetError("config command cannot be combined with data columns");
         std::string cmd = reinterpret_cast<const char *>(sqlite3_value_text(argv[2 + col_cmd]));
         size_t eq = cmd.find('=');
         std::string key = cmd.substr(0, eq == std::string::npos ? cmd.size() : eq);
@@ -1201,11 +1407,11 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
             if (v < 0) return vt->SetError("graph_memory_limit must be >= 0");
             vt->graph_memory_limit = v;
             ConfigSet(*vt, "graph_memory_limit", std::to_string(v));
-            // 模式分流在图加载时决定：作废当前图让下次查询按新 limit 重新分流
-            //（v2 段仍在，重新 open 是轻操作）
-            vt->graph.reset();
-            vt->graph_dirty = false;
-            return SQLITE_OK;
+            // 模式分流在图加载时决定：作废当前图让下次按新 limit 重新分流。
+            // 必须连段一起作废（DropGraph）：若本事务此前的 DELETE 走了
+            // keep 分支（段未清、靠 xSync 全量重写兑现摘除），仅 reset 内存
+            // 图会取消重写、让仍含已删 tid 的陈旧段幸存 COMMIT → 幽灵行复活。
+            return DropGraph(*vt);
         }
         return vt->SetError(("unknown command: " + cmd).c_str());
     }
@@ -1229,8 +1435,13 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
         }
     }
     // distance/k 列不可写
-    if (sqlite3_value_type(argv[2 + vt->ColDistance()]) != SQLITE_NULL ||
-        sqlite3_value_type(argv[2 + vt->ColK()]) != SQLITE_NULL)
+    // read-only 检查须放过 nochange（UPDATE 未 SET 的列经 xColumn nochange
+    // 路径传回，值内容 unspecified——不能按"非 NULL"误判为用户写入）。
+    auto col_written = [&](int col) {
+        sqlite3_value *cv = argv[2 + col];
+        return !sqlite3_value_nochange(cv) && sqlite3_value_type(cv) != SQLITE_NULL;
+    };
+    if (col_written(vt->ColDistance()) || col_written(vt->ColK()))
         return vt->SetError("distance/k columns are read-only");
 
     sqlite3_int64 old_rowid = is_insert ? 0 : sqlite3_value_int64(argv[0]);
@@ -1295,7 +1506,10 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
     if (vec_nochange && !rowid_changed) return SQLITE_OK;
     if (is_insert && vt->row_count >= 0) vt->row_count++;
 
-    if (!is_insert) TryOpenGraph(*vt);  // 图未加载时先 open（段在即可摘除）
+    // 图未加载时先 open：DELETE/UPDATE 需要它摘 tid；INSERT 需要它增量插入
+    //（否则 fresh 连接的首个 INSERT 会把有效持久图整个作废，1M 行表的代价是
+    // 写事务内整图重建）。open 失败（无段等）才走作废兜底。
+    TryOpenGraph(*vt);
     bool can_incremental = vt->graph != nullptr;
     if (can_incremental && !is_insert) {
         // UPDATE：摘旧 tid。摘不到（图与 %_vectors 漂移）作废兜底。
@@ -1303,13 +1517,17 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
     }
     if (!can_incremental) {
         // 图缺失/摘除失败：作废重建兜底
-        vt->graph.reset();
-        vt->graph_dirty = false;
-        return InvalidatePersistedGraph(*vt);
+        return DropGraph(*vt);
     }
     if (!vt->graph->IsDiskMode()) {
         rc = InvalidatePersistedGraph(*vt);  // mem 模式协议：清段，xSync 全量重写
-        if (rc != SQLITE_OK) return rc;
+        if (rc != SQLITE_OK) {
+            // RemoveTid 已发生：半变异图不可留（错误后语句回滚，图与 SQL
+            // 状态分叉且未标 dirty——本连接 KNN 会静默丢行）
+            vt->graph.reset();
+            vt->graph_dirty = false;
+            return rc;
+        }
     }
     // 取要插入的向量：INSERT/UPDATE 向量用解析好的 v.data；UPDATE 仅 rowid
     //（vec 未触及，内容 unspecified）从 %_vectors 点查新行。
@@ -1321,7 +1539,12 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
         sqlite3_stmt *vst = nullptr;
         rc = sqlite3_prepare_v2(vt->db, sql, -1, &vst, nullptr);
         sqlite3_free(sql);
-        if (rc != SQLITE_OK) return rc;
+        if (rc != SQLITE_OK) {
+            // 同上：RemoveTid 之后的失败窗口必须作废半变异图
+            vt->graph.reset();
+            vt->graph_dirty = false;
+            return rc;
+        }
         if (sqlite3_step(vst) == SQLITE_ROW && sqlite3_column_bytes(vst, 0) == vt->dim * 4) {
             const float *p = static_cast<const float *>(sqlite3_column_blob(vst, 0));
             vec_buf.assign(p, p + vt->dim);
@@ -1329,19 +1552,22 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
         }
         sqlite3_finalize(vst);
         if (vec_buf.empty()) {  // 取不到：作废兜底
-            vt->graph.reset();
-            vt->graph_dirty = false;
-            return InvalidatePersistedGraph(*vt);
+            return DropGraph(*vt);
         }
     }
-    vt->graph->Insert(ins_vec, final_rowid);
+    try {
+        vt->graph->Insert(ins_vec, final_rowid);
+    } catch (const std::exception &e) {
+        // DiskStore evict 脏段写回失败等：异常不得穿 SQLite C 帧。图状态
+        // 不可信，作废兜底。
+        DropGraph(*vt);
+        return vt->SetError(e.what());
+    }
     vt->graph_dirty = true;
     // 空壳占比 ≥20% → 作废重建（对应 MySQL purge）
     sqlite3_int64 dead = sqlite3_int64(vt->graph->DeadNodeCount());
     if (dead * 5 >= sqlite3_int64(vt->graph->Count())) {
-        vt->graph.reset();
-        vt->graph_dirty = false;
-        return InvalidatePersistedGraph(*vt);
+        return DropGraph(*vt);
     }
     return SQLITE_OK;
 }
@@ -1354,18 +1580,14 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
 
 int vtabBegin(sqlite3_vtab *) { return SQLITE_OK; }
 
-int vtabSync(sqlite3_vtab *pVtab) {
-    auto *vt = asVtab(pVtab);
-
+int SyncImpl(GraphIndexVtab *vt) {
     // M9' 恢复路径：DiskStore 形态（超 limit）下写操作作废了图与 v2 段，查询
     // 路径不重建（峰值违背 limit）只能暴力——借写事务窗口两阶段构建+落盘
     //（M9'c：前 K 行并行内存建图 flush，剩余流式磁盘逐条，峰值 ≈ limit），
     // 之后查询恢复 DiskStore open。
     if (!vt->graph) {
         sqlite3_int64 n = CountVectors(*vt);
-        bool over_limit = vt->graph_memory_limit > 0 &&
-                          EstimateGraphBytes(*vt, n) > vt->graph_memory_limit;
-        if (!over_limit || n <= vt->brute_force_threshold) return SQLITE_OK;
+        if (!OverLimit(*vt) || n <= vt->brute_force_threshold) return SQLITE_OK;
         // 仅在 v2 段缺失时重建（有段说明图本就有效，无事可做）
         std::vector<char> probe;
         auto probe_reader = MakeSegReader(*vt);
@@ -1373,6 +1595,7 @@ int vtabSync(sqlite3_vtab *pVtab) {
         int rc = BuildTwoPhase(*vt, n);
         if (rc != SQLITE_OK) return rc;
         if (!vt->graph) return SQLITE_OK;  // 空表等边界
+        vt->cookie_bump_pending = true;    // 重建写了段
     }
 
     auto writer = MakeSegWriter(*vt);
@@ -1380,6 +1603,7 @@ int vtabSync(sqlite3_vtab *pVtab) {
         // DiskStore：只写 dirty 段 + 常驻（meta/elems/upper）
         if (!vt->graph->HasDirty()) return SQLITE_OK;
         if (!vt->graph->SerializeV2(writer)) return vt->SetError(sqlite3_errmsg(vt->db));
+        vt->cookie_bump_pending = true;
         return SQLITE_OK;
     }
     if (!vt->graph_dirty) return SQLITE_OK;
@@ -1391,12 +1615,47 @@ int vtabSync(sqlite3_vtab *pVtab) {
     return SQLITE_OK;
 }
 
+int vtabSync(sqlite3_vtab *pVtab) {
+    auto *vt = asVtab(pVtab);
+    int rc = SyncImpl(vt);
+    // 本事务变更过图/段：提交前 bump 跨连接 cookie（ConfigSet 随事务原子；
+    // 失败回滚时 cookie_seen 与库面不一致会被下次 CheckCookie 自愈）。
+    if (rc == SQLITE_OK && vt->cookie_bump_pending) {
+        vt->cookie_seen = vt->cookie_seen < 0 ? 1 : vt->cookie_seen + 1;
+        ConfigSet(*vt, "cookie", std::to_string(vt->cookie_seen));
+        vt->cookie_bump_pending = false;
+    }
+    return rc;
+}
+
 int vtabCommit(sqlite3_vtab *) { return SQLITE_OK; }
 
 int vtabRollback(sqlite3_vtab *pVtab) {
     auto *vt = asVtab(pVtab);
     vt->graph.reset();
     vt->graph_dirty = false;
+    // 事务内 xUpdate 已对 row_count 做过 ±1，回滚后缓存与 %_vectors 漂移
+    //（且永不自愈——只有 ==-1 才重数），必须一并失效。
+    vt->row_count = -1;
+    vt->cookie_bump_pending = false;  // 段变更已随事务回滚
+    return SQLITE_OK;
+}
+
+// savepoint 钩子（语句级 abort 与 ROLLBACK TO 都经此）：savepoint 区间内的
+// 图变异（增量 Insert/RemoveTid）无法精确撤销——保守作废内存图。shadow 表
+// 的 SQL 写（含 %_graph 段）由核心随 savepoint 回滚，作废后下次重建即与
+// %_vectors 一致。不实现此族时，多行 DML 中途失败只回滚 SQL 不回滚图，
+// xSync 会把分叉图持久化成幽灵行。
+int vtabSavepoint(sqlite3_vtab *, int) { return SQLITE_OK; }
+
+int vtabRelease(sqlite3_vtab *, int) { return SQLITE_OK; }
+
+int vtabRollbackTo(sqlite3_vtab *pVtab, int) {
+    auto *vt = asVtab(pVtab);
+    vt->graph.reset();
+    vt->graph_dirty = false;
+    vt->row_count = -1;
+    // 注：cookie_bump_pending 保守保留——savepoint 之前的段变更可能仍在
     return SQLITE_OK;
 }
 
@@ -1431,8 +1690,8 @@ const sqlite3_module vexdb_graph_index_module = {
     /* xRollback     */ vtabRollback,
     /* xFindFunction */ nullptr,
     /* xRename       */ nullptr,
-    /* xSavepoint    */ nullptr,
-    /* xRelease      */ nullptr,
-    /* xRollbackTo   */ nullptr,
+    /* xSavepoint    */ vtabSavepoint,
+    /* xRelease      */ vtabRelease,
+    /* xRollbackTo   */ vtabRollbackTo,
     /* xShadowName   */ vtabShadowName,
 };

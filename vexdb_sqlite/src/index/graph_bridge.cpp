@@ -503,8 +503,10 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
         BuildUpperBlob(ds.upper_points, upper_n, im.m, buf);
         if (!write(kKindUpper, 0, buf)) return false;
         bool ok = true;
-        ds.flush_dirty_segs([&](int kind, uint32 seg, const std::vector<char> &data) {
-            if (!write(kind, seg, data)) ok = false;
+        ds.flush_dirty_segs([&](int kind, uint32 seg, const std::vector<char> &data) -> bool {
+            bool w = write(kind, seg, data);
+            if (!w) ok = false;
+            return w;  // 失败段保留 dirty，重试 flush 时重写
         });
         if (ok) {
             ds.upper_dirty = false;
@@ -562,6 +564,16 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
         if (!write(kKindVec, uint32(seg), buf)) return false;
     }
     return true;
+}
+
+int64_t GraphBridge::PeekPersistedNodeCount(const SegReadFn &read) {
+    std::vector<char> buf;
+    if (!read || !read(kKindMeta, 0, buf)) return -1;
+    const char *p = buf.data();
+    const char *end = p + buf.size();
+    BlobHeader h{};
+    if (!ReadPod(p, end, h) || h.magic != kGraphBlobMagic) return -1;
+    return int64_t(h.base_count);
 }
 
 std::unique_ptr<GraphBridge> GraphBridge::OpenV2(const SegReadFn &read, uint16_t dim, int m,

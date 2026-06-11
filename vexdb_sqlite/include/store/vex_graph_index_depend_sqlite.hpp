@@ -344,7 +344,15 @@ public:
         elems.reserve(base_n);
         vectors.reserve(base_n);
         base_points.reserve(base_n);
-        upper_points.reserve(upper_n);
+        // upper 容量按 base_n 全额预留（duck 同款取舍）：upper 记录数期望
+        // n/(m-1)，但 level 分布长尾使"均值+常数 slack"的 resize 在 ~12%
+        // (N=4 万) 到 ~41%(N=100 万) 的构建中被超出——超出时 slow path 的
+        // upper_points.resize 触发 realloc，与只持 stripe 锁的读者
+        // (get_point_info/get_neighbors/set_neighbor) racing = heap corruption。
+        // 容量内的 resize 增长不迁移既有元素（引用稳定），全额 reserve 把
+        // realloc 风险归零；代价 = base_n × sizeof(UpperPointRec) 原始容量
+        // (~80B/条，1M 行 ~80MB 构建期一次性)，初始构造仍按 upper_n 估算。
+        upper_points.reserve(std::max(base_n, upper_n));
         if (base_n > elems.size()) {
             size_t cur = vectors.size();
             elems.resize(base_n);
@@ -1083,15 +1091,15 @@ public:
     // ---- dirty 段写回（xSync 调用；写事务内才合法） ----
     template <typename WriteFn>
     void flush_dirty_segs(WriteFn &&write_fn) {
+        // 写失败的段保留 dirty：清了就永不再 flush——失败 COMMIT 被应用重试
+        // 时会带着新 meta/旧段提交，静默损坏。
         for (auto &kv : base_cache_.segs) {
-            if (kv.second.dirty) {
-                write_fn(KIND_BASE, kv.first, kv.second.data);
+            if (kv.second.dirty && write_fn(KIND_BASE, kv.first, kv.second.data)) {
                 kv.second.dirty = false;
             }
         }
         for (auto &kv : vec_cache_.segs) {
-            if (kv.second.dirty) {
-                write_fn(KIND_VEC, kv.first, kv.second.data);
+            if (kv.second.dirty && write_fn(KIND_VEC, kv.first, kv.second.data)) {
                 kv.second.dirty = false;
             }
         }
