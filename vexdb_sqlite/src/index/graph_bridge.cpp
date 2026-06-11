@@ -263,13 +263,8 @@ void GraphBridge::Search(const float *query, size_t k, uint32_t ef_search,
     const float *q = query;
     std::vector<float> normalized;
     if (im.metric == VexMetric::COSINE) {
-        normalized.assign(query, query + im.dim);
-        float norm2 = 0.0f;
-        for (uint16_t i = 0; i < im.dim; i++) norm2 += normalized[i] * normalized[i];
-        if (norm2 > 0.0f) {
-            float inv = 1.0f / std::sqrt(norm2);
-            for (uint16_t i = 0; i < im.dim; i++) normalized[i] *= inv;
-        }
+        normalized.resize(im.dim);
+        VexNormalizeVec(normalized.data(), query, im.dim);
         q = normalized.data();
     }
 
@@ -568,12 +563,7 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
                 std::memcpy(rec, bp.neighbors.data(), nb * sizeof(uint32));
                 std::memcpy(rec + nb * sizeof(uint32), bp.dists.data(), nb * sizeof(float));
             } else {
-                auto *neighbors = reinterpret_cast<uint32 *>(rec);
-                auto *dists = reinterpret_cast<float *>(rec + nb * sizeof(uint32));
-                for (size_t i = 0; i < nb; i++) {
-                    neighbors[i] = uint32(INVALID_VECTOR_ID);
-                    dists[i] = INVALID_DIST;
-                }
+                VexFillInvalidBaseRec(rec, size_t(im.m));
             }
         }
         return write(kKindBase, uint32(seg), buf);

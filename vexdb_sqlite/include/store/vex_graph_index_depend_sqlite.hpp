@@ -263,6 +263,44 @@ constexpr int GRAPH_INDEX_MAX_LEVEL = 32;
 // 共用；序列化格式 v2/v3 的段切分粒度）。
 constexpr size_t VEX_SEG_RECORDS = 64;
 
+// L2 归一化（cosine 存储形态；零范数原样拷贝）。MemStore/DiskStore 的
+// add_vector 与 GraphBridge 的查询归一化共用——存储侧与查询侧的数值规则
+// 必须逐 bit 一致（cosine raw=-cos 的数值一致性契约），单一实现防漂移。
+inline void VexNormalizeVec(float *dst, const float *src, size_t dim) {
+    float norm2 = 0.0f;
+    for (size_t i = 0; i < dim; i++) norm2 += src[i] * src[i];
+    if (norm2 > 0.0f) {
+        float inv = 1.0f / std::sqrt(norm2);
+        for (size_t i = 0; i < dim; i++) dst[i] = src[i] * inv;
+    } else if (dst != src) {
+        std::memcpy(dst, src, dim * sizeof(float));
+    }
+}
+
+// base 记录的 INVALID 填充（neighbors=INVALID_VECTOR_ID, dists=INVALID_DIST）。
+// DiskStore 段 miss 模板、序列化尾段 padding 共用——三处独立编码会让
+// "无邻居"的磁盘表示漂移（读侧按它判断邻居表结束）。
+inline void VexFillInvalidBaseRec(char *rec, size_t m) {
+    const size_t nb = m * 2;
+    auto *neighbors = reinterpret_cast<uint32 *>(rec);
+    auto *dists = reinterpret_cast<float *>(rec + nb * sizeof(uint32));
+    for (size_t i = 0; i < nb; i++) {
+        neighbors[i] = uint32(INVALID_VECTOR_ID);
+        dists[i] = INVALID_DIST;
+    }
+}
+
+// 空 upper 记录工厂（MemStore/DiskStore 共用——两 store 的"空记录"形状必须
+// 一致，serialize/reload 在两模式间互通）。
+template <typename Rec, typename T>
+Rec VexMakeUpperPoint(size_t m) {
+    Rec up;
+    up.neighbors_info.assign(m * 2, T(INVALID_VECTOR_ID));
+    up.dists.assign(m, INVALID_DIST);
+    up.stat_words.assign((m + 31) / 32, 0);
+    return up;
+}
+
 inline void vacuum_delay_point(bool) {}
 
 template <typename T>
@@ -478,20 +516,8 @@ public:
         std::vector<char> normalized;
         if (normalize_vectors_) {
             normalized.resize(vec_size);
-            auto *dst = reinterpret_cast<float *>(normalized.data());
-            auto *src = reinterpret_cast<const float *>(query);
-            float norm2 = 0.0f;
-            for (uint_fast16_t i = 0; i < dim; i++) {
-                norm2 += src[i] * src[i];
-            }
-            if (norm2 > 0.0f) {
-                float inv_norm = 1.0f / std::sqrt(norm2);
-                for (uint_fast16_t i = 0; i < dim; i++) {
-                    dst[i] = src[i] * inv_norm;
-                }
-            } else {
-                std::memcpy(dst, src, vec_size);
-            }
+            VexNormalizeVec(reinterpret_cast<float *>(normalized.data()),
+                            reinterpret_cast<const float *>(query), dim);
             store_data = normalized.data();
         }
         // SHARED：防外层 realloc。ReserveCapacity 已预 resize 内层 buffer →
@@ -776,11 +802,7 @@ private:
         return bp;
     }
     UpperPointRec MakeUpperPoint() const {
-        UpperPointRec up;
-        up.neighbors_info.assign(m * 2, T(INVALID_VECTOR_ID));
-        up.dists.assign(m, INVALID_DIST);
-        up.stat_words.assign((m + 31) / 32, 0);
-        return up;
+        return VexMakeUpperPoint<UpperPointRec, T>(size_t(m));
     }
 };
 
@@ -918,16 +940,8 @@ public:
         std::vector<char> normalized;
         if (normalize_vectors_) {
             normalized.resize(vec_size);
-            auto *dst = reinterpret_cast<float *>(normalized.data());
-            auto *src = reinterpret_cast<const float *>(query);
-            float norm2 = 0.0f;
-            for (uint_fast16_t i = 0; i < dim; i++) norm2 += src[i] * src[i];
-            if (norm2 > 0.0f) {
-                float inv = 1.0f / std::sqrt(norm2);
-                for (uint_fast16_t i = 0; i < dim; i++) dst[i] = src[i] * inv;
-            } else {
-                std::memcpy(dst, src, vec_size);
-            }
+            VexNormalizeVec(reinterpret_cast<float *>(normalized.data()),
+                            reinterpret_cast<const float *>(query), dim);
             store_data = normalized.data();
         }
         char *rec = vec_rec(id, /*mark_dirty=*/true);
@@ -1216,13 +1230,7 @@ private:
 
     void fill_invalid_rec(int kind, char *rec, size_t rec_size) {
         if (kind == KIND_BASE) {
-            const size_t nb = size_t(m) * 2;
-            T *neighbors = reinterpret_cast<T *>(rec);
-            float *dists = reinterpret_cast<float *>(rec + nb * sizeof(T));
-            for (size_t i = 0; i < nb; i++) {
-                neighbors[i] = T(INVALID_VECTOR_ID);
-                dists[i] = INVALID_DIST;
-            }
+            VexFillInvalidBaseRec(rec, size_t(m));
         } else {
             std::memset(rec, 0, rec_size);
         }
@@ -1275,10 +1283,6 @@ private:
     }
 
     UpperPointRec MakeUpperPoint() const {
-        UpperPointRec up;
-        up.neighbors_info.assign(m * 2, T(INVALID_VECTOR_ID));
-        up.dists.assign(m, INVALID_DIST);
-        up.stat_words.assign((m + 31) / 32, 0);
-        return up;
+        return VexMakeUpperPoint<UpperPointRec, T>(size_t(m));
     }
 };

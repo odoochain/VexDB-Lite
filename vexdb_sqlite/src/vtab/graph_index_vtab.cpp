@@ -99,6 +99,11 @@ struct GraphIndexVtab {
     // 会把他端的行从持久化图中抹掉。
     sqlite3_int64 cookie_seen = -1;
     bool cookie_bump_pending = false;
+    // DML stmt 缓存（schema 固定 → SQL 形态固定；多行 DML 免每行 prepare）。
+    // [0]=无 rowid INSERT / 含 vec UPDATE；[1]=带 rowid INSERT / vec 不变 UPDATE
+    sqlite3_stmt *dml_insert[2] = {nullptr, nullptr};
+    sqlite3_stmt *dml_update[2] = {nullptr, nullptr};
+    sqlite3_stmt *vec_fetch_stmt = nullptr;
 
     // 动态列号（meta 列数决定 distance/k/cmd 偏移）
     int ColDistance() const { return 1 + int(meta_cols.size()); }
@@ -442,7 +447,11 @@ int vtabConnect(sqlite3 *db, void *, int argc, const char *const *argv,
 }
 
 int vtabDisconnect(sqlite3_vtab *pVtab) {
-    delete asVtab(pVtab);
+    auto *vt = asVtab(pVtab);
+    for (auto *st : vt->dml_insert) sqlite3_finalize(st);
+    for (auto *st : vt->dml_update) sqlite3_finalize(st);
+    sqlite3_finalize(vt->vec_fetch_stmt);
+    delete vt;
     return SQLITE_OK;
 }
 
@@ -458,6 +467,9 @@ int vtabDestroy(sqlite3_vtab *pVtab) {
     //（sqlite3VtabCallDestroy 仅在 rc==OK 时清指针）——此时绝不能先 delete，
     // 否则 xDisconnect 二次释放。
     if (rc != SQLITE_OK) return rc;
+    for (auto *st : vt->dml_insert) sqlite3_finalize(st);
+    for (auto *st : vt->dml_update) sqlite3_finalize(st);
+    sqlite3_finalize(vt->vec_fetch_stmt);
     delete vt;
     return SQLITE_OK;
 }
@@ -640,34 +652,45 @@ void CheckCookie(GraphIndexVtab &vt) {
     }
 }
 
-// 从 %_vectors 全量重建（全内存）。两段式：先串行 SQL 预读全部 (rowid, vec) 进
-// 内存（之后计算线程绝不触碰 sqlite3 句柄——线程合法性的边界），再 BuildBulk
-// 多线程建图（M3+ 并行；构建期独占，xFilter 同线程等待完成）。
+// 串行预读 (rowid, vec)（limit<0=全部）。计算线程绝不触碰 sqlite3 句柄的
+// 边界由此保证——预读完成后 BuildBulk 才 spawn worker。
+int PrereadVectors(GraphIndexVtab &vt, sqlite3_int64 limit, std::vector<float> &vecs,
+                   std::vector<int64_t> &rowids) {
+    char *sql = limit >= 0
+        ? sqlite3_mprintf("SELECT rowid, vec FROM %s ORDER BY rowid LIMIT %lld",
+                          vt.ShadowName("vectors").c_str(), (long long)limit)
+        : sqlite3_mprintf("SELECT rowid, vec FROM %s ORDER BY rowid",
+                          vt.ShadowName("vectors").c_str());
+    sqlite3_stmt *st = nullptr;
+    int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
+    sqlite3_free(sql);
+    if (rc != SQLITE_OK) return rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        if (sqlite3_column_bytes(st, 1) != vt.dim * 4) continue;  // 防御脏数据
+        const float *v = static_cast<const float *>(sqlite3_column_blob(st, 1));
+        vecs.insert(vecs.end(), v, v + vt.dim);
+        rowids.push_back(sqlite3_column_int64(st, 0));
+    }
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? SQLITE_OK : rc;
+}
+
+int DefaultBuildThreads() {
+    unsigned hw = std::thread::hardware_concurrency();
+    return int(hw > 1 ? (hw > 8 ? 8 : hw) : 1);  // 端侧保守上限 8
+}
+
+// 从 %_vectors 全量重建（全内存）。两段式：先串行预读再 BuildBulk 多线程建图
+//（M3+ 并行；构建期独占，xFilter 同线程等待完成）。
 int RebuildInMemory(GraphIndexVtab &vt) {
     std::vector<float> vecs;
     std::vector<int64_t> rowids;
-    {
-        char *sql = sqlite3_mprintf("SELECT rowid, vec FROM %s ORDER BY rowid",
-                                    vt.ShadowName("vectors").c_str());
-        sqlite3_stmt *st = nullptr;
-        int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
-        sqlite3_free(sql);
-        if (rc != SQLITE_OK) return rc;
-        while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-            if (sqlite3_column_bytes(st, 1) != vt.dim * 4) continue;  // 防御脏数据
-            const float *v = static_cast<const float *>(sqlite3_column_blob(st, 1));
-            vecs.insert(vecs.end(), v, v + vt.dim);
-            rowids.push_back(sqlite3_column_int64(st, 0));
-        }
-        sqlite3_finalize(st);
-        if (rc != SQLITE_DONE) return rc;
-    }
+    int rc = PrereadVectors(vt, -1, vecs, rowids);
+    if (rc != SQLITE_OK) return rc;
     auto bridge = std::make_unique<GraphBridge>(uint16_t(vt.dim), vt.m, vt.ef_construction,
                                                 vt.metric);
-    unsigned hw = std::thread::hardware_concurrency();
-    int n_threads = int(hw > 1 ? (hw > 8 ? 8 : hw) : 1);  // 端侧保守上限 8
     try {
-        bridge->BuildBulk(vecs.data(), rowids.data(), rowids.size(), n_threads);
+        bridge->BuildBulk(vecs.data(), rowids.data(), rowids.size(), DefaultBuildThreads());
     } catch (const std::exception &e) {
         return vt.SetError(e.what());
     }
@@ -704,28 +727,15 @@ int BuildTwoPhase(GraphIndexVtab &vt, sqlite3_int64 n) {
         std::vector<int64_t> rowids;
         vecs.reserve(size_t(K) * vt.dim);
         rowids.reserve(size_t(K));
-        char *sql = sqlite3_mprintf("SELECT rowid, vec FROM %s ORDER BY rowid LIMIT %lld",
-                                    vt.ShadowName("vectors").c_str(), (long long)K);
-        sqlite3_stmt *st = nullptr;
-        int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
-        sqlite3_free(sql);
+        int rc = PrereadVectors(vt, K, vecs, rowids);
         if (rc != SQLITE_OK) return rc;
-        while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-            if (sqlite3_column_bytes(st, 1) != vt.dim * 4) continue;
-            const float *v = static_cast<const float *>(sqlite3_column_blob(st, 1));
-            vecs.insert(vecs.end(), v, v + vt.dim);
-            rowids.push_back(sqlite3_column_int64(st, 0));
-        }
-        sqlite3_finalize(st);
-        if (rc != SQLITE_DONE) return rc;
         if (rowids.empty()) return SQLITE_OK;
         last_rowid = rowids.back();
 
         GraphBridge mem_bridge(uint16_t(vt.dim), vt.m, vt.ef_construction, vt.metric);
-        unsigned hw = std::thread::hardware_concurrency();
-        int n_threads = int(hw > 1 ? (hw > 8 ? 8 : hw) : 1);
         try {
-            mem_bridge.BuildBulk(vecs.data(), rowids.data(), rowids.size(), n_threads);
+            mem_bridge.BuildBulk(vecs.data(), rowids.data(), rowids.size(),
+                                 DefaultBuildThreads());
         } catch (const std::exception &e) {
             return vt.SetError(e.what());
         }
@@ -964,8 +974,32 @@ int vtabClose(sqlite3_vtab_cursor *cur) {
     return SQLITE_OK;
 }
 
-// 全表暴力扫描 + 大小 k 的最大堆（堆顶=当前第 k 近，更近则替换）。小表精度
-// 优先路径 + M9' DiskStore 无图时的退化路径。
+// 大小 k 的有界最大堆 top-k 收集器（堆顶=当前第 k 近，更近则替换）。
+// 全表暴力与白名单点查两条路径共用——堆逻辑/并列规则只此一份。
+struct TopKCollector {
+    std::vector<GraphIndexCursor::Hit> &heap;
+    size_t k;
+    static bool cmp(const GraphIndexCursor::Hit &a, const GraphIndexCursor::Hit &b) {
+        return a.dist < b.dist;
+    }
+    TopKCollector(std::vector<GraphIndexCursor::Hit> &h, sqlite3_int64 k_in)
+        : heap(h), k(size_t(k_in)) {
+        heap.clear();
+    }
+    void offer(double d, sqlite3_int64 rowid) {
+        if (heap.size() < k) {
+            heap.push_back({d, rowid});
+            std::push_heap(heap.begin(), heap.end(), cmp);
+        } else if (d < heap.front().dist) {
+            std::pop_heap(heap.begin(), heap.end(), cmp);
+            heap.back() = {d, rowid};
+            std::push_heap(heap.begin(), heap.end(), cmp);
+        }
+    }
+    void finish() { std::sort_heap(heap.begin(), heap.end(), cmp); }  // 升序：最近在前
+};
+
+// 全表暴力扫描 top-k。小表精度优先路径 + M9' DiskStore 无图时的退化路径。
 int KnnBruteScan(GraphIndexVtab &vt, GraphIndexCursor &cur, const VectorView &q,
                  sqlite3_int64 k) {
     const auto dist_fn = GetDistanceFn(vt.metric);
@@ -975,28 +1009,17 @@ int KnnBruteScan(GraphIndexVtab &vt, GraphIndexCursor &cur, const VectorView &q,
     sqlite3_free(sql);
     if (rc != SQLITE_OK) return rc;
 
-    auto cmp = [](const GraphIndexCursor::Hit &a, const GraphIndexCursor::Hit &b) {
-        return a.dist < b.dist;
-    };
-    auto &heap = cur.hits;
-    heap.clear();
+    TopKCollector topk(cur.hits, k);
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         int len = sqlite3_column_bytes(st, 1);
         if (len != vt.dim * 4) continue;  // 防御：维度不符的脏数据跳过
         const float *vec = static_cast<const float *>(sqlite3_column_blob(st, 1));
-        double d = dist_fn(q.data, vec, static_cast<uint16_t>(vt.dim));
-        if (heap.size() < static_cast<size_t>(k)) {
-            heap.push_back({d, sqlite3_column_int64(st, 0)});
-            std::push_heap(heap.begin(), heap.end(), cmp);
-        } else if (d < heap.front().dist) {
-            std::pop_heap(heap.begin(), heap.end(), cmp);
-            heap.back() = {d, sqlite3_column_int64(st, 0)};
-            std::push_heap(heap.begin(), heap.end(), cmp);
-        }
+        topk.offer(dist_fn(q.data, vec, static_cast<uint16_t>(vt.dim)),
+                   sqlite3_column_int64(st, 0));
     }
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) return rc;
-    std::sort_heap(heap.begin(), heap.end(), cmp);  // 升序：最近在前
+    topk.finish();
     cur.pos = 0;
     return SQLITE_OK;
 }
@@ -1012,36 +1035,24 @@ int KnnBruteOverSet(GraphIndexVtab &vt, GraphIndexCursor &cur, const VectorView 
     int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
     sqlite3_free(sql);
     if (rc != SQLITE_OK) return rc;
-    auto cmp = [](const GraphIndexCursor::Hit &a, const GraphIndexCursor::Hit &b) {
-        return a.dist < b.dist;
-    };
-    auto &heap = cur.hits;
-    heap.clear();
+    TopKCollector topk(cur.hits, k);
     for (sqlite3_int64 rid : rowids) {
         sqlite3_reset(st);
         sqlite3_bind_int64(st, 1, rid);
-        int src = sqlite3_step(st);
-        if (src != SQLITE_ROW) {
-            if (src != SQLITE_DONE) {  // BUSY/IOERR/INTERRUPT 等必须上抛，
-                sqlite3_finalize(st);  // 否则静默返回截断的 top-k
-                return src;
+        int srcrc = sqlite3_step(st);
+        if (srcrc != SQLITE_ROW) {
+            if (srcrc != SQLITE_DONE) {  // BUSY/IOERR/INTERRUPT 等必须上抛，
+                sqlite3_finalize(st);    // 否则静默返回截断的 top-k
+                return srcrc;
             }
             continue;  // DONE=行不存在（白名单与 %_vectors 瞬时漂移），跳过
         }
         if (sqlite3_column_bytes(st, 0) != vt.dim * 4) continue;
         const float *vec = static_cast<const float *>(sqlite3_column_blob(st, 0));
-        double d = dist_fn(q.data, vec, static_cast<uint16_t>(vt.dim));
-        if (heap.size() < static_cast<size_t>(k)) {
-            heap.push_back({d, rid});
-            std::push_heap(heap.begin(), heap.end(), cmp);
-        } else if (d < heap.front().dist) {
-            std::pop_heap(heap.begin(), heap.end(), cmp);
-            heap.back() = {d, rid};
-            std::push_heap(heap.begin(), heap.end(), cmp);
-        }
+        topk.offer(dist_fn(q.data, vec, static_cast<uint16_t>(vt.dim)), rid);
     }
     sqlite3_finalize(st);
-    std::sort_heap(heap.begin(), heap.end(), cmp);
+    topk.finish();
     cur.pos = 0;
     return SQLITE_OK;
 }
@@ -1448,34 +1459,45 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
     bool has_new_rowid = sqlite3_value_type(argv[1]) != SQLITE_NULL;
     sqlite3_int64 new_rowid = has_new_rowid ? sqlite3_value_int64(argv[1]) : 0;
 
-    // meta 值从 argv[2 + 1 + i] 透传（参数位 ?4 起；?1=rowid ?2=vec ?3=UPDATE 的旧 rowid）
+    // meta 值从 argv[2 + 1 + i] 透传（参数位 ?4 起；?1=rowid ?2=vec ?3=UPDATE 的旧 rowid）。
+    // stmt 按形态缓存（schema 固定 → SQL 固定），多行 DML 免每行 prepare。
     const int n_meta = int(vt->meta_cols.size());
     sqlite3_stmt *st = nullptr;
     int rc;
     if (is_insert) {
-        std::string cols = "vec", vals = "?2";
-        if (has_new_rowid) { cols = "rowid, " + cols; vals = "?1, " + vals; }
-        for (int i = 0; i < n_meta; i++) {
-            cols += ", " + QuotedCol(vt->meta_cols[i].name);
-            vals += ", ?" + std::to_string(4 + i);
+        sqlite3_stmt *&cached = vt->dml_insert[has_new_rowid ? 1 : 0];
+        if (!cached) {
+            std::string cols = "vec", vals = "?2";
+            if (has_new_rowid) { cols = "rowid, " + cols; vals = "?1, " + vals; }
+            for (int i = 0; i < n_meta; i++) {
+                cols += ", " + QuotedCol(vt->meta_cols[i].name);
+                vals += ", ?" + std::to_string(4 + i);
+            }
+            char *sql = sqlite3_mprintf("INSERT INTO %s(%s) VALUES (%s)",
+                                        vt->ShadowName("vectors").c_str(), cols.c_str(),
+                                        vals.c_str());
+            rc = sqlite3_prepare_v2(vt->db, sql, -1, &cached, nullptr);
+            sqlite3_free(sql);
+            if (rc != SQLITE_OK) return rc;
         }
-        char *sql = sqlite3_mprintf("INSERT INTO %s(%s) VALUES (%s)",
-                                    vt->ShadowName("vectors").c_str(), cols.c_str(),
-                                    vals.c_str());
-        rc = sqlite3_prepare_v2(vt->db, sql, -1, &st, nullptr);
-        sqlite3_free(sql);
-        if (rc != SQLITE_OK) return rc;
+        st = cached;
+        sqlite3_reset(st);
         if (has_new_rowid) sqlite3_bind_int64(st, 1, new_rowid);
     } else {
         // UPDATE（含 rowid 变更；vec 未触及时不 SET vec）
-        std::string sets = vec_nochange ? "rowid = ?1" : "rowid = ?1, vec = ?2";
-        for (int i = 0; i < n_meta; i++)
-            sets += ", " + QuotedCol(vt->meta_cols[i].name) + " = ?" + std::to_string(4 + i);
-        char *sql = sqlite3_mprintf("UPDATE %s SET %s WHERE rowid = ?3",
-                                    vt->ShadowName("vectors").c_str(), sets.c_str());
-        rc = sqlite3_prepare_v2(vt->db, sql, -1, &st, nullptr);
-        sqlite3_free(sql);
-        if (rc != SQLITE_OK) return rc;
+        sqlite3_stmt *&cached = vt->dml_update[vec_nochange ? 1 : 0];
+        if (!cached) {
+            std::string sets = vec_nochange ? "rowid = ?1" : "rowid = ?1, vec = ?2";
+            for (int i = 0; i < n_meta; i++)
+                sets += ", " + QuotedCol(vt->meta_cols[i].name) + " = ?" + std::to_string(4 + i);
+            char *sql = sqlite3_mprintf("UPDATE %s SET %s WHERE rowid = ?3",
+                                        vt->ShadowName("vectors").c_str(), sets.c_str());
+            rc = sqlite3_prepare_v2(vt->db, sql, -1, &cached, nullptr);
+            sqlite3_free(sql);
+            if (rc != SQLITE_OK) return rc;
+        }
+        st = cached;
+        sqlite3_reset(st);
         sqlite3_bind_int64(st, 1, has_new_rowid ? new_rowid : old_rowid);
         sqlite3_bind_int64(st, 3, old_rowid);
     }
@@ -1484,7 +1506,7 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
     for (int i = 0; i < n_meta; i++)
         sqlite3_bind_value(st, 4 + i, argv[2 + 1 + i]);
     rc = sqlite3_step(st);
-    sqlite3_finalize(st);
+    sqlite3_reset(st);  // 缓存复用：用后即 reset（活跃语句钉读事务）
     if (rc != SQLITE_DONE) {
         if (rc == SQLITE_CONSTRAINT) return SQLITE_CONSTRAINT;  // 重复 rowid 等
         return vt->SetError(sqlite3_errmsg(vt->db));
@@ -1526,23 +1548,27 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
     std::vector<float> vec_buf;
     const float *ins_vec = v.data;
     if (vec_nochange) {
-        char *sql = sqlite3_mprintf("SELECT vec FROM %s WHERE rowid = %lld",
-                                    vt->ShadowName("vectors").c_str(), final_rowid);
-        sqlite3_stmt *vst = nullptr;
-        rc = sqlite3_prepare_v2(vt->db, sql, -1, &vst, nullptr);
-        sqlite3_free(sql);
-        if (rc != SQLITE_OK) {
-            // 同上：RemoveTid 之后的失败窗口必须作废半变异图
-            vt->graph.reset();
-            vt->graph_dirty = false;
-            return rc;
+        if (!vt->vec_fetch_stmt) {
+            char *sql = sqlite3_mprintf("SELECT vec FROM %s WHERE rowid = ?1",
+                                        vt->ShadowName("vectors").c_str());
+            rc = sqlite3_prepare_v2(vt->db, sql, -1, &vt->vec_fetch_stmt, nullptr);
+            sqlite3_free(sql);
+            if (rc != SQLITE_OK) {
+                // RemoveTid 之后的失败窗口必须作废半变异图
+                vt->graph.reset();
+                vt->graph_dirty = false;
+                return rc;
+            }
         }
+        sqlite3_stmt *vst = vt->vec_fetch_stmt;
+        sqlite3_reset(vst);
+        sqlite3_bind_int64(vst, 1, final_rowid);
         if (sqlite3_step(vst) == SQLITE_ROW && sqlite3_column_bytes(vst, 0) == vt->dim * 4) {
             const float *p = static_cast<const float *>(sqlite3_column_blob(vst, 0));
             vec_buf.assign(p, p + vt->dim);
             ins_vec = vec_buf.data();
         }
-        sqlite3_finalize(vst);
+        sqlite3_reset(vst);
         if (vec_buf.empty()) {  // 取不到：作废兜底
             return DropGraph(*vt);
         }
