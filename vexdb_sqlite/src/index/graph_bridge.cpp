@@ -14,6 +14,7 @@
 #include <cstring>
 #include <exception>
 #include <thread>
+#include <unordered_set>
 
 namespace vexdb_sqlite {
 
@@ -48,10 +49,14 @@ auto RunWithAlgo(Metric metric, uint16_t dim, int ef_construction, int m, Store 
         });
 }
 
-// ---- 序列化格式 v2（段式，M9'：%_graph(kind, seg, data)；全部小端定长记录）----
-// v1（全量镜像分块）已废弃：EnsureGraph 读不出 v2 meta 段 → fall through 重建。
+// ---- 序列化格式 v3（段式，M9'：%_graph(kind, seg, data)；全部小端定长记录）----
+// v1（全量镜像分块）已废弃：EnsureGraph 读不出 meta 段 → fall through 重建。
+// v3 = v2 + KIND_DELETED 段（deleted-set）。读侧接受 v2（旧库无删除标记，
+// 空 set 兼容）；写侧统一 v3——旧代码打开 v3 库会拒绝并重建（%_vectors 已删
+// 行天然不在，安全），防旧代码把删除标记当不存在、幽灵行复活。
 constexpr uint32_t kGraphBlobMagic = 0x47535856;  // 'VXSG'
-constexpr uint32_t kGraphBlobVersion = 2;
+constexpr uint32_t kGraphBlobVersion = 3;
+constexpr uint32_t kGraphBlobMinVersion = 2;
 
 struct BlobHeader {
     uint32_t magic;
@@ -92,6 +97,11 @@ struct GraphBridge::Impl {
     Metric core_metric;
     SqliteStore store;                          // 全内存模式（disk 为空时生效）
     std::unique_ptr<SqliteDiskStore> disk;      // DiskStore 模式（非空=段式懒加载）
+    // deleted-set（rowid 级；图不动，Search 内过滤）。dirty=待 xSync 写
+    // KIND_DELETED 段（mem 模式由 vtab graph_dirty 统一管，此标记只服务
+    // disk 模式的 HasDirty）。
+    std::unordered_set<int64_t> deleted;
+    bool deleted_dirty = false;
 
     Impl(uint16_t dim_in, int m_in, int efc_in, VexMetric metric_in)
         : dim(dim_in), m(m_in), ef_construction(efc_in), metric(metric_in),
@@ -220,6 +230,19 @@ void GraphBridge::Search(const float *query, size_t k, uint32_t ef_search,
     }
 
     uint32_t ef = std::max<uint32_t>(uint32_t(k), ef_search);
+    // deleted-set 的 ef 补偿：已删节点占据遍历但不进结果，按存活比放大（上限 2×）。
+    const auto &deleted = im.deleted;
+    if (!deleted.empty()) {
+        size_t n = Count();
+        size_t live = n > deleted.size() ? n - deleted.size() : 1;
+        ef = uint32_t(std::min<double>(double(ef) * double(n) / double(live), double(ef) * 2.0));
+    }
+    // rowid 级总过滤 = 谓词 ∧ 非 deleted
+    auto row_ok = [&](int64_t rid) -> bool {
+        if (!deleted.empty() && deleted.count(rid)) return false;
+        return !filter || filter(rid);
+    };
+    const bool need_filter = bool(filter) || !deleted.empty();
     auto run = [&](auto &store) {
         RunWithAlgo(im.core_metric, im.dim, im.ef_construction, im.m, store, [&](auto &algo) {
             PointExtensionContext pctx;
@@ -227,13 +250,13 @@ void GraphBridge::Search(const float *query, size_t k, uint32_t ef_search,
             // （结果输出端再按 rowid 精确过滤掉混进来的不满足行）。
             auto node_filter = [&](uint32 id) -> bool {
                 for (const auto &t : store.elems[id].tids) {
-                    if (filter(t.row_id)) return true;
+                    if (row_ok(t.row_id)) return true;
                 }
                 return false;
             };
             auto emit = [&](const auto &res) {
                 for (size_t i = 0; i < res.size() && out.size() < k; i++) {
-                    if (filter && !filter(res[i].tid.row_id)) continue;
+                    if (need_filter && !row_ok(res[i].tid.row_id)) continue;
                     double d = res[i].dist;
                     switch (im.metric) {
                     case VexMetric::L2: d = std::sqrt(d); break;          // raw=平方距离
@@ -243,7 +266,7 @@ void GraphBridge::Search(const float *query, size_t k, uint32_t ef_search,
                     out.emplace_back(d, res[i].tid.row_id);
                 }
             };
-            if (filter) {
+            if (need_filter) {
                 emit(algo.search(pctx, reinterpret_cast<const char *>(q), ef, node_filter));
             } else {
                 emit(algo.search(pctx, reinterpret_cast<const char *>(q), ef));
@@ -258,6 +281,18 @@ void GraphBridge::Search(const float *query, size_t k, uint32_t ef_search,
     }
 }
 
+void GraphBridge::MarkDeleted(int64_t rowid) {
+    if (impl_->deleted.insert(rowid).second) impl_->deleted_dirty = true;
+}
+
+bool GraphBridge::IsDeleted(int64_t rowid) const {
+    return impl_->deleted.count(rowid) > 0;
+}
+
+size_t GraphBridge::DeletedCount() const {
+    return impl_->deleted.size();
+}
+
 size_t GraphBridge::Count() const {
     return impl_->disk ? impl_->disk->get_vector_num() : impl_->store.get_vector_num();
 }
@@ -267,7 +302,7 @@ bool GraphBridge::IsDiskMode() const {
 }
 
 bool GraphBridge::HasDirty() const {
-    return impl_->disk && impl_->disk->has_dirty();
+    return impl_->deleted_dirty || (impl_->disk && impl_->disk->has_dirty());
 }
 
 namespace {
@@ -279,7 +314,36 @@ constexpr int kKindElems = SqliteDiskStore::KIND_ELEMS;
 constexpr int kKindUpper = SqliteDiskStore::KIND_UPPER;
 constexpr int kKindBase = SqliteDiskStore::KIND_BASE;
 constexpr int kKindVec = SqliteDiskStore::KIND_VEC;
+constexpr int kKindDeleted = SqliteDiskStore::KIND_DELETED;
 constexpr size_t kSegRecords = SqliteDiskStore::SEG_RECORDS;
+
+void BuildDeletedBlob(const std::unordered_set<int64_t> &deleted, std::vector<char> &out) {
+    out.clear();
+    AppendPod(out, uint64_t(deleted.size()));
+    for (int64_t rid : deleted) AppendPod(out, rid);
+}
+
+// v2 旧库无 KIND_DELETED 段（read 失败=空 set 兼容）；v3 段缺失同样视为空。
+bool ParseDeletedBlob(const std::vector<char> &blob, std::unordered_set<int64_t> &deleted,
+                      std::string &err) {
+    const char *p = blob.data();
+    const char *end = p + blob.size();
+    uint64_t cnt = 0;
+    if (!ReadPod(p, end, cnt)) {
+        err = "graph v3 deleted blob truncated";
+        return false;
+    }
+    deleted.reserve(size_t(cnt) * 2);
+    for (uint64_t i = 0; i < cnt; i++) {
+        int64_t rid = 0;
+        if (!ReadPod(p, end, rid)) {
+            err = "graph v3 deleted blob truncated in rowids";
+            return false;
+        }
+        deleted.insert(rid);
+    }
+    return true;
+}
 
 void BuildMetaBlob(uint16_t dim, int m, int efc, VexMetric metric, size_t base_n,
                    size_t upper_n, const GraphIndexEntryInfo &entry, std::vector<char> &out) {
@@ -395,7 +459,7 @@ bool ReadMetaV2(const GraphBridge::SegReadFn &read, uint16_t dim, int m, VexMetr
         err = "graph v2 bad magic";
         return false;
     }
-    if (h.version != kGraphBlobVersion) {
+    if (h.version < kGraphBlobMinVersion || h.version > kGraphBlobVersion) {
         err = "graph format v" + std::to_string(h.version) + " unsupported";
         return false;
     }
@@ -417,7 +481,8 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
     std::vector<char> buf;
 
     if (im.disk) {
-        // DiskStore：常驻部分（meta/elems/upper）全量重写，base/vec 只写 dirty 段
+        // DiskStore：常驻部分（meta/elems/upper/deleted）全量重写，base/vec
+        // 只写 dirty 段
         auto &ds = *im.disk;
         const size_t base_n = ds.elems.size();
         const size_t upper_n = ds.upper_points.size();
@@ -428,11 +493,16 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
         if (!write(kKindElems, 0, buf)) return false;
         BuildUpperBlob(ds.upper_points, upper_n, im.m, buf);
         if (!write(kKindUpper, 0, buf)) return false;
+        BuildDeletedBlob(im.deleted, buf);
+        if (!write(kKindDeleted, 0, buf)) return false;
         bool ok = true;
         ds.flush_dirty_segs([&](int kind, uint32 seg, const std::vector<char> &data) {
             if (!write(kind, seg, data)) ok = false;
         });
-        if (ok) ds.upper_dirty = false;
+        if (ok) {
+            ds.upper_dirty = false;
+            im.deleted_dirty = false;
+        }
         return ok;
     }
 
@@ -451,6 +521,9 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
     if (!write(kKindElems, 0, buf)) return false;
     BuildUpperBlob(st.upper_points, upper_n, im.m, buf);
     if (!write(kKindUpper, 0, buf)) return false;
+    BuildDeletedBlob(im.deleted, buf);
+    if (!write(kKindDeleted, 0, buf)) return false;
+    im.deleted_dirty = false;
 
     const size_t n_segs = (base_n + kSegRecords - 1) / kSegRecords;
     for (size_t seg = 0; seg < n_segs; seg++) {
@@ -505,6 +578,9 @@ std::unique_ptr<GraphBridge> GraphBridge::OpenV2(const SegReadFn &read, uint16_t
     if (!read(kKindElems, 0, buf) || !ParseElemsBlob(buf, base_n, st.elems, err))
         return nullptr;
     if (!read(kKindUpper, 0, buf) || !ParseUpperBlob(buf, upper_n, m, st.upper_points, err))
+        return nullptr;
+    if (read(kKindDeleted, 0, buf) &&
+        !ParseDeletedBlob(buf, bridge->impl_->deleted, err))
         return nullptr;
 
     const size_t n_segs = (base_n + kSegRecords - 1) / kSegRecords;
@@ -566,6 +642,8 @@ std::unique_ptr<GraphBridge> GraphBridge::OpenV2Disk(const SegReadFn &read,
     if (!read(kKindElems, 0, buf) || !ParseElemsBlob(buf, base_n, ds.elems, err))
         return nullptr;
     if (!read(kKindUpper, 0, buf) || !ParseUpperBlob(buf, upper_n, m, ds.upper_points, err))
+        return nullptr;
+    if (read(kKindDeleted, 0, buf) && !ParseDeletedBlob(buf, im.deleted, err))
         return nullptr;
     ds.reset_capacity(base_n, upper_n);
     ds.entry_info.set(size_t(h.entry_id), size_t(h.entry_cur_layer_idx),

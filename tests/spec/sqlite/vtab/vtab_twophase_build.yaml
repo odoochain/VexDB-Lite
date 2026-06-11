@@ -8,10 +8,10 @@ steps:
     WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 1100)
     INSERT INTO idx(rowid, embedding)
     SELECT i, vexdb_f32('[' || i || ',0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]') FROM c;
-# COMMIT 的 xSync 已两阶段建图落段（5 种 kind 齐全）
+# COMMIT 的 xSync 已两阶段建图落段（6 种 kind 齐全，v3 含 deleted 段）
 - query: SELECT count(DISTINCT kind) FROM idx_graph;
   expect:
-  - - 5
+  - - 6
 # phase 1 区域（rowid ≤ 1024）查询正确
 - query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]' AND k = 3 ORDER BY distance;
   expect:

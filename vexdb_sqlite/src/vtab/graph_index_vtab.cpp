@@ -706,16 +706,12 @@ int BuildTwoPhase(GraphIndexVtab &vt, sqlite3_int64 n) {
     return SQLITE_OK;
 }
 
-// 确保图就绪。分流（M9'）：
-//   全图估算 ≤ graph_memory_limit（或 limit=0）→ 全内存：v2 段载入，无/损坏则重建
-//   超限 → DiskStore 懒加载 open（只读，write 回调为空——查询路径绝不写库）；
-//          无 v2 段时**不**重建（重建峰值违背 limit 本意）→ graph 保持空，调用方
-//          退化暴力扫描；恢复路径=下一次写事务的 xSync 重建+落盘（见 vtabSync）。
-int EnsureGraph(GraphIndexVtab &vt) {
-    if (vt.graph) return SQLITE_OK;
-
+// 仅尝试从 v2/v3 段打开图（按 limit 分流两模式），不重建。成功后 vt.graph
+// 非空。供 EnsureGraph 与 DELETE 标记路径（图未加载时先 open 再标记）共用。
+void TryOpenGraph(GraphIndexVtab &vt) {
+    if (vt.graph) return;
     auto reader = MakeSegReader(vt);
-    if (!reader) return vt.SetError(sqlite3_errmsg(vt.db));
+    if (!reader) return;
     std::string err;
     sqlite3_int64 n = CountVectors(vt);
     bool over_limit = vt.graph_memory_limit > 0 &&
@@ -726,16 +722,26 @@ int EnsureGraph(GraphIndexVtab &vt) {
         vt.graph = GraphBridge::OpenV2Disk(reader, MakeSegWriter(vt), MakeRecReader(vt),
                                            uint16_t(vt.dim), vt.m, vt.ef_construction,
                                            vt.metric, size_t(vt.graph_memory_limit), err);
-        if (vt.graph) vt.graph_dirty = false;
-        return SQLITE_OK;  // graph 仍空 = 暴力退化信号
+    } else {
+        vt.graph = GraphBridge::OpenV2(reader, uint16_t(vt.dim), vt.m, vt.ef_construction,
+                                       vt.metric, err);
     }
+    if (vt.graph) vt.graph_dirty = false;
+}
 
-    vt.graph = GraphBridge::OpenV2(reader, uint16_t(vt.dim), vt.m, vt.ef_construction,
-                                   vt.metric, err);
-    if (vt.graph) {
-        vt.graph_dirty = false;
-        return SQLITE_OK;
-    }
+// 确保图就绪。分流（M9'）：
+//   全图估算 ≤ graph_memory_limit（或 limit=0）→ 全内存：v2 段载入，无/损坏则重建
+//   超限 → DiskStore 懒加载 open（只读形态）；无 v2 段时**不**重建（重建峰值违背
+//          limit 本意）→ graph 保持空，调用方退化暴力扫描；恢复路径=下一次写
+//          事务的 xSync 重建+落盘（见 vtabSync）。
+int EnsureGraph(GraphIndexVtab &vt) {
+    if (vt.graph) return SQLITE_OK;
+    TryOpenGraph(vt);
+    if (vt.graph) return SQLITE_OK;
+    sqlite3_int64 n = CountVectors(vt);
+    bool over_limit = vt.graph_memory_limit > 0 &&
+                      EstimateGraphBytes(vt, n) > vt.graph_memory_limit;
+    if (over_limit) return SQLITE_OK;  // graph 仍空 = 暴力退化信号
     // 无 v2 段/损坏/参数不符 → fall through 重建（标 dirty 待写事务落盘）
     return RebuildInMemory(vt);
 }
@@ -1141,16 +1147,30 @@ int vtabRowid(sqlite3_vtab_cursor *pCur, sqlite3_int64 *pRowid) {
 int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
                sqlite3_int64 *pRowid) {
     auto *vt = asVtab(pVtab);
-    // DELETE：HNSW 不做物理删点，M3 策略=作废内存图与持久化 blob，下次查询重建
-    //（重建只读 %_vectors，已删行天然不在）。
+    // DELETE：deleted-set 标记（duck 同款，O(1)）——图不动，已删节点仍参与
+    // HNSW 导航（保连通性）但不进结果（Search 内过滤 + ef 按存活比补偿），
+    // xSync 把 KIND_DELETED 段落盘。删除占比 ≥20% 时图质量与空间退化 →
+    // 作废重建（下次查询/写事务恢复）。图加载不了（无段等）也走作废兜底。
     if (argc == 1) {
+        sqlite3_int64 del_rowid = sqlite3_value_int64(argv[0]);
         char *sql = sqlite3_mprintf("DELETE FROM %s WHERE rowid = %lld",
-                                    vt->ShadowName("vectors").c_str(),
-                                    sqlite3_value_int64(argv[0]));
+                                    vt->ShadowName("vectors").c_str(), del_rowid);
         int rc = ExecFmt(vt->db, sql);
         sqlite3_free(sql);
         if (rc != SQLITE_OK) return rc;
-        if (vt->row_count > 0 && sqlite3_changes(vt->db) > 0) vt->row_count--;
+        if (sqlite3_changes(vt->db) == 0) return SQLITE_OK;  // 行不存在：无事可做
+        if (vt->row_count > 0) vt->row_count--;
+        TryOpenGraph(*vt);  // 图未加载时先 open（段在即可标记，免作废）
+        if (vt->graph) {
+            vt->graph->MarkDeleted(del_rowid);
+            sqlite3_int64 dc = sqlite3_int64(vt->graph->DeletedCount());
+            sqlite3_int64 total = CountVectors(*vt) + dc;  // 图节点数=存活+已删
+            if (dc * 5 < total) {  // deleted < 20%：保留标记
+                vt->graph_dirty = true;  // mem 模式 xSync 全量重写（含 deleted 段）
+                return SQLITE_OK;
+            }
+            // 删除占比 ≥20% → 作废重建
+        }
         vt->graph.reset();
         vt->graph_dirty = false;
         return InvalidatePersistedGraph(*vt);
@@ -1279,6 +1299,16 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
     }
     if (is_insert) {
         if (vt->row_count >= 0) vt->row_count++;
+        if (vt->graph && vt->graph->IsDeleted(final_rowid)) {
+            // resurrect：INSERT 撞已删 rowid——图里旧节点（旧向量）的 tid 仍指
+            // 该 rowid，简单从 deleted set 摘除会让旧向量当幽灵结果复活；增量
+            // 插入又会出现新旧两个同 rowid 节点。罕见场景正确性优先：作废重建。
+            vt->graph.reset();
+            vt->graph_dirty = false;
+            rc = InvalidatePersistedGraph(*vt);
+            if (rc != SQLITE_OK) return rc;
+            return SQLITE_OK;
+        }
         if (vt->graph) {
             // 两模式均真增量：MemStore 全内存 insert（xSync 全量重写）；
             // DiskStore 段内 insert（dirty 段+常驻改动，xSync 只写 dirty——

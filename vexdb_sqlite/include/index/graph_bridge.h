@@ -49,6 +49,14 @@ public:
 
     size_t Count() const;
 
+    // ---- deleted-set（DELETE O(1) 标记，免全量重建）----
+    // 图结构不动：已删节点仍参与 HNSW 导航（保连通性），仅不进结果（Search
+    // 内部叠加过滤 + ef 按存活比补偿）。持久化为 v3 的 KIND_DELETED 段。
+    // 删除占比超阈值时调用方应作废重建（图质量与空间回收）。
+    void MarkDeleted(int64_t rowid);
+    bool IsDeleted(int64_t rowid) const;
+    size_t DeletedCount() const;
+
     // ---- 格式 v2：段式（M9'，%_graph(kind, seg, data)）----
     // kind：0=meta 1=elems 2=upper 3=base 段 4=vec 段（base/vec 按 4096 条定长
     // 记录切段）。read 返回 false=段不存在；write 必须在宿主写事务内调用。
