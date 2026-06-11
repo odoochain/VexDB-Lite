@@ -58,14 +58,39 @@ steps:
   - - 4
   - - 6
   - - 8
-# EQ 下推 + 范围谓词混合：EQ 进图内过滤，year>=2003 仍引擎后过滤
-# （混合时语义=EQ 过滤后 top-k 内再过滤，可能 <k —— 文档化边界）
+# EQ + 范围混合双下推（范围下推后语义升级：正好 k 条全满足，不再是
+# top-k 内过滤的 <k）。even ∧ year>=2003 → i≡4/8 mod 10，40 行 → 集合暴力
 - query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 10 AND category = 'even' AND year >= 2003 ORDER BY distance;
   expect:
   - - 4
   - - 8
   - - 14
   - - 18
+  - - 24
+  - - 28
+  - - 34
+  - - 38
+  - - 44
+  - - 48
+# 纯范围谓词下推（year>=2003 → i%5∈{3,4}，80 行 > 阈值 → 走图+filter）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND year >= 2003 ORDER BY distance;
+  expect:
+  - - 3
+  - - 4
+  - - 8
+  - - 9
+  - - 13
+# 双边范围（同列两约束 AND 叠加：2001 <= year <= 2002 → i%5∈{1,2}）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 4 AND year >= 2001 AND year <= 2002 ORDER BY distance;
+  expect:
+  - - 1
+  - - 2
+  - - 6
+  - - 7
+# 范围无命中短路（year ∈ {2000..2004}，>2004 为空）
+- query: SELECT count(*) FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND year > 2004;
+  expect:
+  - - 0
 # meta-only UPDATE（跳图作废）后图内过滤实时生效
 - statement: UPDATE idx SET category = 'odd' WHERE rowid = 2;
 - query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND category = 'even' ORDER BY distance;

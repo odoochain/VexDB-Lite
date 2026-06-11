@@ -740,11 +740,37 @@ int EnsureGraph(GraphIndexVtab &vt) {
     return RebuildInMemory(vt);
 }
 
+// meta 谓词下推的操作符编码（idxStr 用单字符；'g'/'l' 是 >=/<=）。
+char MetaOpCode(unsigned char op) {
+    switch (op) {
+    case SQLITE_INDEX_CONSTRAINT_EQ: return '=';
+    case SQLITE_INDEX_CONSTRAINT_GT: return '>';
+    case SQLITE_INDEX_CONSTRAINT_GE: return 'g';
+    case SQLITE_INDEX_CONSTRAINT_LT: return '<';
+    case SQLITE_INDEX_CONSTRAINT_LE: return 'l';
+    }
+    return 0;
+}
+
+const char *MetaOpSql(char code) {
+    switch (code) {
+    case '=': return "=";
+    case '>': return ">";
+    case 'g': return ">=";
+    case '<': return "<";
+    case 'l': return "<=";
+    }
+    return nullptr;
+}
+
 int vtabBestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *info) {
     auto *vt = asVtab(pVtab);
     const int n_meta = int(vt->meta_cols.size());
     int match_idx = -1, k_idx = -1, limit_idx = -1;
-    std::vector<std::pair<int, int>> meta_eq;  // (constraint 下标, meta 列下标)
+    // (constraint 下标, meta 列下标, op 码)。EQ/GT/GE/LT/LE 都下推——白名单
+    // 预查机制与谓词形态无关（SQL WHERE 拼接），同列多约束（范围双边）自然
+    // AND 叠加。
+    std::vector<std::tuple<int, int, char>> meta_preds;
     for (int i = 0; i < info->nConstraint; i++) {
         const auto &c = info->aConstraint[i];
         if (!c.usable) continue;
@@ -754,8 +780,10 @@ int vtabBestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *info) {
             k_idx = i;
         if (c.op == SQLITE_INDEX_CONSTRAINT_LIMIT)
             limit_idx = i;
-        if (c.iColumn >= 1 && c.iColumn <= n_meta && c.op == SQLITE_INDEX_CONSTRAINT_EQ)
-            meta_eq.emplace_back(i, c.iColumn - 1);
+        if (c.iColumn >= 1 && c.iColumn <= n_meta) {
+            char op = MetaOpCode(c.op);
+            if (op) meta_preds.emplace_back(i, c.iColumn - 1, op);
+        }
     }
     // k 来源二选一：显式 k=?，或 LIMIT 下推（SQLite ≥3.38，sqlite-vec 习惯写法
     // `... MATCH ? ORDER BY distance LIMIT n`）。显式 k 优先。
@@ -765,16 +793,18 @@ int vtabBestIndex(sqlite3_vtab *pVtab, sqlite3_index_info *info) {
         info->aConstraintUsage[match_idx].omit = 1;
         info->aConstraintUsage[k_src].argvIndex = 2;
         info->aConstraintUsage[k_src].omit = 1;
-        // M7'：meta 列等值约束下推进图内过滤（argv 3 起，idxStr 编码参与的
-        // meta 下标）。omit 保持 0：引擎仍按 xColumn 复核谓词——图内过滤是
-        // 性能优化非正确性来源，dedup 多行节点/类型亲和边界全由引擎兜底。
-        if (!meta_eq.empty()) {
+        // M7'：meta 列约束（EQ + 范围 GT/GE/LT/LE）下推进图内过滤（argv 3 起，
+        // idxStr 每项 "<meta 下标><op 码>" 逗号分隔，如 "0=,1g"）。omit 保持 0：
+        // 引擎仍按 xColumn 复核谓词——图内过滤是性能优化非正确性来源，dedup
+        // 多行节点/类型亲和/collation 边界全由引擎兜底。
+        if (!meta_preds.empty()) {
             std::string enc;
             int argv_i = 3;
-            for (const auto &me : meta_eq) {
-                info->aConstraintUsage[me.first].argvIndex = argv_i++;
+            for (const auto &mp : meta_preds) {
+                info->aConstraintUsage[std::get<0>(mp)].argvIndex = argv_i++;
                 if (!enc.empty()) enc += ',';
-                enc += std::to_string(me.second);
+                enc += std::to_string(std::get<1>(mp));
+                enc += std::get<2>(mp);
             }
             info->idxStr = static_cast<char *>(sqlite3_malloc(int(enc.size()) + 1));
             if (!info->idxStr) return SQLITE_NOMEM;
@@ -902,25 +932,34 @@ int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, const char *idxStr, int
     sqlite3_int64 k = sqlite3_value_int64(argv[1]);
     if (k <= 0) return vt.SetError("k must be positive");
 
-    // M7'：解析 idxStr 的 meta 下标（xBestIndex 下推的等值约束，argv 3 起对位）。
-    std::vector<int> meta_idx;
+    // M7'：解析 idxStr 的 meta 谓词（"<下标><op 码>" 逗号分隔，argv 3 起对位；
+    // op 码见 MetaOpCode——EQ 与范围 GT/GE/LT/LE 都下推）。
+    struct MetaPred {
+        int col;
+        char op;
+    };
+    std::vector<MetaPred> meta_preds;
     for (const char *p = idxStr; p && *p;) {
-        meta_idx.push_back(atoi(p));
-        const char *comma = strchr(p, ',');
-        p = comma ? comma + 1 : nullptr;
+        MetaPred mp{atoi(p), '='};
+        while (*p >= '0' && *p <= '9') p++;
+        if (*p && *p != ',') mp.op = *p++;
+        if (mp.col < 0 || mp.col >= int(vt.meta_cols.size()) || !MetaOpSql(mp.op))
+            return vt.SetError("internal: bad idxStr meta predicate");
+        meta_preds.push_back(mp);
+        p = (*p == ',') ? p + 1 : nullptr;
     }
-    if (argc < 2 + int(meta_idx.size()))
+    if (argc < 2 + int(meta_preds.size()))
         return vt.SetError("internal: KNN argv/idxStr mismatch");
 
     // 谓词预查：rowid 白名单（hash set 给图内过滤，list 给集合暴力保序遍历）。
     std::vector<sqlite3_int64> allowed_list;
     std::unordered_set<sqlite3_int64> allowed;
-    if (!meta_idx.empty()) {
+    if (!meta_preds.empty()) {
         std::string where;
-        for (size_t i = 0; i < meta_idx.size(); i++) {
+        for (size_t i = 0; i < meta_preds.size(); i++) {
             if (i) where += " AND ";
-            where += QuotedCol(vt.meta_cols[size_t(meta_idx[i])].name) + " = ?" +
-                     std::to_string(i + 1);
+            where += QuotedCol(vt.meta_cols[size_t(meta_preds[i].col)].name) + " " +
+                     MetaOpSql(meta_preds[i].op) + " ?" + std::to_string(i + 1);
         }
         char *sql = sqlite3_mprintf("SELECT rowid FROM %s WHERE %s",
                                     vt.ShadowName("vectors").c_str(), where.c_str());
@@ -928,7 +967,7 @@ int FilterKnn(GraphIndexVtab &vt, GraphIndexCursor &cur, const char *idxStr, int
         int rc = sqlite3_prepare_v2(vt.db, sql, -1, &st, nullptr);
         sqlite3_free(sql);
         if (rc != SQLITE_OK) return rc;
-        for (size_t i = 0; i < meta_idx.size(); i++)
+        for (size_t i = 0; i < meta_preds.size(); i++)
             sqlite3_bind_value(st, int(i) + 1, argv[2 + i]);
         while ((rc = sqlite3_step(st)) == SQLITE_ROW)
             allowed_list.push_back(sqlite3_column_int64(st, 0));
