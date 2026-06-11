@@ -1519,16 +1519,8 @@ int vtabUpdate(sqlite3_vtab *pVtab, int argc, sqlite3_value **argv,
         // 图缺失/摘除失败：作废重建兜底
         return DropGraph(*vt);
     }
-    if (!vt->graph->IsDiskMode()) {
-        rc = InvalidatePersistedGraph(*vt);  // mem 模式协议：清段，xSync 全量重写
-        if (rc != SQLITE_OK) {
-            // RemoveTid 已发生：半变异图不可留（错误后语句回滚，图与 SQL
-            // 状态分叉且未标 dirty——本连接 KNN 会静默丢行）
-            vt->graph.reset();
-            vt->graph_dirty = false;
-            return rc;
-        }
-    }
+    // 增量写两模式统一不清段（xSync 按 dirty 集 UPSERT；mem 全量重写只剩
+    // 重建后首次落盘=NeedsFullRewrite）。
     // 取要插入的向量：INSERT/UPDATE 向量用解析好的 v.data；UPDATE 仅 rowid
     //（vec 未触及，内容 unspecified）从 %_vectors 点查新行。
     std::vector<float> vec_buf;
@@ -1607,11 +1599,15 @@ int SyncImpl(GraphIndexVtab *vt) {
         return SQLITE_OK;
     }
     if (!vt->graph_dirty) return SQLITE_OK;
-    // 全内存：清旧段后全量重写（整体随宿主事务原子）
-    int rc = InvalidatePersistedGraph(*vt);
-    if (rc != SQLITE_OK) return rc;
+    // 全内存：重建后首次落盘=清旧段+全量；增量写后=只 UPSERT dirty 段+常驻
+    //（与 disk 模式统一协议，免单行 insert 的 commit 重写全图）。
+    if (vt->graph->NeedsFullRewrite()) {
+        int rc = InvalidatePersistedGraph(*vt);
+        if (rc != SQLITE_OK) return rc;
+    }
     if (!vt->graph->SerializeV2(writer)) return vt->SetError(sqlite3_errmsg(vt->db));
     vt->graph_dirty = false;
+    vt->cookie_bump_pending = true;
     return SQLITE_OK;
 }
 

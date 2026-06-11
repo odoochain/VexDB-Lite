@@ -76,10 +76,15 @@ public:
     // dirty 由 vtab 的 graph_dirty 管）。
     bool HasDirty() const;
 
-    // 序列化写出 v2 段。全内存模式=全量切段；DiskStore 模式=dirty 段 +
-    // meta/elems/upper（常驻部分体量小，全量重写）。返回 false=write 回调失败。
-    // 非 const：DiskStore 模式写出后清 dirty 标记。
+    // 序列化写出 v2 段。两模式统一增量协议：dirty 段 UPSERT + 常驻三件套
+    //（meta/elems/upper，体量小全量重写）。全内存模式在 NeedsFullRewrite()
+    //（重建/BuildBulk 后首次落盘）时全量切段——调用方须先清旧段。
+    // 返回 false=write 回调失败（失败段保留 dirty 供重试）。
     bool SerializeV2(const SegWriteFn &write);
+
+    // mem 模式落盘前询问：true=调用方需先清段（InvalidatePersistedGraph）再
+    // SerializeV2 全量；false=增量 UPSERT，段保持。disk 模式恒 false。
+    bool NeedsFullRewrite() const;
 
     // 从 v2 段全量载入（全内存模式，性能形态）。无 meta 段/校验失败返回
     // nullptr 并填 err。

@@ -28,6 +28,7 @@
 #include <shared_mutex>
 #include <stdexcept>
 #include <tuple>
+#include <unordered_set>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -258,6 +259,10 @@ struct RepairGraphSharedState {
 
 constexpr int GRAPH_INDEX_MAX_LEVEL = 32;
 
+// base/vec 持久化段的每段记录数（MemStore 段级 dirty 追踪与 DiskStore 段缓存
+// 共用；序列化格式 v2/v3 的段切分粒度）。
+constexpr size_t VEX_SEG_RECORDS = 64;
+
 inline void vacuum_delay_point(bool) {}
 
 template <typename T>
@@ -326,6 +331,20 @@ public:
     // EXCLUSIVE elems_mutex_ 下扩容后 release 写——建立 happens-before。
     std::atomic<size_t> base_size_{0};
     std::atomic<size_t> upper_size_{0};
+
+    // 段级 dirty 追踪（mem 模式增量落盘：xSync 只 UPSERT 变更段，免每 commit
+    // 清段+全量重写——1M 驻留图单行 insert 原要重写 ~0.8GB）。仅单线程增量
+    // 写期启用；并行 BuildBulk 期关闭（防 8 线程标记 race），构建后由 bridge
+    // 标 full_dirty 走全量。upper/elems/meta 常驻三件套体量小，每次全量重写
+    // 不入段追踪。
+    bool track_dirty_ = true;
+    std::unordered_set<uint32> dirty_base_segs_, dirty_vec_segs_;
+    void mark_base_dirty(T id) {
+        if (track_dirty_) dirty_base_segs_.insert(uint32(size_t(id) / VEX_SEG_RECORDS));
+    }
+    void mark_vec_dirty(T id) {
+        if (track_dirty_) dirty_vec_segs_.insert(uint32(size_t(id) / VEX_SEG_RECORDS));
+    }
 
     std::atomic<T> next_base_id_{0};
     std::atomic<T> next_upper_id_{0};
@@ -484,6 +503,7 @@ public:
         } else {
             slot.assign(store_data, store_data + vec_size);
         }
+        mark_vec_dirty(id);
     }
 
     template <typename Distancer>
@@ -665,6 +685,9 @@ public:
             auto &bp = base_points[cur_layer_idx];
             if (size_t(pruned) < bp.neighbors.size()) {
                 bp.neighbors[pruned] = newpoint_id;
+                // 同段的 dists 直写（update_reverse_edges 经 get_neighbor_stats
+                // 指针）由此标记一并覆盖
+                mark_base_dirty(cur_layer_idx);
             }
         } else {
             auto &up = upper_points[cur_layer_idx];
@@ -677,6 +700,7 @@ public:
 
     void set_base_neighbors(T id, const T *neighbors_id) {
         base_points[id].neighbors.assign(neighbors_id, neighbors_id + m * 2);
+        mark_base_dirty(id);
     }
     void set_upper_neighbors(T idx, const T *neighbors_info) {
         upper_points[idx].neighbors_info.assign(neighbors_info, neighbors_info + m * 2);
@@ -691,6 +715,7 @@ public:
             }
         }
         base_points[id].neighbors.assign(neighbors_id, neighbors_id + m * 2);
+        mark_base_dirty(id);
     }
 
     // publish fence（duck #26 forward-publish race 的根治同款）：另一 worker 可
@@ -803,7 +828,7 @@ public:
     //（m=16），向 PG 8KB page 的取向靠拢；1M 行 ≈ 15625 段/类，%_graph 行数
     // 与 SegCache map 均无压力。实测 4096 条（2MB 段）在 8MB 预算下换页
     // 放大到 QPS≈1 不可用。
-    static constexpr size_t SEG_RECORDS = 64;
+    static constexpr size_t SEG_RECORDS = VEX_SEG_RECORDS;
 
     // read 返回 false=段不存在（构建中的新段，填 INVALID 模板）。
     // read_rec（M9'b 记录粒度读）：只读段 blob 的 [offset, offset+len) 进 dst

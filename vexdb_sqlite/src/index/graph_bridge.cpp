@@ -104,6 +104,11 @@ struct GraphBridge::Impl {
     bool rowid_map_built = false;
     size_t dead_nodes = 0;
     bool elems_dirty = false;  // tid 摘除待落盘（disk 模式 HasDirty 用）
+    // mem 模式落盘形态：true=段与持久化不一致需清段+全量重写（重建/BuildBulk
+    // 后首次落盘）；false=可按 MemStore 段级 dirty 集增量 UPSERT（增量
+    // Insert/RemoveTid 的 commit 免每次重写全图——1M 驻留图单行 insert 原要
+    // 清段+重写 ~0.8GB）。
+    bool full_dirty = false;
 
     template <typename ElemsVec>
     void build_rowid_map(const ElemsVec &elems) {
@@ -135,6 +140,7 @@ GraphBridge::~GraphBridge() = default;
 
 void GraphBridge::Insert(const float *vec, int64_t rowid) {
     auto &im = *impl_;
+    const size_t before = im.disk ? im.disk->elems.size() : im.store.elems.size();
     auto run = [&](auto &store) {
         RunWithAlgo(im.core_metric, im.dim, im.ef_construction, im.m, store, [&](auto &algo) {
             using AlgoT = std::decay_t<decltype(algo)>;
@@ -151,9 +157,18 @@ void GraphBridge::Insert(const float *vec, int64_t rowid) {
     } else {
         run(im.store);
     }
-    // 新节点 id 由算法内部分配（dedup 还可能挂到既有节点），rowid→node 懒 map
-    // 作废，下次 RemoveTid 重扫 elems 重建（批量 DELETE 间无 INSERT 时只建一次）。
-    im.rowid_map_built = false;
+    // rowid→node 懒 map 增量维护：节点数 +1 = 新节点（assign_vector_id 顺序
+    // 分配，必在尾部）→ 追加一条；节点数不变 = dedup 把 tid 挂到既有节点
+    //（节点 id 不可知）→ 才保守作废。原先无条件作废让交替 INSERT/DELETE
+    // 工作负载每次删除付 O(N) 全 elems 重扫。
+    if (im.rowid_map_built) {
+        const size_t after = im.disk ? im.disk->elems.size() : im.store.elems.size();
+        if (after == before + 1) {
+            im.rowid_to_node[rowid] = uint32_t(after - 1);
+        } else {
+            im.rowid_map_built = false;
+        }
+    }
 }
 
 // 批量建图（duck BuildBulk 三段式）：首点串行立 entry → 单线程回退 → 连续
@@ -162,6 +177,9 @@ void GraphBridge::Insert(const float *vec, int64_t rowid) {
 void GraphBridge::BuildBulk(const float *vecs, const int64_t *rowids, size_t n, int n_threads) {
     auto &im = *impl_;
     if (n == 0) return;
+    // 构建期关闭段级 dirty 追踪（8 线程标记会 race 且无意义——全新图首次
+    // 落盘必然全量）；构建后标 full_dirty 走全量重写协议。
+    im.store.track_dirty_ = false;
 
     RunWithAlgo(im.core_metric, im.dim, im.ef_construction, im.m, im.store, [&](auto &algo) {
         using AlgoT = std::decay_t<decltype(algo)>;
@@ -220,6 +238,12 @@ void GraphBridge::BuildBulk(const float *vecs, const int64_t *rowids, size_t n, 
         if (first_error) std::rethrow_exception(first_error);
         return 0;
     });
+    // 恢复增量追踪 + 全新图首次落盘走全量；rowid map 已不可信
+    im.store.track_dirty_ = true;
+    im.store.dirty_base_segs_.clear();
+    im.store.dirty_vec_segs_.clear();
+    im.full_dirty = true;
+    im.rowid_map_built = false;
 }
 
 void GraphBridge::Search(const float *query, size_t k, uint32_t ef_search,
@@ -515,8 +539,10 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
         return ok;
     }
 
-    // 全内存：全量切段（尾段补 INVALID/0 写满，读侧按 base_count 截断）
-    const auto &st = im.store;
+    // 全内存：常驻三件套全量重写 + base/vec 段（full=全部段，调用方已清旧段；
+    // 增量=仅 MemStore 段级 dirty 集，UPSERT 覆盖——单行 insert 的 commit 从
+    // 重写全图降为 ~每邻居触碰段，1M 驻留图 ~0.8GB → 几百 KB）。
+    auto &st = im.store;
     const size_t base_n = st.base_points.size();
     const size_t upper_n = st.upper_points.size();
     const size_t nb = size_t(im.m) * 2;
@@ -532,8 +558,7 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
     if (!write(kKindUpper, 0, buf)) return false;
     im.elems_dirty = false;
 
-    const size_t n_segs = (base_n + kSegRecords - 1) / kSegRecords;
-    for (size_t seg = 0; seg < n_segs; seg++) {
+    auto write_base_seg = [&](size_t seg) -> bool {
         buf.assign(kSegRecords * base_rec, 0);
         for (size_t r = 0; r < kSegRecords; r++) {
             char *rec = buf.data() + r * base_rec;
@@ -551,9 +576,9 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
                 }
             }
         }
-        if (!write(kKindBase, uint32(seg), buf)) return false;
-    }
-    for (size_t seg = 0; seg < n_segs; seg++) {
+        return write(kKindBase, uint32(seg), buf);
+    };
+    auto write_vec_seg = [&](size_t seg) -> bool {
         buf.assign(kSegRecords * vec_size, 0);
         for (size_t r = 0; r < kSegRecords; r++) {
             size_t idx = seg * kSegRecords + r;
@@ -561,9 +586,36 @@ bool GraphBridge::SerializeV2(const SegWriteFn &write) {
                 std::memcpy(buf.data() + r * vec_size, st.vectors[idx].data(), vec_size);
             }
         }
-        if (!write(kKindVec, uint32(seg), buf)) return false;
+        return write(kKindVec, uint32(seg), buf);
+    };
+
+    if (im.full_dirty) {
+        const size_t n_segs = (base_n + kSegRecords - 1) / kSegRecords;
+        for (size_t seg = 0; seg < n_segs; seg++) {
+            if (!write_base_seg(seg)) return false;
+        }
+        for (size_t seg = 0; seg < n_segs; seg++) {
+            if (!write_vec_seg(seg)) return false;
+        }
+        im.full_dirty = false;
+        st.dirty_base_segs_.clear();
+        st.dirty_vec_segs_.clear();
+        return true;
+    }
+    // 增量：失败段保留在 dirty 集供重试
+    for (auto it = st.dirty_base_segs_.begin(); it != st.dirty_base_segs_.end();) {
+        if (!write_base_seg(*it)) return false;
+        it = st.dirty_base_segs_.erase(it);
+    }
+    for (auto it = st.dirty_vec_segs_.begin(); it != st.dirty_vec_segs_.end();) {
+        if (!write_vec_seg(*it)) return false;
+        it = st.dirty_vec_segs_.erase(it);
     }
     return true;
+}
+
+bool GraphBridge::NeedsFullRewrite() const {
+    return !impl_->disk && impl_->full_dirty;
 }
 
 int64_t GraphBridge::PeekPersistedNodeCount(const SegReadFn &read) {
