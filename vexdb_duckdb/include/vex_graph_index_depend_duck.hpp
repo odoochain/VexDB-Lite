@@ -265,6 +265,37 @@ inline T Min(const T &a, const T &b) {
     return a < b ? a : b;
 }
 
+// 全局镜像内存池。所有 GRAPH_INDEX 的 vectors[] 镜像(独立堆分配，不计入 DuckDB
+// memory_limit)共享 vexdb_graph_memory_limit 这一个字节预算——预算是“全库镜像总量”
+// 而非单索引上限。MemStore 是 header-only 模板，裸 static 全局会每个 TU 一份，故用
+// inline 函数包 function-local static 保证跨 TU 单实例(C++11 magic static，线程安全初始化)。
+// 作用域为进程级；同进程多 DatabaseInstance 共享同一池(嵌入式常规单实例，可接受)。
+inline std::atomic<size_t> &GlobalMirrorUsedBytes() {
+    static std::atomic<size_t> used{0};
+    return used;
+}
+// 从全局池申领 want 字节，返回实际授予(<=want；池满则更少，可能为 0)。limit 为全局上限。
+inline size_t ClaimGlobalMirrorBytes(size_t want, size_t limit) {
+    auto &used = GlobalMirrorUsedBytes();
+    size_t cur = used.load(std::memory_order_relaxed);
+    for (;;) {
+        size_t avail = cur < limit ? limit - cur : 0;
+        size_t grant = want < avail ? want : avail;
+        if (grant == 0) {
+            return 0;
+        }
+        if (used.compare_exchange_weak(cur, cur + grant, std::memory_order_acq_rel,
+                                       std::memory_order_relaxed)) {
+            return grant;
+        }
+    }
+}
+inline void ReleaseGlobalMirrorBytes(size_t bytes) {
+    if (bytes) {
+        GlobalMirrorUsedBytes().fetch_sub(bytes, std::memory_order_acq_rel);
+    }
+}
+
 template <typename IdType = uint32, typename elem_type = GraphIndexPoint>
 class MemStore;
 
@@ -337,6 +368,45 @@ public:
     // compact 模式：vector_alloc_ 被 Reset，header->vector_ptr 持失效 buffer_id。
     // get_data/GetNodeHeader 必须短路，否则对空 allocator 调 Get() → SIGSEGV。
     bool compact_mode_ = false;
+
+    // graph_memory_limit：vectors[] 内存镜像(lock-free 热层)的节点上限。预算内的
+    // base 节点在 vectors[] 保留一份原始向量镜像；超出上限的节点 vectors[] 槽留空，
+    // 只存 vector_alloc_(buffer manager 兜底，可分页落盘 / 受 DuckDB memory_limit 约束)。
+    // get_data_unlocked 的逐 id fallback 天然处理：vectors[id] 为空 → 走 vector_alloc_->Get()。
+    // 镜像与 vector_alloc_ 在 full 模式下本是 2× 冗余，收紧上限即砍掉超出部分的冗余 RAM，
+    // 热层仍享 lock-free 快路径，冷层由 buffer manager 的 LRU 决定常驻/换出。
+    //
+    // 预算是“全库镜像总量”——所有索引共享 GlobalMirrorUsedBytes() 这一个池(见上方 free
+    // functions)。本 store 按需向池申领并记账，析构时归还。三个量：
+    //   mirror_max_nodes_     : 派生——本 store 已获准镜像的节点数(id < 此值才镜像)。
+    //                           SIZE_MAX = 不限(无全局上限 / 无 vector_alloc_，旧全镜像行为)。
+    //   mirror_limit_bytes_   : 全局上限快照(0=不限)。ApplyMirrorBudget 设；仅 vector_alloc_
+    //                           存在时才非 0(否则超预算节点无处安放，必须全镜像)。
+    //   mirror_claimed_bytes_ : 本 store 已从全局池申领的字节，~MemStore 归还。
+    size_t mirror_max_nodes_ = SIZE_MAX;
+    size_t mirror_limit_bytes_ = 0;
+    size_t mirror_claimed_bytes_ = 0;
+
+    ~MemStore() {
+        ReleaseGlobalMirrorBytes(mirror_claimed_bytes_);
+    }
+
+    // 向全局镜像池申领，使本 store 累计可镜像到 want_nodes 个节点。返回实际可镜像节点数
+    // (池满时 < want_nodes)。mirror_limit_bytes_==0(不限)→ 直接返回 want_nodes，不计账。
+    // 幂等增量：重复调用只补申领差额，故 incremental Append 的逐批扩容可反复调用。
+    size_t ClaimMirrorNodes(size_t want_nodes) {
+        if (mirror_limit_bytes_ == 0 || vec_size == 0) {
+            return want_nodes;
+        }
+        size_t have = mirror_claimed_bytes_ / vec_size;
+        if (want_nodes <= have) {
+            return have;
+        }
+        size_t want_more = (want_nodes - have) * static_cast<size_t>(vec_size);
+        size_t granted = ClaimGlobalMirrorBytes(want_more, mirror_limit_bytes_);
+        mirror_claimed_bytes_ += granted;
+        return mirror_claimed_bytes_ / vec_size;
+    }
 
     std::vector<duckdb::IndexPointer> id_to_node_ptr_;
     std::vector<duckdb::IndexPointer> upper_idx_to_ptr_;
@@ -422,8 +492,17 @@ public:
              * during parallel BuildBulk; a std::vector::assign in add_vector() would
              * realloc/repoint the buffer mid-read → reader sees a dangling/NULL data()
              * → SEGV at 0x0 in search_upper_layer (the parallel-build publish race). */
+            // 全局池：申领使本索引可镜像到 base_n 个节点(增量 Append 反复调用只补差额)。
+            // 池满则 mirror_max_nodes_ 停在已获准处，其余节点走 vector_alloc_。
+            if (mirror_limit_bytes_ != 0) {
+                mirror_max_nodes_ = ClaimMirrorNodes(base_n);
+            }
             for (size_t i = cur_base; i < base_n; i++) {
-                vectors[i].resize(vec_size);
+                // 预算内才铺内存镜像；超出 mirror_max_nodes_ 的 slot 留空(size 0)，
+                // add_vector 跳过镜像写入、get_data 自动 fallback 到 vector_alloc_。
+                if (i < mirror_max_nodes_) {
+                    vectors[i].resize(vec_size);
+                }
             }
             base_points.resize(base_n, MakeBasePoint());
             base_layer.current_size = base_n;
@@ -627,11 +706,15 @@ public:
          * so memcpy into the stable buffer — no realloc, no data()-pointer change, safe
          * against concurrent lock-free get_data() readers. Cold path (unreserved id,
          * e.g. incremental Append) falls back to assign. */
-        auto &slot = vectors[id];
-        if (slot.size() == (size_t)vec_size) {
-            std::memcpy(slot.data(), store_data, vec_size);
-        } else {
-            slot.assign(store_data, store_data + vec_size);
+        // 预算内的节点写内存镜像(lock-free 热层)。超出 mirror_max_nodes_ 的节点
+        // 跳过镜像、只落 vector_alloc_(下方)——get_data 对其走 buffer manager fallback。
+        if (id < mirror_max_nodes_) {
+            auto &slot = vectors[id];
+            if (slot.size() == (size_t)vec_size) {
+                std::memcpy(slot.data(), store_data, vec_size);
+            } else {
+                slot.assign(store_data, store_data + vec_size);
+            }
         }
         if (node_alloc_ && vector_alloc_) {
             auto ptr = GetNodePtr(id);
@@ -778,7 +861,10 @@ public:
                 }
             }
         }
-        if (id >= vectors.size()) {
+        // 镜像超预算的 id：vectors[id] 为空，上面的 vector_alloc_ 路径已返回。
+        // 若 allocator 缺失(理论上 ApplyMirrorBudget 已保证不会收紧)则返回 nullptr，
+        // 绝不对空 slot 取 .data() 后按 vec_size memcpy 造成越界读。
+        if (id >= vectors.size() || vectors[id].empty()) {
             return nullptr;
         }
         return vectors[id].data();
@@ -821,7 +907,10 @@ public:
                 }
             }
         }
-        if (id >= vectors.size()) {
+        // 镜像超预算的 id：vectors[id] 为空，上面的 vector_alloc_ 路径已返回。
+        // 若 allocator 缺失(理论上 ApplyMirrorBudget 已保证不会收紧)则返回 nullptr，
+        // 绝不对空 slot 取 .data() 后按 vec_size memcpy 造成越界读。
+        if (id >= vectors.size() || vectors[id].empty()) {
             return nullptr;
         }
         return vectors[id].data();

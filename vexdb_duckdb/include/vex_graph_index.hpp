@@ -104,6 +104,16 @@ public:
     string GetConstraintViolationMessage(VerifyExistenceType verify_type, idx_t failed_index,
                                          DataChunk &input) override;
 
+    // graph_memory_limit (bytes) — byte budget for MemStore's in-memory raw-vector
+    // mirror (vectors[]). Captured from the vexdb_graph_memory_limit setting where a
+    // ClientContext is available (Create / PhysicalVexCreateIndex::Finalize) and applied
+    // to the store after each InitAllocators via ApplyMirrorBudget(). 0 = unlimited.
+    idx_t graph_memory_limit_bytes_ = 0;
+    // Translate graph_memory_limit_bytes_ → store.mirror_max_nodes_ for the current
+    // runtime_->store. Only tightens when vector_alloc_ exists (over-budget nodes need
+    // the buffer-manager-backed copy as their home); otherwise leaves it unlimited.
+    void ApplyMirrorBudget();
+
 private:
     IndexStorageInfo ExportStorageInfo() const;
     std::string BuildDiskImage() const;

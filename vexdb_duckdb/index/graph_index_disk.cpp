@@ -107,6 +107,14 @@ std::string GraphIndex::BuildDiskImage() const {
         auto &vec = store.vectors[i];
         if (!vec.empty()) {
             AppendRaw(vec_blob, vec.data(), vec.size());
+        } else {
+            // graph_memory_limit: over-budget nodes keep no mirror copy — their raw
+            // vector lives only in vector_alloc_. Read it authoritatively so the dense
+            // blob (load reads exactly vector_count entries) stays aligned and complete.
+            const char *raw = store.get_data_unlocked(i);
+            if (raw) {
+                AppendRaw(vec_blob, raw, store.vec_size);
+            }
         }
     }
 

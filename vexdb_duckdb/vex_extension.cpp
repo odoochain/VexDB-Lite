@@ -26,6 +26,14 @@ static void VexVersionFunction(DataChunk &args, ExpressionState &state, Vector &
     result.SetVectorType(VectorType::CONSTANT_VECTOR);
 }
 
+// Observability for the GLOBAL graph mirror pool: total bytes currently mirrored in
+// RAM across all GRAPH_INDEX instances (the shared vexdb_graph_memory_limit budget).
+// Independent heap allocation, so this is NOT counted in DuckDB's memory_limit.
+static void VexGraphMirrorUsedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    result.SetValue(0, Value::UBIGINT(GlobalMirrorUsedBytes().load(std::memory_order_relaxed)));
+    result.SetVectorType(VectorType::CONSTANT_VECTOR);
+}
+
 static void RegisterIndexTypes(DBConfig &config) {
     IndexType graph_index_type;
     graph_index_type.name = GraphIndex::TYPE_NAME;
@@ -42,6 +50,8 @@ static void RegisterIndexTypes(DBConfig &config) {
 void LoadInternal(ExtensionLoader &loader) {
     VexFunctions::Register(loader);
     loader.RegisterFunction(ScalarFunction("vexdb_version", {}, LogicalType::VARCHAR, VexVersionFunction));
+    loader.RegisterFunction(
+        ScalarFunction("vexdb_graph_mirror_used", {}, LogicalType::UBIGINT, VexGraphMirrorUsedFunction));
 
     auto &db = loader.GetDatabaseInstance();
     auto &config = DBConfig::GetConfig(db);
@@ -71,6 +81,20 @@ void LoadInternal(ExtensionLoader &loader) {
                               "PQ refine factor: SearchPQ takes top k*factor candidates "
                               "and re-ranks by raw distance. 1.0 = no refine. Range [1.0, 1000.0].",
                               LogicalType::DOUBLE, Value::DOUBLE(1.0));
+    // GLOBAL byte budget for the in-memory raw-vector mirror of GRAPH_INDEX, shared by
+    // ALL indexes (total mirror RAM across the whole database, not per-index). Nodes
+    // within the budget keep a lock-free RAM copy (vectors[]); beyond it, vectors are
+    // served from the buffer manager (pageable to disk, bounded by DuckDB's memory_limit).
+    // The mirror is independent heap memory (NOT counted in memory_limit) and otherwise
+    // a 2x-redundant copy of the buffer-manager tier — this caps that extra RAM, trading
+    // per-query lock-free speed for bounded mirror footprint. Inspect live usage via
+    // vexdb_graph_mirror_used(). 0 = unlimited (full mirror; backward-compatible default).
+    config.AddExtensionOption("vexdb_graph_memory_limit",
+                              "Global byte budget for GRAPH_INDEX's in-memory raw-vector mirror, "
+                              "shared across all indexes. 0 = unlimited (full mirror). Beyond the "
+                              "budget, vectors are served from the buffer manager (pageable, bounded "
+                              "by memory_limit). Inspect usage with vexdb_graph_mirror_used().",
+                              LogicalType::UBIGINT, Value::UBIGINT(0));
 
 }
 
