@@ -3,7 +3,6 @@
 #include <boost/preprocessor/seq/for_each.hpp>
 #include <boost/preprocessor/stringize.hpp>
 #include "platform/platform_compat.h"
-#include "utils/lsyscache.h"
 #include "distance/include/cblas_interface.h"
 #include "distance/include/pq/pq_endecode.h"
 #include "distance/include/distance_utils.h"
@@ -11,49 +10,6 @@
 #include "data_type/halfutils.h"
 
 static const Arch best_arch = ann_helper::get_best_arch();
-
-Metric get_func_metric(Oid func_id)
-{
-    char *func_name = get_func_name(func_id);
-    if (func_name == NULL) {
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-            errmsg("Could not get function name for OID %u", func_id)));
-        return Metric::L2;
-    }
-
-    Metric result = Metric::L2;
-
-    if (strcmp(func_name, "l2_distance") == 0 ||
-        strcmp(func_name, "floatvector_l2_squared_distance") == 0 ||
-        strcmp(func_name, "halfvector_l2_distance") == 0 ||
-        strcmp(func_name, "halfvector_l2_squared_distance") == 0 ||
-        strcmp(func_name, "int8vector_l2_distance") == 0 ||
-        strcmp(func_name, "int8vector_l2_squared_distance") == 0) {
-        result = Metric::L2;
-    } else if (strcmp(func_name, "cosine_distance") == 0 ||
-               strcmp(func_name, "halfvector_cosine_distance") == 0) {
-        result = Metric::FAST_COSINE;
-    } else if (strcmp(func_name, "inner_product") == 0 ||
-               strcmp(func_name, "floatvector_negative_inner_product") == 0 ||
-               strcmp(func_name, "halfvector_inner_product") == 0 ||
-               strcmp(func_name, "halfvector_negative_inner_product") == 0 ||
-               strcmp(func_name, "int8vector_inner_product") == 0 ||
-               strcmp(func_name, "int8vector_negative_inner_product") == 0) {
-        result = Metric::INNER_PRODUCT;
-    } else if (strcmp(func_name, "floatvector_spherical_distance") == 0 ||
-               strcmp(func_name, "halfvector_spherical_distance") == 0 ||
-               strcmp(func_name, "int8vector_spherical_distance") == 0 ||
-               strcmp(func_name, "int8vector_cosine_distance") == 0) {
-        result = Metric::COSINE;
-    } else {
-        pfree(func_name);
-        ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-            errmsg("Unsupported distance function")));
-    }
-
-    pfree(func_name);
-    return result;
-}
 
 #if COMPILER_SUPPORT_NEONV8
 #define ISA_FUNC_CALL_NEONV8(arg, call) \

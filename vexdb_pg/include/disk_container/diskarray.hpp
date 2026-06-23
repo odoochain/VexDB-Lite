@@ -6,10 +6,10 @@
 #define CONTAINER_DISKARRAY_H
 
 #include <vtl/internal/container.hpp>
-#include <vtl/disk_container/blockmgr.hpp>
-#include <vtl/disk_container/buffer_cache.hpp>
+#include <disk_container/blockmgr.hpp>
+#include <disk_container/buffer_cache.hpp>
 #include <vtl/internal/expr.hpp>
-#include <vtl/disk_container/macro.hpp>
+#include <disk_container/macro.hpp>
 
 #include "c.h"
 #include "storage/indexfsm.h"

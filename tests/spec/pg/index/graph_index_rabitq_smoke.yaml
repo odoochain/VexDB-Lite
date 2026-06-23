@@ -1,36 +1,86 @@
 name: graph_index_rabitq_smoke
-tags: [pg-only, migrated, regression, rabitq]
+tags: [pg-only, migrated, regression, rabitq, active-quantizer, dml]
 description: |
-  vexdb_graph WITH
-  (quantizer='rabitq') must build, KNN-search, and accept post-build
-  INSERTs without errors. The rabitq extract_qt path is exercised in
-  src/quantizer_stubs.cpp; kept low-dim so it runs in the standard PG
-  test container.
+  RaBitQ smoke with an ACTIVE quantizer. Table has 12 000 haystack rows +
+  1 needle, above GRAPH_INDEX_MIN_QT_SAMPLES_SIZE=10000 so init_quantizer()
+  in graph_index_build.cpp actually trains RaBitQ and flushes binary codes
+  (visible in server log as "Flushing Basepoint / Upperpoint / Vector").
+
+  Verifies L2 and Cosine opclass build + KNN recall, then post-build INSERT
+  on the active RaBitQ index persists and the inserted row is recalled by
+  subsequent KNN (insert path computes its RaBitQ code and links it into
+  the graph).
 engines: [pg]
 steps:
   - statement: SET maintenance_work_mem = '512MB';
-  - statement: DROP TABLE IF EXISTS t_rabitq_smoke;
-  - statement: CREATE TABLE t_rabitq_smoke (id int, v floatvector(8));
-  - statement: |
-      INSERT INTO t_rabitq_smoke
-      SELECT i, ('[' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ']')::floatvector
-      FROM generate_series(1, 256) AS t(i);
+  - statement: DROP TABLE IF EXISTS t_rabitq_smoke CASCADE;
+  - statement: CREATE TABLE t_rabitq_smoke (id int, vec floatvector(16));
+  - statement: >
+      CREATE OR REPLACE FUNCTION __rand_fvec16(dim int) RETURNS floatvector LANGUAGE SQL AS
+      'SELECT array_agg(random()::float4)::floatvector FROM generate_series(1, dim)';
+  - statement: >
+      INSERT INTO t_rabitq_smoke (id, vec)
+      SELECT g, __rand_fvec16(16) FROM generate_series(1, 12000) AS g;
+  - statement: >
+      INSERT INTO t_rabitq_smoke (id, vec)
+      VALUES (99999, '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::floatvector);
 
-  - statement: CREATE INDEX idx_rbq_l2 ON t_rabitq_smoke USING vexdb_graph (v floatvector_l2_ops) WITH (quantizer='rabitq');
-  - query: SELECT count(*) FROM (SELECT id FROM t_rabitq_smoke ORDER BY v <-> '[10,10,10,10,10,10,10,10]'::floatvector LIMIT 5) s;
-    expect: [["5"]]
+  # ---------- L2 opclass ----------
+  - statement: >
+      CREATE INDEX idx_rbq_l2 ON t_rabitq_smoke USING vexdb_graph (vec floatvector_l2_ops)
+      WITH (quantizer = rabitq);
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM t_rabitq_smoke
+        ORDER BY vec <-> '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::floatvector
+        LIMIT 1
+      ) s WHERE id = 99999
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
   - statement: DROP INDEX idx_rbq_l2;
 
-  - statement: CREATE INDEX idx_rbq_cos ON t_rabitq_smoke USING vexdb_graph (v floatvector_cosine_ops) WITH (quantizer='rabitq');
-  - query: SELECT count(*) FROM (SELECT id FROM t_rabitq_smoke ORDER BY v <=> '[10,10,10,10,10,10,10,10]'::floatvector LIMIT 5) s;
-    expect: [["5"]]
+  # ---------- Cosine opclass ----------
+  # Replace the needle with a unit basis vector so it's unambiguously the
+  # most similar to the cosine query.
+  - statement: >
+      DELETE FROM t_rabitq_smoke WHERE id = 99999;
+  - statement: >
+      INSERT INTO t_rabitq_smoke (id, vec)
+      VALUES (99999, '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::floatvector);
+  - statement: >
+      CREATE INDEX idx_rbq_cos ON t_rabitq_smoke USING vexdb_graph (vec floatvector_cosine_ops)
+      WITH (quantizer = rabitq);
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM t_rabitq_smoke
+        ORDER BY vec <=> '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::floatvector
+        LIMIT 1
+      ) s WHERE id = 99999
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
   - statement: DROP INDEX idx_rbq_cos;
 
-  # ---------- RaBitQ + post-build INSERT ----------
+  # ---------- Post-build INSERT on active RaBitQ ----------
+  # Re-create the L2 index, then INSERT a new needle and verify KNN recalls it.
   - statement: >
-      INSERT INTO t_rabitq_smoke VALUES (1000, '[10,10,10,10,10,10,10,10]'::floatvector);
-  - query: SELECT count(*) FROM t_rabitq_smoke
-    expect: [["257"]]
-  - query: SELECT id FROM t_rabitq_smoke WHERE id = 1000
-    expect: [["1000"]]
-  - statement: DROP TABLE t_rabitq_smoke;
+      CREATE INDEX idx_rbq_dml ON t_rabitq_smoke USING vexdb_graph (vec floatvector_l2_ops)
+      WITH (quantizer = rabitq);
+  - statement: >
+      INSERT INTO t_rabitq_smoke (id, vec)
+      VALUES (50000, '[41,41,41,41,41,41,41,41,41,41,41,41,41,41,41,41]'::floatvector);
+  - query: SELECT count(*) FROM t_rabitq_smoke WHERE id = 50000
+    expect: [["1"]]
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM t_rabitq_smoke
+        ORDER BY vec <-> '[41,41,41,41,41,41,41,41,41,41,41,41,41,41,41,41]'::floatvector
+        LIMIT 1
+      ) s WHERE id = 50000
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
+
+  - statement: DROP TABLE t_rabitq_smoke CASCADE;
+  - statement: DROP FUNCTION __rand_fvec16(int);

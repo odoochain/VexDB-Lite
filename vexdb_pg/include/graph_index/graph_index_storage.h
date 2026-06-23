@@ -11,8 +11,8 @@
 #include <mutex>
 #include <vtl/vector>
 #include <vtl/holder>
-#include <vtl/disk_container/diskvector.hpp>
-#include <vtl/disk_container/freespace.hpp>
+#include <disk_container/diskvector.hpp>
+#include <disk_container/freespace.hpp>
 #include <vtl/pair>
 #include <vtl/tuple>
 #include <vtl/bitlock.hpp>

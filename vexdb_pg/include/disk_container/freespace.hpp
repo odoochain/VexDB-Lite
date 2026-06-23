@@ -6,7 +6,7 @@
 #ifndef DISKANN_FREESPACE_H
 #define DISKANN_FREESPACE_H
 
-#include <vtl/disk_container/diskvector.hpp>
+#include <disk_container/diskvector.hpp>
 
 namespace disk_container {
 template <typename T>

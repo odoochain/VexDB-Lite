@@ -1,9 +1,9 @@
 name: graph_index_quantizer_dml_smoke
 tags: [pg-only, pq-v1, rabitq, dml]
 description: |
-  Verify post-build INSERT on PQ and RaBitQ quantized indexes. After
-  building with 500 rows, insert a known vector and check it appears
-  in the search results.
+  Verify post-build INSERT on PQ and RaBitQ quantized indexes. Uses
+  10 k rows so quantizer training succeeds (≥ GRAPH_INDEX_MIN_QT_SAMPLES_SIZE).
+  After building, insert a known vector and verify it's retrievable.
 engines: [pg]
 steps:
   # ---------- PQ + DML ----------
@@ -15,18 +15,18 @@ steps:
       INSERT INTO t_pq_dml (vec)
       SELECT ('[' || i || ',' || i || ',' || i || ',' || i || ','
                    || i || ',' || i || ',' || i || ',' || i || ']')::floatvector
-      FROM generate_series(0, 499) AS t(i);
+      FROM generate_series(0, 9999) AS t(i);
   - statement: >
       CREATE INDEX idx_pq_dml ON t_pq_dml USING vexdb_graph (vec floatvector_l2_ops)
       WITH (metric=L2, quantizer=pq, pq_m=4);
   - query: SELECT count(*) FROM t_pq_dml
-    expect: [["500"]]
+    expect: [["10000"]]
   - statement: >
       INSERT INTO t_pq_dml (vec) VALUES ('[100,100,100,100,100,100,100,100]'::floatvector);
   - query: SELECT count(*) FROM t_pq_dml
-    expect: [["501"]]
-  - query: SELECT id FROM t_pq_dml WHERE id = 501
-    expect: [["501"]]
+    expect: [["10001"]]
+  - query: SELECT id FROM t_pq_dml WHERE id = 10001
+    expect: [["10001"]]
   - statement: DROP TABLE t_pq_dml CASCADE;
 
   # ---------- RaBitQ + DML ----------
@@ -38,16 +38,16 @@ steps:
       INSERT INTO t_rq_dml (vec)
       SELECT ('[' || i || ',' || i || ',' || i || ',' || i || ','
                    || i || ',' || i || ',' || i || ',' || i || ']')::floatvector
-      FROM generate_series(0, 499) AS t(i);
+      FROM generate_series(0, 9999) AS t(i);
   - statement: >
       CREATE INDEX idx_rq_dml ON t_rq_dml USING vexdb_graph (vec floatvector_l2_ops)
       WITH (metric=L2, quantizer=rabitq);
   - query: SELECT count(*) FROM t_rq_dml
-    expect: [["500"]]
+    expect: [["10000"]]
   - statement: >
       INSERT INTO t_rq_dml (vec) VALUES ('[100,100,100,100,100,100,100,100]'::floatvector);
   - query: SELECT count(*) FROM t_rq_dml
-    expect: [["501"]]
-  - query: SELECT id FROM t_rq_dml WHERE id = 501
-    expect: [["501"]]
+    expect: [["10001"]]
+  - query: SELECT id FROM t_rq_dml WHERE id = 10001
+    expect: [["10001"]]
   - statement: DROP TABLE t_rq_dml CASCADE;

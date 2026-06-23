@@ -2,7 +2,8 @@ name: graph_index_halfvec_quantizer_smoke
 tags: [pg-only, halfvec, pq-v1, rabitq, dml]
 description: |
   halfvector with PQ and RaBitQ quantized indexes: build, search, and
-  post-build INSERT. Low-dim to keep test container friendly.
+  post-build INSERT. 10 k rows to pass min-sample threshold so the
+  quantizer is actually active.
 engines: [pg]
 steps:
   # ---------- half + PQ + DML ----------
@@ -14,18 +15,18 @@ steps:
       INSERT INTO t_half_pq (vec)
       SELECT ('[' || i || ',' || i || ',' || i || ',' || i || ','
                    || i || ',' || i || ',' || i || ',' || i || ']')::halfvector
-      FROM generate_series(0, 499) AS t(i);
+      FROM generate_series(0, 9999) AS t(i);
   - statement: >
       CREATE INDEX idx_half_pq ON t_half_pq USING vexdb_graph (vec halfvector_l2_ops)
       WITH (metric=L2, quantizer=pq, pq_m=4);
   - query: SELECT count(*) FROM t_half_pq
-    expect: [["500"]]
+    expect: [["10000"]]
   - statement: >
       INSERT INTO t_half_pq (vec) VALUES ('[50,50,50,50,50,50,50,50]'::halfvector);
   - query: SELECT count(*) FROM t_half_pq
-    expect: [["501"]]
-  - query: SELECT id FROM t_half_pq WHERE id = 501
-    expect: [["501"]]
+    expect: [["10001"]]
+  - query: SELECT id FROM t_half_pq WHERE id = 10001
+    expect: [["10001"]]
   - statement: DROP TABLE t_half_pq CASCADE;
 
   # ---------- half + RaBitQ + DML ----------
@@ -37,16 +38,16 @@ steps:
       INSERT INTO t_half_rq (vec)
       SELECT ('[' || i || ',' || i || ',' || i || ',' || i || ','
                    || i || ',' || i || ',' || i || ',' || i || ']')::halfvector
-      FROM generate_series(0, 499) AS t(i);
+      FROM generate_series(0, 9999) AS t(i);
   - statement: >
       CREATE INDEX idx_half_rq ON t_half_rq USING vexdb_graph (vec halfvector_l2_ops)
       WITH (metric=L2, quantizer=rabitq);
   - query: SELECT count(*) FROM t_half_rq
-    expect: [["500"]]
+    expect: [["10000"]]
   - statement: >
       INSERT INTO t_half_rq (vec) VALUES ('[50,50,50,50,50,50,50,50]'::halfvector);
   - query: SELECT count(*) FROM t_half_rq
-    expect: [["501"]]
-  - query: SELECT id FROM t_half_rq WHERE id = 501
-    expect: [["501"]]
+    expect: [["10001"]]
+  - query: SELECT id FROM t_half_rq WHERE id = 10001
+    expect: [["10001"]]
   - statement: DROP TABLE t_half_rq CASCADE;

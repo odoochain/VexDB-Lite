@@ -6,7 +6,7 @@
 #define BLOCK_MGR_H
 
 #include <vtl/internal/container.hpp>
-#include <vtl/disk_container/macro.hpp>
+#include <disk_container/macro.hpp>
 
 #include "utils/relcache.h"
 #include "storage/lmgr.h"

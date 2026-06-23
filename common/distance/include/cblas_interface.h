@@ -6,8 +6,10 @@
 #ifndef CBLAS_INTERFACE_H
 #define CBLAS_INTERFACE_H
 
+#if defined(PG_VEXDB_TARGET_PG)
 #include "pg_config.h"
 #include "c.h"
+#endif
 #ifdef ENABLE_OPENBLAS
 #include <cblas.h>
 

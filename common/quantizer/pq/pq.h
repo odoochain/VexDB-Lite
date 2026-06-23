@@ -41,7 +41,7 @@ struct ProductQuantizer {
     /// Layout: (M, ksub, dsub)
     float* centroids;
 
-    size_t get_centroids_size() { return d * ksub; }
+    size_t get_centroids_size() const { return d * ksub; }
     /// return the centroids associated with subvector m
     float* get_centroids(size_t m, size_t i) { return &centroids[(m * ksub + i) * dsub]; }
     const float* get_centroids(size_t m, size_t i) const { return &centroids[(m * ksub + i) * dsub]; }

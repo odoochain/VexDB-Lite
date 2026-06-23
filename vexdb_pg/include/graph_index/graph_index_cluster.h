@@ -8,7 +8,7 @@
 #include <vtl/vector>
 #include <vtl/span>
 #include <vtl/optional>
-#include <vtl/disk_container/plain_store.hpp>
+#include <disk_container/plain_store.hpp>
 
 #include "platform/platform_compat.h"
 #include "graph_index/graph_index_struct.h"

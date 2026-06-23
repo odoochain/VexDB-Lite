@@ -10,12 +10,12 @@
 #include <atomic>
 
 #include <vtl/internal/container.hpp>
-#include <vtl/disk_container/blockmgr.hpp>
+#include <disk_container/blockmgr.hpp>
 #include <vtl/internal/type.hpp>
 #include <vtl/internal/expr.hpp>
-#include <vtl/disk_container/macro.hpp>
+#include <disk_container/macro.hpp>
 #include <vtl/pair>
-#include <vtl/disk_container/log_manager.hpp>
+#include <disk_container/log_manager.hpp>
 
 #include "utils/relcache.h"
 #include "utils/palloc.h"

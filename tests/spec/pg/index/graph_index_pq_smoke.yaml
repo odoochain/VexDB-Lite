@@ -1,30 +1,66 @@
 name: graph_index_pq_smoke
-tags:
-- pg-only
-- pq-v1
+tags: [pg-only, pq-v1, regression, active-quantizer, dml]
 description: |
-  PQ v1 ship smoke. Verifies build path encode-at-flush, set_enable on
-  metapage, ADC scan, and post-build INSERT with PQ encoding. Requires
-  maintenance_work_mem ≥ 1GB; otherwise CREATE INDEX falls back to plain
-  HNSW with NOTICE.
-engines:
-- pg
+  PQ ship smoke with an ACTIVE quantizer. Table has 12 000 haystack rows +
+  1 needle, above GRAPH_INDEX_MIN_QT_SAMPLES_SIZE=10000 so init_quantizer()
+  in graph_index_build.cpp actually trains the PQ codebook and flushes codes.
+
+  Verifies:
+    1. vexdb_index_info().use_pq = true (PQ really trained, not fallback)
+    2. KNN via vexdb_graph recalls the needle as top-1 with enable_seqscan=off
+    3. Post-build INSERT on the active PQ index persists (rows visible)
+    4. The newly inserted row is召回 by subsequent KNN (insert path computes
+       its PQ code and links it into the graph)
+engines: [pg]
 steps:
-- statement: SET maintenance_work_mem = '2GB';
-- statement: DROP TABLE IF EXISTS pq_smoke;
-- statement: CREATE TABLE pq_smoke (id INTEGER, vec floatvector(8));
-- statement: "INSERT INTO pq_smoke SELECT i,\n    ('[' || i || ',' || i || ',' || i || ',' || i || ','\n         || i || ',' || i || ',' || i || ',' || i || ']')::floatvector\nFROM generate_series(0, 499) AS t(i);"
-- statement: CREATE INDEX idx_pq ON pq_smoke USING vexdb_graph (vec) WITH (quantizer='pq', pq_m=4);
-- query: SELECT use_pq FROM vexdb_index_info() WHERE indexname='idx_pq';
-  expect:
-    - "t"
-- query: SELECT id FROM pq_smoke ORDER BY vec <-> '[100,100,100,100,100,100,100,100]'::floatvector LIMIT 3;
-  expect:
-    - "100"
-    - "99"
-    - "101"
-- statement: INSERT INTO pq_smoke VALUES (1000, '[1,1,1,1,1,1,1,1]'::floatvector);
-- query: SELECT id FROM pq_smoke WHERE id = 1000;
-  expect:
-    - "1000"
-- statement: DROP TABLE pq_smoke;
+  - statement: SET maintenance_work_mem = '2GB';
+  - statement: DROP TABLE IF EXISTS pq_smoke CASCADE;
+  - statement: CREATE TABLE pq_smoke (id INTEGER, vec floatvector(16));
+  - statement: >
+      CREATE OR REPLACE FUNCTION __rand_fvec16(dim int) RETURNS floatvector LANGUAGE SQL AS
+      'SELECT array_agg(random()::float4)::floatvector FROM generate_series(1, dim)';
+  - statement: >
+      INSERT INTO pq_smoke (id, vec)
+      SELECT g, __rand_fvec16(16) FROM generate_series(1, 12000) AS g;
+  - statement: >
+      INSERT INTO pq_smoke (id, vec)
+      VALUES (99999, '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::floatvector);
+  - statement: >
+      CREATE INDEX idx_pq ON pq_smoke USING vexdb_graph (vec floatvector_l2_ops)
+      WITH (quantizer = pq, pq_m = 8);
+
+  # (1) PQ quantizer actually trained — use_pq = true
+  - query: SELECT use_pq FROM vexdb_index_info() WHERE indexname = 'idx_pq';
+    expect: [["t"]]
+
+  # (2) KNN recalls needle with index scan forced
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM pq_smoke
+        ORDER BY vec <-> '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::floatvector
+        LIMIT 1
+      ) s WHERE id = 99999
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
+
+  # (3) Post-build INSERT persists
+  - statement: >
+      INSERT INTO pq_smoke (id, vec)
+      VALUES (50000, '[41,41,41,41,41,41,41,41,41,41,41,41,41,41,41,41]'::floatvector);
+  - query: SELECT count(*) FROM pq_smoke WHERE id = 50000
+    expect: [["1"]]
+
+  # (4) Newly inserted row is recalled by KNN — graph + PQ code linked in
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM pq_smoke
+        ORDER BY vec <-> '[41,41,41,41,41,41,41,41,41,41,41,41,41,41,41,41]'::floatvector
+        LIMIT 1
+      ) s WHERE id = 50000
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
+
+  - statement: DROP TABLE pq_smoke CASCADE;
+  - statement: DROP FUNCTION __rand_fvec16(int);

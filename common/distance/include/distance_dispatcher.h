@@ -6,10 +6,12 @@
 #define DISTANCE_DISPATCHER_H
 
 #include "distance/include/distance.h"
-#include "graph_index/graph_index_struct.h"
+#include "quantizer/quantizer.h"
 #include "quantizer/pq/pq.h"
 #include "quantizer/pq/pq_distancer.h"
+#if defined(PG_VEXDB_TARGET_PG) || defined(PG_VEXDB_TARGET_DUCK_RABITQ)
 #include "quantizer/rabitq/rabitq_distancer.h"
+#endif
 
 enum class DispatcherMode {
     DEFAULT,        /* use direct distancer */
@@ -31,11 +33,6 @@ template <bool aligned, Metric... Ms, DistPrecisionType... Ds, DispatcherMode mo
 class DispatchRunner<aligned, MetricList<Ms...>, DistPrecisionTypeList<Ds...>, mode> {
 public:
     template <typename F>
-    static auto call(const GraphIndexMetaPage metap, F &&f) {
-        return call(metap->metric, metap->precision_type, metap->dimension,
-            metap->quantizer_metainfo.get_type(), std::forward<F>(f));
-    }
-    template <typename F>
     static auto call(Metric m, DistPrecisionType dp, uint16 dim, QuantizerType qt, F &&f) {
         CONSTEXPR_IF (mode != DispatcherMode::NO_QUANT) {
             if (qt == QuantizerType::PQ) {
@@ -52,6 +49,7 @@ public:
                 }
             }
             if (qt == QuantizerType::RABITQ) {
+#if defined(PG_VEXDB_TARGET_PG) || defined(PG_VEXDB_TARGET_DUCK_RABITQ)
                 CONSTEXPR_IF (mode == DispatcherMode::DEFAULT) {
                     return call<rabitq::RabitqDistancer>(std::forward<F>(f));
                 } else CONSTEXPR_IF (mode == DispatcherMode::BUILD_PAIR) {
@@ -63,6 +61,9 @@ public:
                         }
                     );
                 }
+#else
+                Assert(false && "RabitQ not compiled in");
+#endif
             }
         } else {
             Assert(qt == QuantizerType::NONE);

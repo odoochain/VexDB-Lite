@@ -174,6 +174,7 @@ set(DISTANCE_SRCS
     ${REPO_ROOT}/common/distance/src/architecture.cpp
     ${REPO_ROOT}/common/distance/src/general/general_dispatcher.cpp
     ${REPO_ROOT}/common/distance/src/distance.cpp
+    ${REPO_ROOT}/common/distance/src/distance_pg.cpp
 )
 
 set(QUANTIZER_SRCS

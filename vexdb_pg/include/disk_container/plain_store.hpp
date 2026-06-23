@@ -9,8 +9,8 @@
 
 #include <vtl/internal/container.hpp>
 #include <vtl/internal/expr.hpp>
-#include <vtl/disk_container/macro.hpp>
-#include <vtl/disk_container/log_manager.hpp>
+#include <disk_container/macro.hpp>
+#include <disk_container/log_manager.hpp>
 
 #include "utils/relcache.h"
 #include "storage/itemptr.h"

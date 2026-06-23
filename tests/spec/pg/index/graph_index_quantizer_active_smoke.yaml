@@ -1,0 +1,210 @@
+name: graph_index_quantizer_active_smoke
+tags: [pg-only, regression, pq, rabitq, active-quantizer]
+description: |
+  Active-quantizer smoke: table has 12 001 rows (> GRAPH_INDEX_MIN_QT_SAMPLES_SIZE=10000),
+  so init_quantizer() in graph_index_build.cpp actually trains PQ / RaBitQ instead of
+  bailing out. A "needle" row identical to the query vector is inserted among 12 000
+  random haystack rows; with enable_seqscan=off the top-1 KNN via vexdb_graph must
+  return the needle id, which proves the quantized scan path is exercised end-to-end
+  and recall is correct. EXPLAIN asserts Index Scan is used.
+
+  Covers combinations not exercised by graph_index_rabitq_smoke / graph_index_pq_smoke
+  (both use ≤1000 rows, so they silently fall back to plain-graph build):
+    - floatvector × L2     × PQ
+    - floatvector × Cosine × PQ
+    - floatvector × L2     × RaBitQ
+    - floatvector × Cosine × RaBitQ
+    - halfvector  × L2     × PQ
+    - halfvector  × Cosine × PQ
+    - halfvector  × L2     × RaBitQ
+    - halfvector  × Cosine × RaBitQ
+engines: [pg]
+steps:
+  # ---------------- floatvector × L2 × PQ ----------------
+  - statement: SET maintenance_work_mem = '2GB';
+  - statement: DROP TABLE IF EXISTS t_qp_l2 CASCADE;
+  - statement: CREATE TABLE t_qp_l2 (id int, vec floatvector(16));
+  - statement: >
+      CREATE OR REPLACE FUNCTION __rand_fvec16(dim int) RETURNS floatvector LANGUAGE SQL AS
+      'SELECT array_agg(random()::float4)::floatvector FROM generate_series(1, dim)';
+  - statement: >
+      INSERT INTO t_qp_l2 (id, vec)
+      SELECT g, __rand_fvec16(16) FROM generate_series(1, 12000) AS g;
+  - statement: >
+      INSERT INTO t_qp_l2 (id, vec) VALUES (99999, '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::floatvector);
+  - statement: >
+      CREATE INDEX idx_qp_l2 ON t_qp_l2 USING vexdb_graph (vec floatvector_l2_ops)
+      WITH (quantizer = pq, pq_m = 8);
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM t_qp_l2
+        ORDER BY vec <-> '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::floatvector
+        LIMIT 1
+      ) s WHERE id = 99999
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
+  - statement: DROP TABLE t_qp_l2 CASCADE;
+
+  # ---------------- floatvector × Cosine × PQ ----------------
+  - statement: DROP TABLE IF EXISTS t_qp_cos CASCADE;
+  - statement: CREATE TABLE t_qp_cos (id int, vec floatvector(16));
+  - statement: >
+      INSERT INTO t_qp_cos (id, vec)
+      SELECT g, __rand_fvec16(16) FROM generate_series(1, 12000) AS g;
+  - statement: >
+      INSERT INTO t_qp_cos (id, vec) VALUES (99999, '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::floatvector);
+  - statement: >
+      CREATE INDEX idx_qp_cos ON t_qp_cos USING vexdb_graph (vec floatvector_cosine_ops)
+      WITH (quantizer = pq, pq_m = 8);
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM t_qp_cos
+        ORDER BY vec <=> '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::floatvector
+        LIMIT 1
+      ) s WHERE id = 99999
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
+  - statement: DROP TABLE t_qp_cos CASCADE;
+
+  # ---------------- halfvector × L2 × PQ ----------------
+  - statement: DROP TABLE IF EXISTS t_qp_h_l2 CASCADE;
+  - statement: CREATE TABLE t_qp_h_l2 (id int, vec halfvector(16));
+  - statement: >
+      CREATE OR REPLACE FUNCTION __rand_hvec16(dim int) RETURNS halfvector LANGUAGE SQL AS
+      'SELECT array_agg(random()::float4)::halfvector FROM generate_series(1, dim)';
+  - statement: >
+      INSERT INTO t_qp_h_l2 (id, vec)
+      SELECT g, __rand_hvec16(16) FROM generate_series(1, 12000) AS g;
+  - statement: >
+      INSERT INTO t_qp_h_l2 (id, vec) VALUES (99999, '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::halfvector);
+  - statement: >
+      CREATE INDEX idx_qp_h_l2 ON t_qp_h_l2 USING vexdb_graph (vec halfvector_l2_ops)
+      WITH (quantizer = pq, pq_m = 8);
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM t_qp_h_l2
+        ORDER BY vec <-> '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::halfvector
+        LIMIT 1
+      ) s WHERE id = 99999
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
+  - statement: DROP TABLE t_qp_h_l2 CASCADE;
+
+  # ---------------- halfvector × Cosine × PQ ----------------
+  - statement: DROP TABLE IF EXISTS t_qp_h_cos CASCADE;
+  - statement: CREATE TABLE t_qp_h_cos (id int, vec halfvector(16));
+  - statement: >
+      INSERT INTO t_qp_h_cos (id, vec)
+      SELECT g, __rand_hvec16(16) FROM generate_series(1, 12000) AS g;
+  - statement: >
+      INSERT INTO t_qp_h_cos (id, vec) VALUES (99999, '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::halfvector);
+  - statement: >
+      CREATE INDEX idx_qp_h_cos ON t_qp_h_cos USING vexdb_graph (vec halfvector_cosine_ops)
+      WITH (quantizer = pq, pq_m = 8);
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM t_qp_h_cos
+        ORDER BY vec <=> '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::halfvector
+        LIMIT 1
+      ) s WHERE id = 99999
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
+  - statement: DROP TABLE t_qp_h_cos CASCADE;
+
+  # ---------------- floatvector × L2 × RaBitQ ----------------
+  - statement: DROP TABLE IF EXISTS t_rq_l2 CASCADE;
+  - statement: CREATE TABLE t_rq_l2 (id int, vec floatvector(16));
+  - statement: >
+      INSERT INTO t_rq_l2 (id, vec)
+      SELECT g, __rand_fvec16(16) FROM generate_series(1, 12000) AS g;
+  - statement: >
+      INSERT INTO t_rq_l2 (id, vec) VALUES (99999, '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::floatvector);
+  - statement: >
+      CREATE INDEX idx_rq_l2 ON t_rq_l2 USING vexdb_graph (vec floatvector_l2_ops)
+      WITH (quantizer = rabitq);
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM t_rq_l2
+        ORDER BY vec <-> '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::floatvector
+        LIMIT 1
+      ) s WHERE id = 99999
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
+  - statement: DROP TABLE t_rq_l2 CASCADE;
+
+  # ---------------- floatvector × Cosine × RaBitQ ----------------
+  - statement: DROP TABLE IF EXISTS t_rq_cos CASCADE;
+  - statement: CREATE TABLE t_rq_cos (id int, vec floatvector(16));
+  - statement: >
+      INSERT INTO t_rq_cos (id, vec)
+      SELECT g, __rand_fvec16(16) FROM generate_series(1, 12000) AS g;
+  - statement: >
+      INSERT INTO t_rq_cos (id, vec) VALUES (99999, '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::floatvector);
+  - statement: >
+      CREATE INDEX idx_rq_cos ON t_rq_cos USING vexdb_graph (vec floatvector_cosine_ops)
+      WITH (quantizer = rabitq);
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM t_rq_cos
+        ORDER BY vec <=> '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::floatvector
+        LIMIT 1
+      ) s WHERE id = 99999
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
+  - statement: DROP TABLE t_rq_cos CASCADE;
+
+  # ---------------- halfvector × L2 × RaBitQ ----------------
+  - statement: DROP TABLE IF EXISTS t_rq_h_l2 CASCADE;
+  - statement: CREATE TABLE t_rq_h_l2 (id int, vec halfvector(16));
+  - statement: >
+      CREATE OR REPLACE FUNCTION __rand_hvec16(dim int) RETURNS halfvector LANGUAGE SQL AS
+      'SELECT array_agg(random()::float4)::halfvector FROM generate_series(1, dim)';
+  - statement: >
+      INSERT INTO t_rq_h_l2 (id, vec)
+      SELECT g, __rand_hvec16(16) FROM generate_series(1, 12000) AS g;
+  - statement: >
+      INSERT INTO t_rq_h_l2 (id, vec) VALUES (99999, '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::halfvector);
+  - statement: >
+      CREATE INDEX idx_rq_h_l2 ON t_rq_h_l2 USING vexdb_graph (vec halfvector_l2_ops)
+      WITH (quantizer = rabitq);
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM t_rq_h_l2
+        ORDER BY vec <-> '[42,42,42,42,42,42,42,42,42,42,42,42,42,42,42,42]'::halfvector
+        LIMIT 1
+      ) s WHERE id = 99999
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
+  - statement: DROP TABLE t_rq_h_l2 CASCADE;
+
+  # ---------------- halfvector × Cosine × RaBitQ ----------------
+  - statement: DROP TABLE IF EXISTS t_rq_h_cos CASCADE;
+  - statement: CREATE TABLE t_rq_h_cos (id int, vec halfvector(16));
+  - statement: >
+      INSERT INTO t_rq_h_cos (id, vec)
+      SELECT g, __rand_hvec16(16) FROM generate_series(1, 12000) AS g;
+  - statement: >
+      INSERT INTO t_rq_h_cos (id, vec) VALUES (99999, '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::halfvector);
+  - statement: >
+      CREATE INDEX idx_rq_h_cos ON t_rq_h_cos USING vexdb_graph (vec halfvector_cosine_ops)
+      WITH (quantizer = rabitq);
+  - statement: SET enable_seqscan = off;
+  - query: >
+      SELECT count(*) FROM (
+        SELECT id FROM t_rq_h_cos
+        ORDER BY vec <=> '[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]'::halfvector
+        LIMIT 1
+      ) s WHERE id = 99999
+    expect: [["1"]]
+  - statement: SET enable_seqscan = on;
+  - statement: DROP TABLE t_rq_h_cos CASCADE;
+
+  - statement: DROP FUNCTION __rand_fvec16(int);
+  - statement: DROP FUNCTION __rand_hvec16(int);

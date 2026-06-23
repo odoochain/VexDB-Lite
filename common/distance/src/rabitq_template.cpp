@@ -20,7 +20,7 @@ static_assert(false, "don't use the file without definition DISTANCE_FUNC_NAME")
 #include <vtl/array>
 #include <vtl/expr_helper>
 
-#include "postgres.h"
+#include "platform/platform_compat.h"
 #include "distance/include/distance_utils.h"
 
 template<uint32 LOG_N>

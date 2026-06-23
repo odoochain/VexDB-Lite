@@ -14,11 +14,11 @@
 #include <vtl/btree>
 #include <vtl/vector>
 #include <vtl/optional>
-#include <vtl/disk_container/disk_hashtable_dependency.hpp>
-#include <vtl/disk_container/diskarray.hpp>
+#include <disk_container/disk_hashtable_dependency.hpp>
+#include <disk_container/diskarray.hpp>
 #include <vtl/internal/type.hpp>
 #include <vtl/internal/expr.hpp>
-#include <vtl/disk_container/macro.hpp>
+#include <disk_container/macro.hpp>
 
 #include "utils/elog.h"
 #include "storage/indexfsm.h"

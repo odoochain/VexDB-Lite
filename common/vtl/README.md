@@ -19,7 +19,7 @@ An exmaple can be
 ```c++
 #include <algorithm>
 #include <vtl/vector>
-#include <vtl/disk_container/diskvector.hpp>
+#include <disk_container/diskvector.hpp>
 #include "postgres.h"
 ```
 

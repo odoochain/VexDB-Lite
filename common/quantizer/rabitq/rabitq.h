@@ -11,7 +11,9 @@
 #include "platform/platform_compat.h"
 #include "rabitq/utils.h"
 #include "rabitq/rotator.h"
+#if defined(PG_VEXDB_TARGET_PG) || defined(PG_VEXDB_TARGET_DUCK_RABITQ)
 #include "global_instance.h"
+#endif
 #include "rabitq/rabitq_cache.h"
 #include "distance/include/distance.h"
 

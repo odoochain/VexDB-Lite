@@ -125,7 +125,8 @@ private:
                     DistPrecisionType::FLOAT,
                     DistPrecisionType::HALF,
                     DistPrecisionType::INT8
-                >, mode>::call(metap, [&](auto &distancer) {
+                >, mode>::call(metap->metric, metap->precision_type, metap->dimension,
+                    metap->quantizer_metainfo.get_type(), [&](auto &distancer) {
                     distancer.prepare(index, metap);
                     GraphIndexAlgorithm algo{metap, store, distancer};
 

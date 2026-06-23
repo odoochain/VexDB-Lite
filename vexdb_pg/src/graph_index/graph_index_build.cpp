@@ -5,12 +5,12 @@
  */
 
 #include <vtl/holder>
-#include <vtl/disk_container/freespace.hpp>
+#include <disk_container/freespace.hpp>
 #include <atomic>
 #include <cstdlib>
 #include <thread>
 #include <vector>
-/* PG port.h (via vtl/disk_container) 在前面已 #define snprintf pg_snprintf,
+/* PG port.h (via disk_container) 在前面已 #define snprintf pg_snprintf,
  * boost::source_location::to_string() 用 std::snprintf 会被替换成
  * std::pg_snprintf(不存在,ARM g++-9 严格解析时报错)。
  * 在 boost/lockfree include 之前 #undef 让 boost 内部用真 std::snprintf;

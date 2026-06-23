@@ -1,7 +1,7 @@
 #ifndef LOG_MANAGER_H
 #define LOG_MANAGER_H
 
-#include <vtl/disk_container/blockmgr.hpp>
+#include <disk_container/blockmgr.hpp>
 extern "C" {
 #include "access/generic_xlog.h"
 }

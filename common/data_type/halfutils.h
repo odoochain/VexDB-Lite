@@ -7,7 +7,8 @@
 #include <immintrin.h>
 #endif
 
-#include "data_type/halfvec.h"
+#include "platform/platform_compat.h"
+#include "data_type/half.h"
 #include "data_type/vec_common.h"
 
 inline bool HalfIsNan(half num)

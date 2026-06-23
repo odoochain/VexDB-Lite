@@ -137,7 +137,7 @@ FloatVectorArray graph_index_quantizer_sample_data(Relation heap, Relation index
     bool need_norm, DistPrecisionType precision_type, int parallel_workers, size_t sample_nums)
 {
     FloatVectorArray samples = FloatVectorArrayInit(sample_nums, dimension);
-    ann_sample_rows(samples, heap, index, dimension, parallel_workers, need_norm, precision_type);
+    ann_sample_rows(samples, heap, index, dimension, sample_nums, need_norm, precision_type);
     return samples;
 }
 
