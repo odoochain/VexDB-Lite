@@ -16,8 +16,9 @@ class PhysicalOperator;
 using DuckStore = MemStore<uint32, GraphIndexPoint>;
 
 struct GraphIndexRuntimeState {
-    explicit GraphIndexRuntimeState(idx_t dimension, int m)
+    explicit GraphIndexRuntimeState(idx_t dimension, int m, Allocator &mirror_allocator)
         : store(uint_fast16_t(dimension), uint_fast16_t(m), uint_fast32_t(dimension * sizeof(float))) {
+        store.SetMirrorAllocator(mirror_allocator);
     }
 
     DuckStore store;

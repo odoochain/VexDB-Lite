@@ -28,7 +28,8 @@ static void VexVersionFunction(DataChunk &args, ExpressionState &state, Vector &
 
 // Observability for the GLOBAL graph mirror pool: total bytes currently mirrored in
 // RAM across all GRAPH_INDEX instances (the shared vexdb_graph_memory_limit budget).
-// Independent heap allocation, so this is NOT counted in DuckDB's memory_limit.
+// Allocated via DuckDB's database allocator but not tied to the buffer pool, so this
+// is NOT counted in DuckDB's memory_limit.
 static void VexGraphMirrorUsedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     result.SetValue(0, Value::UBIGINT(GlobalMirrorUsedBytes().load(std::memory_order_relaxed)));
     result.SetVectorType(VectorType::CONSTANT_VECTOR);
@@ -85,9 +86,10 @@ void LoadInternal(ExtensionLoader &loader) {
     // ALL indexes (total mirror RAM across the whole database, not per-index). Nodes
     // within the budget keep a lock-free RAM copy (vectors[]); beyond it, vectors are
     // served from the buffer manager (pageable to disk, bounded by DuckDB's memory_limit).
-    // The mirror is independent heap memory (NOT counted in memory_limit) and otherwise
-    // a 2x-redundant copy of the buffer-manager tier — this caps that extra RAM, trading
-    // per-query lock-free speed for bounded mirror footprint. Inspect live usage via
+    // The mirror is DuckDB-allocator memory outside the buffer pool (NOT counted in
+    // memory_limit) and otherwise a 2x-redundant copy of the buffer-manager tier —
+    // this caps that extra RAM, trading per-query lock-free speed for bounded
+    // mirror footprint. Inspect live usage via
     // vexdb_graph_mirror_used(). 0 = unlimited (full mirror; backward-compatible default).
     config.AddExtensionOption("vexdb_graph_memory_limit",
                               "Global byte budget for GRAPH_INDEX's in-memory raw-vector mirror, "

@@ -180,7 +180,7 @@ void GraphIndex::LoadFromDiskImage(const std::string &blob) {
     m_ = int(meta.m);
     ef_construction_ = int(meta.ef_construction);
     metric_ = VexMetric(meta.metric);
-    runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_);
+    runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_, Allocator::Get(db));
     auto &store = runtime_->store;
     store.entry_info.set(meta.entry_id, meta.entry_cur_layer_idx, meta.entry_level);
 
@@ -213,7 +213,7 @@ void GraphIndex::LoadFromDiskImage(const std::string &blob) {
     }
 
     for (idx_t i = 0; i < idx_t(meta.vector_count); i++) {
-        store.vectors[i].resize(dimension_ * sizeof(float));
+        store.AllocateMirrorSlot(store.vectors[i], dimension_ * sizeof(float));
         ReadRaw(blob, offset, store.vectors[i].data(), store.vectors[i].size());
     }
 

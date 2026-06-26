@@ -86,7 +86,7 @@ GraphIndex::GraphIndex(const string &name, IndexConstraintType constraint_type, 
       dimension_(dimension), m_(m), ef_construction_(ef_construction),
       build_threads_(build_threads), metric_(metric),
       vec_column_index_(vec_column_index), pq_m_(pq_m),
-      runtime_(make_uniq<GraphIndexRuntimeState>(dimension, m)),
+      runtime_(make_uniq<GraphIndexRuntimeState>(dimension, m, Allocator::Get(db))),
       compact_mode_(compact_mode) {
     runtime_->store.normalize_vectors_ = (metric_ == VexMetric::COSINE);
 }
@@ -340,7 +340,7 @@ static void NormalizeInPlace(float *vec, idx_t dim) {
 }
 
 void GraphIndex::BuildBulk(const std::vector<float> &vectors, const std::vector<row_t> &row_ids) {
-    runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_);
+    runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_, Allocator::Get(db));
     runtime_->store.InitAllocators(table_io_manager.GetIndexBlockManager());
     // Fresh store for the bulk build — re-apply the budget captured in Create().
     ApplyMirrorBudget();
@@ -491,8 +491,8 @@ void GraphIndex::ReleaseRawVectors() {
     if (store.vector_alloc_) {
         store.vector_alloc_->Reset();
     }
-    store.vectors.clear();
-    store.vectors.shrink_to_fit();
+    store.ClearMirrorVectors(/*shrink=*/true);
+    store.ReleaseMirrorClaim();
     store.compact_mode_ = true;
 }
 
@@ -894,11 +894,12 @@ ErrorData GraphIndex::Append(IndexLock &l, DataChunk &chunk, Vector &row_ids) {
     vex_duck::ExclusiveLockGuard _wg(graph_rwlock_);
 
     if (!runtime_) {
-        runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_);
+        runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_, Allocator::Get(db));
         runtime_->store.normalize_vectors_ = (metric_ == VexMetric::COSINE);
     }
     if (!runtime_->store.node_alloc_ || !runtime_->store.vector_alloc_ || !runtime_->store.upper_alloc_) {
         runtime_->store.InitAllocators(table_io_manager.GetIndexBlockManager());
+        ApplyMirrorBudget();
     }
 
     if (column_ids.empty()) {
@@ -1341,7 +1342,7 @@ void GraphIndex::DeserializeFromStorage(const IndexStorageInfo &info) {
             i < store.vectors.size() && i < store.mirror_max_nodes_) {
             auto *vec_data = reinterpret_cast<const char *>(store.vector_alloc_->Get(header->vector_ptr));
             if (vec_data) {
-                store.vectors[i].assign(vec_data, vec_data + store.vec_size);
+                store.AssignMirrorSlot(store.vectors[i], vec_data, store.vec_size);
             }
         }
     }
