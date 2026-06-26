@@ -409,3 +409,7 @@ scripts/*.local.sh
 # 内部文档目录（本地保留，不入仓库）
 docs/
 CHANGELOG.md
+
+# SIFT benchmark data (large, generated from hdf5; not in repo)
+vexdb_duckdb/test/benchmark/data/*.fbin
+vexdb_duckdb/test/benchmark/data/*.ibin

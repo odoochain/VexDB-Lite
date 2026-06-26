@@ -13,6 +13,7 @@
 
 #include "vex/vex_disk_block_store.hpp"
 #include "vex_distance.hpp"
+#include "vex_fetch_utils.hpp"
 
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "vex_hnsw_node.hpp"
@@ -85,9 +86,29 @@ GraphIndex::GraphIndex(const string &name, IndexConstraintType constraint_type, 
       dimension_(dimension), m_(m), ef_construction_(ef_construction),
       build_threads_(build_threads), metric_(metric),
       vec_column_index_(vec_column_index), pq_m_(pq_m),
-      runtime_(make_uniq<GraphIndexRuntimeState>(dimension, m)),
+      runtime_(make_uniq<GraphIndexRuntimeState>(dimension, m, Allocator::Get(db))),
       compact_mode_(compact_mode) {
     runtime_->store.normalize_vectors_ = (metric_ == VexMetric::COSINE);
+}
+
+void GraphIndex::ApplyMirrorBudget() {
+    auto &store = runtime_->store;
+    // Only tighten when the buffer-manager-backed copy exists: over-budget nodes skip
+    // the vectors[] mirror and rely on vector_alloc_ as their sole home. Without it
+    // they'd have nowhere to live, so fall back to the unlimited (full-mirror) path.
+    // (The disk-image load path never InitAllocators → vector_alloc_ is null → it stays
+    // full-mirror and outside the global pool by construction.)
+    if (graph_memory_limit_bytes_ == 0 || !store.vector_alloc_ || store.vec_size == 0) {
+        store.mirror_limit_bytes_ = 0;
+        store.mirror_max_nodes_ = SIZE_MAX;
+        return;
+    }
+    // vexdb_graph_memory_limit is a GLOBAL budget shared by all indexes' mirrors. Record
+    // the limit here; the actual byte claim against the shared pool happens lazily in
+    // ReserveCapacity / DeserializeFromStorage once this store's node count is known.
+    // Until claimed, nothing is mirrored (mirror_max_nodes_ = 0).
+    store.mirror_limit_bytes_ = static_cast<size_t>(graph_memory_limit_bytes_);
+    store.mirror_max_nodes_ = 0;
 }
 
 unique_ptr<BoundIndex> GraphIndex::Create(CreateIndexInput &input) {
@@ -233,17 +254,25 @@ unique_ptr<BoundIndex> GraphIndex::Create(CreateIndexInput &input) {
                                              input.unbound_expressions, input.db, dimension, m, ef_construction,
                                              metric, 0, pq_m, compact_mode, build_threads);
 
+    // Capture the mirror budget once here (ClientContext available). It persists on the
+    // GraphIndex member across Create → PhysicalVexCreateIndex::Finalize → BuildBulk
+    // (which builds a fresh store but reuses this object), and is applied to whichever
+    // store is live after each InitAllocators via ApplyMirrorBudget().
+    graph_index->graph_memory_limit_bytes_ = GetGraphMemoryLimitBytes(input.context);
+
     if (input.storage_info.allocator_infos.size() >= 3) {
         // Reload path: create allocators WITHOUT slot-0 reservation. The serialized
         // bitmask already has slot 0 reserved from the original InitAllocators().
         // Reserving it again would corrupt buffers_with_free_space tracking.
         graph_index->runtime_->store.CreateAllocators(input.table_io_manager.GetIndexBlockManager());
+        graph_index->ApplyMirrorBudget();
         graph_index->DeserializeFromStorage(input.storage_info);
         graph_index->runtime_->store.normalize_vectors_ = (graph_index->metric_ == VexMetric::COSINE);
         return std::move(graph_index);
     }
 
     graph_index->runtime_->store.InitAllocators(input.table_io_manager.GetIndexBlockManager());
+    graph_index->ApplyMirrorBudget();
 
     auto manifest_it = input.storage_info.options.find("vex_graph_manifest");
     if (manifest_it != input.storage_info.options.end()) {
@@ -311,8 +340,10 @@ static void NormalizeInPlace(float *vec, idx_t dim) {
 }
 
 void GraphIndex::BuildBulk(const std::vector<float> &vectors, const std::vector<row_t> &row_ids) {
-    runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_);
+    runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_, Allocator::Get(db));
     runtime_->store.InitAllocators(table_io_manager.GetIndexBlockManager());
+    // Fresh store for the bulk build — re-apply the budget captured in Create().
+    ApplyMirrorBudget();
 
     // For cosine: normalize once at the adapter, then tell store NOT to normalize
     // again. Double-normalizing causes float-precision drift in the rounding of
@@ -460,8 +491,8 @@ void GraphIndex::ReleaseRawVectors() {
     if (store.vector_alloc_) {
         store.vector_alloc_->Reset();
     }
-    store.vectors.clear();
-    store.vectors.shrink_to_fit();
+    store.ClearMirrorVectors(/*shrink=*/true);
+    store.ReleaseMirrorClaim();
     store.compact_mode_ = true;
 }
 
@@ -863,11 +894,12 @@ ErrorData GraphIndex::Append(IndexLock &l, DataChunk &chunk, Vector &row_ids) {
     vex_duck::ExclusiveLockGuard _wg(graph_rwlock_);
 
     if (!runtime_) {
-        runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_);
+        runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_, Allocator::Get(db));
         runtime_->store.normalize_vectors_ = (metric_ == VexMetric::COSINE);
     }
     if (!runtime_->store.node_alloc_ || !runtime_->store.vector_alloc_ || !runtime_->store.upper_alloc_) {
         runtime_->store.InitAllocators(table_io_manager.GetIndexBlockManager());
+        ApplyMirrorBudget();
     }
 
     if (column_ids.empty()) {
@@ -1254,6 +1286,13 @@ void GraphIndex::DeserializeFromStorage(const IndexStorageInfo &info) {
     // restoring their tids would resurrect rows the table no longer has.
     const int m_local = static_cast<int>(store.m);
     const uint_fast16_t nbr_slots = static_cast<uint_fast16_t>(m_local * 2);
+    // Standard reload participates in the global mirror pool too: vectors live in
+    // vector_alloc_, so over-budget nodes simply keep no mirror copy (rebuilt below
+    // only for i < mirror_max_nodes_) and are served from the buffer manager.
+    if (store.mirror_limit_bytes_ != 0) {
+        store.mirror_max_nodes_ =
+            store.ClaimMirrorNodes(std::min(store.id_to_node_ptr_.size(), store.elems.size()));
+    }
     for (size_t i = 0; i < store.id_to_node_ptr_.size() && i < store.elems.size(); i++) {
         auto ptr = store.id_to_node_ptr_[i];
         if (!ptr.Get() || !store.node_alloc_) {
@@ -1298,11 +1337,12 @@ void GraphIndex::DeserializeFromStorage(const IndexStorageInfo &info) {
         // vectors[i] mirror (get_data fallback path)
         // compact_mode 下原始向量已被 ReleaseRawVectors 清空，header->vector_ptr 是
         // 失效的 buffer_id；跳过避免对空 allocator 调 Get() 解引用 nullptr。
+        // 超出 mirror_max_nodes_ 预算的节点不重建镜像，留 get_data 走 vector_alloc_。
         if (!compact_mode_flag && store.vector_alloc_ && header->vector_ptr.Get() &&
-            i < store.vectors.size()) {
+            i < store.vectors.size() && i < store.mirror_max_nodes_) {
             auto *vec_data = reinterpret_cast<const char *>(store.vector_alloc_->Get(header->vector_ptr));
             if (vec_data) {
-                store.vectors[i].assign(vec_data, vec_data + store.vec_size);
+                store.AssignMirrorSlot(store.vectors[i], vec_data, store.vec_size);
             }
         }
     }

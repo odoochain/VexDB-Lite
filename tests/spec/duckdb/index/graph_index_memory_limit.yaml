@@ -1,0 +1,271 @@
+name: graph_index_memory_limit
+tags: [vex, regression]
+description: vexdb_graph_memory_limit bounds the in-memory raw-vector mirror (vectors[]). Nodes beyond the byte budget keep no mirror copy and are served from the buffer-manager-backed vector_alloc_ via get_data's per-id fallback. The budget is GLOBAL — a single pool shared across all indexes (total mirror RAM), not per-index. This spec covers single-index correctness on/over the budget, exact byte accounting via vexdb_graph_mirror_used(), the fits-all and unlimited(0) cases, DELETE, incremental INSERT, cosine (normalized) over-budget reads, and the shared-pool split + release across multiple indexes.
+engines: [duckdb]
+steps:
+  - statement: CREATE TABLE t_mem (id INTEGER, vec FLOAT[8]);
+  # Distinct, well-separated vectors so the L2 nearest neighbor of any indexed
+  # vector is unambiguously itself (distance 0). vec_size = 8 floats * 4 = 32 bytes.
+  - statement: INSERT INTO t_mem SELECT i, [i::FLOAT, (i+1)::FLOAT, (i+2)::FLOAT, (i+3)::FLOAT, (i+4)::FLOAT, (i+5)::FLOAT, (i+6)::FLOAT, (i+7)::FLOAT]::FLOAT[8] FROM range(2000) t(i);
+
+  # Force the HNSW graph path (not brute force) so over-budget reads happen during
+  # graph traversal, not just a full scan.
+  - statement: SET vexdb_brute_force_threshold = 64;
+  - statement: SET vexdb_ef_search = 200;
+
+  # === Single-index correctness: ~128 of 2000 nodes mirrored, rest from buffer mgr ===
+  - statement: SET vexdb_graph_memory_limit = 4096;
+  - statement: CREATE INDEX idx_mem ON t_mem USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+
+  # Self-query for a high (over-budget) id must return itself as exact top-1. If the
+  # over-budget buffer-manager reads returned garbage, distances would be wrong.
+  - query: SELECT id FROM t_mem ORDER BY l2_distance(vec, [1500.0,1501.0,1502.0,1503.0,1504.0,1505.0,1506.0,1507.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 1500
+  # Top-3 with the query offset by +0.4 on every dim => unambiguous distances:
+  # 1234 (0.4) < 1235 (0.6) < 1233 (1.4), no ties.
+  - query: SELECT id FROM t_mem ORDER BY l2_distance(vec, [1234.4,1235.4,1236.4,1237.4,1238.4,1239.4,1240.4,1241.4]::FLOAT[8]) LIMIT 3;
+    _field_types: I
+    expect:
+      - - 1234
+      - - 1235
+      - - 1233
+  # A within-budget id (low) still resolves correctly.
+  - query: SELECT id FROM t_mem ORDER BY l2_distance(vec, [42.0,43.0,44.0,45.0,46.0,47.0,48.0,49.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 42
+  # Exactly 4096 bytes claimed from the global pool (128 nodes * 32B).
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 4096
+  - statement: DROP INDEX idx_mem;
+  # Drop releases the claim.
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 0
+
+  # === Exact byte accounting with a non-multiple budget (100B => floor 3 nodes) ===
+  - statement: SET vexdb_graph_memory_limit = 100;
+  - statement: CREATE INDEX idx_mem_100 ON t_mem USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+  # Claim is min(want, budget) = 100 bytes (not rounded down to a node multiple).
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 100
+  - query: SELECT id FROM t_mem ORDER BY l2_distance(vec, [1500.0,1501.0,1502.0,1503.0,1504.0,1505.0,1506.0,1507.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 1500
+  - statement: DROP INDEX idx_mem_100;
+
+  # === Budget fits everything: all 2000 nodes mirrored, tracked at 64000 bytes ===
+  - statement: SET vexdb_graph_memory_limit = 64000;
+  - statement: CREATE INDEX idx_mem_fit ON t_mem USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 64000
+  - query: SELECT id FROM t_mem ORDER BY l2_distance(vec, [1999.0,2000.0,2001.0,2002.0,2003.0,2004.0,2005.0,2006.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 1999
+  - statement: DROP INDEX idx_mem_fit;
+
+  # === Unlimited (budget 0): full mirror, but NOT tracked in the pool ===
+  - statement: SET vexdb_graph_memory_limit = 0;
+  - statement: CREATE INDEX idx_mem_full ON t_mem USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+  # Unlimited indexes do not consume the shared pool.
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 0
+  - query: SELECT id FROM t_mem ORDER BY l2_distance(vec, [1500.0,1501.0,1502.0,1503.0,1504.0,1505.0,1506.0,1507.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 1500
+  - statement: DROP INDEX idx_mem_full;
+
+  # === Extreme budget (1 byte => 0 mirrored nodes): everything from buffer manager ===
+  - statement: SET vexdb_graph_memory_limit = 1;
+  - statement: CREATE INDEX idx_mem_tiny ON t_mem USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+  - query: SELECT id FROM t_mem ORDER BY l2_distance(vec, [777.0,778.0,779.0,780.0,781.0,782.0,783.0,784.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 777
+  - statement: DROP INDEX idx_mem_tiny;
+
+  # === DELETE under budget: deleted row excluded; over-budget reads stay correct ===
+  - statement: SET vexdb_graph_memory_limit = 4096;
+  - statement: CREATE INDEX idx_mem_del ON t_mem USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+  - statement: DELETE FROM t_mem WHERE id = 1500;
+  # Query offset +0.4 toward 1500: with 1500 gone, nearest is 1501 (0.6) < 1499 (1.4).
+  - query: SELECT id FROM t_mem ORDER BY l2_distance(vec, [1500.4,1501.4,1502.4,1503.4,1504.4,1505.4,1506.4,1507.4]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 1501
+  # A different over-budget id (not deleted) still resolves to itself.
+  - query: SELECT id FROM t_mem ORDER BY l2_distance(vec, [1801.0,1802.0,1803.0,1804.0,1805.0,1806.0,1807.0,1808.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 1801
+  - statement: DROP INDEX idx_mem_del;
+  - statement: DROP TABLE t_mem;
+
+  # =========================================================================
+  # Global pool: vexdb_graph_memory_limit is shared across ALL indexes (total
+  # mirror RAM for the whole database), not a per-index quota.
+  # =========================================================================
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 0
+
+  - statement: CREATE TABLE t_mem (id INTEGER, vec FLOAT[8]);
+  - statement: INSERT INTO t_mem SELECT i, [i::FLOAT, (i+1)::FLOAT, (i+2)::FLOAT, (i+3)::FLOAT, (i+4)::FLOAT, (i+5)::FLOAT, (i+6)::FLOAT, (i+7)::FLOAT]::FLOAT[8] FROM range(2000) t(i);
+  - statement: CREATE TABLE t_mem2 (id INTEGER, vec FLOAT[8]);
+  - statement: INSERT INTO t_mem2 SELECT i, [i::FLOAT, (i+1)::FLOAT, (i+2)::FLOAT, (i+3)::FLOAT, (i+4)::FLOAT, (i+5)::FLOAT, (i+6)::FLOAT, (i+7)::FLOAT]::FLOAT[8] FROM range(2000) t(i);
+
+  # 4096-byte global budget, vec_size = 32 => 128 mirrored nodes TOTAL across both.
+  - statement: SET vexdb_graph_memory_limit = 4096;
+  - statement: CREATE INDEX idx_a ON t_mem USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 4096
+  - statement: CREATE INDEX idx_b ON t_mem2 USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+  # Shared, not per-index: total still 4096 (idx_b got nothing). Per-index => 8192.
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 4096
+  - query: SELECT id FROM t_mem ORDER BY l2_distance(vec, [1500.0,1501.0,1502.0,1503.0,1504.0,1505.0,1506.0,1507.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 1500
+  - query: SELECT id FROM t_mem2 ORDER BY l2_distance(vec, [1500.0,1501.0,1502.0,1503.0,1504.0,1505.0,1506.0,1507.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 1500
+  - statement: DROP INDEX idx_a;
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 0
+  - statement: DROP INDEX idx_b;
+  - statement: DROP TABLE t_mem2;
+  - statement: DROP TABLE t_mem;
+
+  # === Global pool split across THREE indexes: A full, B partial, C none ===
+  # 500-row tables => 16000 bytes each at full mirror. Budget 24000 => A 16000,
+  # B 8000 (250 nodes), C 0. Total capped at the 24000 budget.
+  - statement: CREATE TABLE tA (id INTEGER, vec FLOAT[8]);
+  - statement: INSERT INTO tA SELECT i, [i::FLOAT, (i+1)::FLOAT, (i+2)::FLOAT, (i+3)::FLOAT, (i+4)::FLOAT, (i+5)::FLOAT, (i+6)::FLOAT, (i+7)::FLOAT]::FLOAT[8] FROM range(500) t(i);
+  - statement: CREATE TABLE tB (id INTEGER, vec FLOAT[8]);
+  - statement: INSERT INTO tB SELECT i, [i::FLOAT, (i+1)::FLOAT, (i+2)::FLOAT, (i+3)::FLOAT, (i+4)::FLOAT, (i+5)::FLOAT, (i+6)::FLOAT, (i+7)::FLOAT]::FLOAT[8] FROM range(500) t(i);
+  - statement: CREATE TABLE tC (id INTEGER, vec FLOAT[8]);
+  - statement: INSERT INTO tC SELECT i, [i::FLOAT, (i+1)::FLOAT, (i+2)::FLOAT, (i+3)::FLOAT, (i+4)::FLOAT, (i+5)::FLOAT, (i+6)::FLOAT, (i+7)::FLOAT]::FLOAT[8] FROM range(500) t(i);
+
+  - statement: SET vexdb_graph_memory_limit = 24000;
+  - statement: CREATE INDEX idx_tA ON tA USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 16000
+  - statement: CREATE INDEX idx_tB ON tB USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 24000
+  - statement: CREATE INDEX idx_tC ON tC USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+  # Capped at the budget: the third index got no mirror at all.
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 24000
+  # An over-budget id (>= 250) resolves correctly in every index regardless of tier.
+  - query: SELECT id FROM tA ORDER BY l2_distance(vec, [400.0,401.0,402.0,403.0,404.0,405.0,406.0,407.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 400
+  - query: SELECT id FROM tB ORDER BY l2_distance(vec, [400.0,401.0,402.0,403.0,404.0,405.0,406.0,407.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 400
+  - query: SELECT id FROM tC ORDER BY l2_distance(vec, [400.0,401.0,402.0,403.0,404.0,405.0,406.0,407.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 400
+  # Releases are accounted per index as they drop.
+  - statement: DROP INDEX idx_tC;
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 24000
+  - statement: DROP INDEX idx_tB;
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 16000
+  - statement: DROP INDEX idx_tA;
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 0
+  - statement: DROP TABLE tA;
+  - statement: DROP TABLE tB;
+  - statement: DROP TABLE tC;
+
+  # === Incremental INSERT under budget: new over-budget rows go to buffer manager ===
+  - statement: CREATE TABLE t_inc (id INTEGER, vec FLOAT[8]);
+  - statement: INSERT INTO t_inc SELECT i, [i::FLOAT, (i+1)::FLOAT, (i+2)::FLOAT, (i+3)::FLOAT, (i+4)::FLOAT, (i+5)::FLOAT, (i+6)::FLOAT, (i+7)::FLOAT]::FLOAT[8] FROM range(1000) t(i);
+  - statement: SET vexdb_graph_memory_limit = 4096;
+  - statement: CREATE INDEX idx_inc ON t_inc USING GRAPH_INDEX (vec) WITH (m=16, metric='l2');
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 4096
+  # Append 200 rows AFTER the build. They are over-budget (id >= base count) so they
+  # land only in vector_alloc_ — no new mirror claim, usage stays flat.
+  - statement: INSERT INTO t_inc SELECT i, [i::FLOAT, (i+1)::FLOAT, (i+2)::FLOAT, (i+3)::FLOAT, (i+4)::FLOAT, (i+5)::FLOAT, (i+6)::FLOAT, (i+7)::FLOAT]::FLOAT[8] FROM range(1000,1200) t(i);
+  - query: SELECT vexdb_graph_mirror_used();
+    _field_types: I
+    expect:
+      - - 4096
+  # A freshly inserted (over-budget) row is searchable and correct.
+  - query: SELECT id FROM t_inc ORDER BY l2_distance(vec, [1100.0,1101.0,1102.0,1103.0,1104.0,1105.0,1106.0,1107.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 1100
+  # An original within-budget row still resolves correctly.
+  - query: SELECT id FROM t_inc ORDER BY l2_distance(vec, [50.0,51.0,52.0,53.0,54.0,55.0,56.0,57.0]::FLOAT[8]) LIMIT 1;
+    _field_types: I
+    expect:
+      - - 50
+  - statement: DROP INDEX idx_inc;
+  - statement: DROP TABLE t_inc;
+
+  # === Cosine (normalized vectors) under budget: over-budget normalized reads ===
+  # add_vector normalizes and writes both tiers; over-budget nodes keep only the
+  # normalized copy in vector_alloc_. budget=1 => 0 nodes mirrored, every vector is
+  # read back from vector_alloc_ as a normalized blob. Distinct directions (not the
+  # collinear L2 dataset, whose directions converge) keep the result unambiguous.
+  - statement: SET vexdb_brute_force_threshold = 1000000;
+  - statement: SET vexdb_graph_memory_limit = 1;
+  - statement: CREATE TABLE t_cos (id INTEGER, vec FLOAT[8]);
+  - statement: "INSERT INTO t_cos VALUES (1, [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]::FLOAT[8]), (2, [0.0,1.0,0.0,0.0,0.0,0.0,0.0,0.0]::FLOAT[8]), (3, [0.0,0.0,1.0,0.0,0.0,0.0,0.0,0.0]::FLOAT[8]), (4, [0.577,0.577,0.577,0.0,0.0,0.0,0.0,0.0]::FLOAT[8]), (5, [0.707,0.707,0.0,0.0,0.0,0.0,0.0,0.0]::FLOAT[8]);"
+  - statement: CREATE INDEX idx_cos ON t_cos USING GRAPH_INDEX (vec) WITH (m=16, metric='cosine');
+  # All nodes over-budget => every cosine distance comes from a normalized vector_alloc_
+  # read. Query along +x: id 1 (distance 0) < 5 (45 deg) < 4 (~55 deg).
+  - query: SELECT id FROM t_cos ORDER BY cosine_distance(vec, [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0]::FLOAT[8]) LIMIT 3;
+    _field_types: I
+    expect:
+      - - 1
+      - - 5
+      - - 4
+  - statement: DROP INDEX idx_cos;
+  - statement: DROP TABLE t_cos;
+  - statement: SET vexdb_graph_memory_limit = 0;

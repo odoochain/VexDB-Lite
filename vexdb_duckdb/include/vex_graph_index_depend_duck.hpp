@@ -1,5 +1,7 @@
 #pragma once
 
+#include "duckdb/common/allocator.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/execution/index/fixed_size_allocator.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/unordered_map.hpp"
@@ -265,6 +267,38 @@ inline T Min(const T &a, const T &b) {
     return a < b ? a : b;
 }
 
+// 全局镜像内存池。所有 GRAPH_INDEX 的 vectors[] 镜像(经 DuckDB Allocator 分配，
+// 不挂到 buffer pool / 不计入 DuckDB
+// memory_limit)共享 vexdb_graph_memory_limit 这一个字节预算——预算是“全库镜像总量”
+// 而非单索引上限。MemStore 是 header-only 模板，裸 static 全局会每个 TU 一份，故用
+// inline 函数包 function-local static 保证跨 TU 单实例(C++11 magic static，线程安全初始化)。
+// 作用域为进程级；同进程多 DatabaseInstance 共享同一池(嵌入式常规单实例，可接受)。
+inline std::atomic<size_t> &GlobalMirrorUsedBytes() {
+    static std::atomic<size_t> used{0};
+    return used;
+}
+// 从全局池申领 want 字节，返回实际授予(<=want；池满则更少，可能为 0)。limit 为全局上限。
+inline size_t ClaimGlobalMirrorBytes(size_t want, size_t limit) {
+    auto &used = GlobalMirrorUsedBytes();
+    size_t cur = used.load(std::memory_order_relaxed);
+    for (;;) {
+        size_t avail = cur < limit ? limit - cur : 0;
+        size_t grant = want < avail ? want : avail;
+        if (grant == 0) {
+            return 0;
+        }
+        if (used.compare_exchange_weak(cur, cur + grant, std::memory_order_acq_rel,
+                                       std::memory_order_relaxed)) {
+            return grant;
+        }
+    }
+}
+inline void ReleaseGlobalMirrorBytes(size_t bytes) {
+    if (bytes) {
+        GlobalMirrorUsedBytes().fetch_sub(bytes, std::memory_order_acq_rel);
+    }
+}
+
 template <typename IdType = uint32, typename elem_type = GraphIndexPoint>
 class MemStore;
 
@@ -289,6 +323,69 @@ public:
         std::vector<T> neighbors_info;
         std::vector<float> dists;
         std::vector<uint32> stat_words;
+    };
+    struct MirrorVectorSlot {
+        duckdb::Allocator *allocator = nullptr;
+        duckdb::data_ptr_t ptr = nullptr;
+        duckdb::idx_t size_bytes = 0;
+
+        MirrorVectorSlot() = default;
+        MirrorVectorSlot(const MirrorVectorSlot &) = delete;
+        MirrorVectorSlot &operator=(const MirrorVectorSlot &) = delete;
+        MirrorVectorSlot(MirrorVectorSlot &&other) noexcept
+            : allocator(other.allocator), ptr(other.ptr), size_bytes(other.size_bytes) {
+            other.allocator = nullptr;
+            other.ptr = nullptr;
+            other.size_bytes = 0;
+        }
+        MirrorVectorSlot &operator=(MirrorVectorSlot &&other) noexcept {
+            if (this != &other) {
+                Reset();
+                allocator = other.allocator;
+                ptr = other.ptr;
+                size_bytes = other.size_bytes;
+                other.allocator = nullptr;
+                other.ptr = nullptr;
+                other.size_bytes = 0;
+            }
+            return *this;
+        }
+        ~MirrorVectorSlot() {
+            Reset();
+        }
+
+        void Reset() {
+            if (ptr && allocator) {
+                allocator->FreeData(ptr, size_bytes);
+            }
+            allocator = nullptr;
+            ptr = nullptr;
+            size_bytes = 0;
+        }
+        void Allocate(duckdb::Allocator &alloc, duckdb::idx_t bytes) {
+            if (ptr && allocator == &alloc && size_bytes == bytes) {
+                return;
+            }
+            Reset();
+            if (bytes == 0) {
+                return;
+            }
+            allocator = &alloc;
+            ptr = alloc.AllocateData(bytes);
+            size_bytes = bytes;
+        }
+        bool empty() const {
+            return ptr == nullptr || size_bytes == 0;
+        }
+        duckdb::idx_t size() const {
+            return size_bytes;
+        }
+        char *data() {
+            return reinterpret_cast<char *>(ptr);
+        }
+        const char *data() const {
+            return reinterpret_cast<const char *>(ptr);
+        }
     };
     struct LayerView {
         // assign_vector_id fast-path 读 current_size 不持锁；slow-path 在
@@ -325,7 +422,7 @@ public:
     LayerView upper_layer;
 
     std::vector<point_type> elems;
-    std::vector<std::vector<char>> vectors;
+    std::vector<MirrorVectorSlot> vectors;
     std::vector<BasePointRec> base_points;
     std::vector<UpperPointRec> upper_points;
     std::vector<T> async_ids;
@@ -337,6 +434,100 @@ public:
     // compact 模式：vector_alloc_ 被 Reset，header->vector_ptr 持失效 buffer_id。
     // get_data/GetNodeHeader 必须短路，否则对空 allocator 调 Get() → SIGSEGV。
     bool compact_mode_ = false;
+
+    // graph_memory_limit：vectors[] 内存镜像(lock-free 热层)的节点上限。预算内的
+    // base 节点在 vectors[] 保留一份原始向量镜像；超出上限的节点 vectors[] 槽留空，
+    // 只存 vector_alloc_(buffer manager 兜底，可分页落盘 / 受 DuckDB memory_limit 约束)。
+    // get_data_unlocked 的逐 id fallback 天然处理：vectors[id] 为空 → 走 vector_alloc_->Get()。
+    // 镜像与 vector_alloc_ 在 full 模式下本是 2× 冗余，收紧上限即砍掉超出部分的冗余 RAM，
+    // 热层仍享 lock-free 快路径，冷层由 buffer manager 的 LRU 决定常驻/换出。
+    //
+    // 预算是“全库镜像总量”——所有索引共享 GlobalMirrorUsedBytes() 这一个池(见上方 free
+    // functions)。本 store 按需向池申领并记账，析构时归还。三个量：
+    //   mirror_max_nodes_     : 派生——本 store 已获准镜像的节点数(id < 此值才镜像)。
+    //                           SIZE_MAX = 不限(无全局上限 / 无 vector_alloc_，旧全镜像行为)。
+    //   mirror_limit_bytes_   : 全局上限快照(0=不限)。ApplyMirrorBudget 设；仅 vector_alloc_
+    //                           存在时才非 0(否则超预算节点无处安放，必须全镜像)。
+    //   mirror_claimed_bytes_ : 本 store 已从全局池申领的字节，~MemStore 归还。
+    size_t mirror_max_nodes_ = SIZE_MAX;
+    size_t mirror_limit_bytes_ = 0;
+    size_t mirror_claimed_bytes_ = 0;
+    duckdb::Allocator *mirror_allocator_ = nullptr;
+
+    ~MemStore() {
+        ClearMirrorVectors();
+        ReleaseMirrorClaim();
+    }
+
+    void SetMirrorAllocator(duckdb::Allocator &allocator) {
+        mirror_allocator_ = &allocator;
+    }
+
+    // 向全局镜像池申领，使本 store 累计可镜像到 want_nodes 个节点。返回实际可镜像节点数
+    // (池满时 < want_nodes)。mirror_limit_bytes_==0(不限)→ 直接返回 want_nodes，不计账。
+    // 幂等增量：重复调用只补申领差额，故 incremental Append 的逐批扩容可反复调用。
+    size_t ClaimMirrorNodes(size_t want_nodes) {
+        if (mirror_limit_bytes_ == 0 || vec_size == 0) {
+            return want_nodes;
+        }
+        size_t have = mirror_claimed_bytes_ / vec_size;
+        if (want_nodes <= have) {
+            return have;
+        }
+        size_t want_more = (want_nodes - have) * static_cast<size_t>(vec_size);
+        size_t granted = ClaimGlobalMirrorBytes(want_more, mirror_limit_bytes_);
+        mirror_claimed_bytes_ += granted;
+        return mirror_claimed_bytes_ / vec_size;
+    }
+
+    void ReleaseMirrorClaim() {
+        ReleaseGlobalMirrorBytes(mirror_claimed_bytes_);
+        mirror_claimed_bytes_ = 0;
+        if (mirror_limit_bytes_ != 0) {
+            mirror_max_nodes_ = 0;
+        }
+    }
+
+    duckdb::Allocator &MirrorAllocator() {
+        if (!mirror_allocator_) {
+            throw duckdb::InternalException("GRAPH_INDEX mirror allocator is not initialized");
+        }
+        return *mirror_allocator_;
+    }
+
+    void FreeMirrorSlot(MirrorVectorSlot &slot) {
+        slot.Reset();
+    }
+
+    void AllocateMirrorSlot(MirrorVectorSlot &slot, duckdb::idx_t bytes) {
+        slot.Allocate(MirrorAllocator(), bytes);
+    }
+
+    void AssignMirrorSlot(MirrorVectorSlot &slot, const char *data, duckdb::idx_t bytes) {
+        AllocateMirrorSlot(slot, bytes);
+        if (slot.ptr && bytes > 0) {
+            std::memcpy(slot.ptr, data, bytes);
+        }
+    }
+
+    void ResizeMirrorSlots(size_t new_size) {
+        if (new_size < vectors.size()) {
+            for (size_t i = new_size; i < vectors.size(); i++) {
+                FreeMirrorSlot(vectors[i]);
+            }
+        }
+        vectors.resize(new_size);
+    }
+
+    void ClearMirrorVectors(bool shrink = false) {
+        for (auto &slot : vectors) {
+            FreeMirrorSlot(slot);
+        }
+        vectors.clear();
+        if (shrink) {
+            vectors.shrink_to_fit();
+        }
+    }
 
     std::vector<duckdb::IndexPointer> id_to_node_ptr_;
     std::vector<duckdb::IndexPointer> upper_idx_to_ptr_;
@@ -416,14 +607,23 @@ public:
         // Pre-allocate base: resize outer vectors + node_alloc_/vector_alloc_ New.
         if (base_n > cur_base) {
             elems.resize(base_n);
-            vectors.resize(base_n);
-            /* Pre-size each inner buffer to vec_size so add_vector() can memcpy into a
+            ResizeMirrorSlots(base_n);
+            /* Pre-size each mirror buffer to vec_size so add_vector() can memcpy into a
              * STABLE pointer. get_data()'s fast path reads vectors[id].data() lock-free
-             * during parallel BuildBulk; a std::vector::assign in add_vector() would
-             * realloc/repoint the buffer mid-read → reader sees a dangling/NULL data()
+             * during parallel BuildBulk; allocating/repointing the buffer in add_vector()
+             * would let a reader see a dangling/NULL data()
              * → SEGV at 0x0 in search_upper_layer (the parallel-build publish race). */
+            // 全局池：申领使本索引可镜像到 base_n 个节点(增量 Append 反复调用只补差额)。
+            // 池满则 mirror_max_nodes_ 停在已获准处，其余节点走 vector_alloc_。
+            if (mirror_limit_bytes_ != 0) {
+                mirror_max_nodes_ = ClaimMirrorNodes(base_n);
+            }
             for (size_t i = cur_base; i < base_n; i++) {
-                vectors[i].resize(vec_size);
+                // 预算内才铺内存镜像；超出 mirror_max_nodes_ 的 slot 留空(size 0)，
+                // add_vector 跳过镜像写入、get_data 自动 fallback 到 vector_alloc_。
+                if (i < mirror_max_nodes_) {
+                    AllocateMirrorSlot(vectors[i], vec_size);
+                }
             }
             base_points.resize(base_n, MakeBasePoint());
             base_layer.current_size = base_n;
@@ -510,7 +710,7 @@ public:
             LWLockAcquire(&elems_veclock, LW_EXCLUSIVE);
             if (id + 1 > elems.size()) {
                 elems.resize(id + 1);
-                vectors.resize(id + 1);
+                ResizeMirrorSlots(id + 1);
                 base_points.resize(id + 1, MakeBasePoint());
                 base_layer.current_size.store(base_points.size(), std::memory_order_release);
                 if (id >= id_to_node_ptr_.size()) {
@@ -559,7 +759,7 @@ public:
     }
 
     // add_elem / add_vector: 同一个 id 只会被一个 worker 调用（id 由
-    // assign_vector_id 独占分配），写入 elems[id]/vectors[id] 的 inner 字段
+    // assign_vector_id 独占分配），写入 elems[id]/vectors[id] 的 slot 字段
     // 在 id 维度上不竞争。需要的是 SHARED elems_veclock 防止外层 realloc
     // 让 elems[id] 的 reference 失效。
     void add_elem(PointExtensionContext &ctx, T id, const ItemPointerData &tid) {
@@ -627,11 +827,15 @@ public:
          * so memcpy into the stable buffer — no realloc, no data()-pointer change, safe
          * against concurrent lock-free get_data() readers. Cold path (unreserved id,
          * e.g. incremental Append) falls back to assign. */
-        auto &slot = vectors[id];
-        if (slot.size() == (size_t)vec_size) {
-            std::memcpy(slot.data(), store_data, vec_size);
-        } else {
-            slot.assign(store_data, store_data + vec_size);
+        // 预算内的节点写内存镜像(lock-free 热层)。超出 mirror_max_nodes_ 的节点
+        // 跳过镜像、只落 vector_alloc_(下方)——get_data 对其走 buffer manager fallback。
+        if (id < mirror_max_nodes_) {
+            auto &slot = vectors[id];
+            if (slot.size() == (size_t)vec_size) {
+                std::memcpy(slot.data(), store_data, vec_size);
+            } else {
+                AssignMirrorSlot(slot, store_data, vec_size);
+            }
         }
         if (node_alloc_ && vector_alloc_) {
             auto ptr = GetNodePtr(id);
@@ -699,7 +903,7 @@ public:
 
     void ResizeForReload(size_t base_n, size_t upper_n) {
         elems.resize(base_n);
-        vectors.resize(base_n);
+        ResizeMirrorSlots(base_n);
         base_points.resize(base_n, MakeBasePoint());
         base_layer.current_size = base_n;
         upper_points.resize(upper_n, MakeUpperPoint());
@@ -778,7 +982,10 @@ public:
                 }
             }
         }
-        if (id >= vectors.size()) {
+        // 镜像超预算的 id：vectors[id] 为空，上面的 vector_alloc_ 路径已返回。
+        // 若 allocator 缺失(理论上 ApplyMirrorBudget 已保证不会收紧)则返回 nullptr，
+        // 绝不对空 slot 取 .data() 后按 vec_size memcpy 造成越界读。
+        if (id >= vectors.size() || vectors[id].empty()) {
             return nullptr;
         }
         return vectors[id].data();
@@ -821,7 +1028,10 @@ public:
                 }
             }
         }
-        if (id >= vectors.size()) {
+        // 镜像超预算的 id：vectors[id] 为空，上面的 vector_alloc_ 路径已返回。
+        // 若 allocator 缺失(理论上 ApplyMirrorBudget 已保证不会收紧)则返回 nullptr，
+        // 绝不对空 slot 取 .data() 后按 vec_size memcpy 造成越界读。
+        if (id >= vectors.size() || vectors[id].empty()) {
             return nullptr;
         }
         return vectors[id].data();
