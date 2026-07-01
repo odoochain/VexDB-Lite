@@ -45,16 +45,25 @@ resolve_unittest() {
     if [[ -n "${DUCK_UNITTEST:-}" && -x "$DUCK_UNITTEST" ]]; then
         echo "$DUCK_UNITTEST"; return
     fi
-    # 默认用外层 build_duck.sh 的产物
-    local default_bin="${ROOT_DIR}/build/duck/build/test/unittest"
-    if [[ -x "$default_bin" ]]; then
-        echo "$default_bin"; return
+    # 默认用外层 build_duck.sh 的版本化产物。build_duck.sh now keeps one
+    # DuckDB build tree per target version under build/duck/<version>/.
+    local duckdb_version="${DUCKDB_VERSION:-v1.5.2}"
+    local versioned_bin="${ROOT_DIR}/build/duck/${duckdb_version}/build/test/unittest"
+    if [[ -x "$versioned_bin" ]]; then
+        echo "$versioned_bin"; return
+    fi
+    # Backward-compatible fallback for older local worktrees that still have the
+    # pre-version-matrix build layout.
+    local legacy_bin="${ROOT_DIR}/build/duck/build/test/unittest"
+    if [[ -x "$legacy_bin" ]]; then
+        echo "$legacy_bin"; return
     fi
     # 尝试 build
     if [[ -x "$BUILD_DUCK" ]]; then
         info "unittest 二进制不存在, 调用 ${BUILD_DUCK##*/} build-unittest"
         bash "$BUILD_DUCK" build-unittest >&2
-        if [[ -x "$default_bin" ]]; then echo "$default_bin"; return; fi
+        if [[ -x "$versioned_bin" ]]; then echo "$versioned_bin"; return; fi
+        if [[ -x "$legacy_bin" ]]; then echo "$legacy_bin"; return; fi
     fi
     fail "找不到 unittest 二进制. 请设 DUCK_UNITTEST=<path> 或在工作区根执行: bash build_duck.sh build-unittest"
 }

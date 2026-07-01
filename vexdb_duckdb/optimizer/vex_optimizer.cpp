@@ -1,5 +1,6 @@
 #include "vex_optimizer.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 #include "vex_fetch_utils.hpp"
@@ -66,6 +67,48 @@ static const DistanceFuncEntry *FindDistanceFunc(const string &name) {
 
 static bool IsDistanceFunction(const string &name) {
     return FindDistanceFunc(name) != nullptr;
+}
+
+static uint64_t MixCoverage64(uint64_t x) {
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+static uint64_t HashCoverageBytes(const_data_ptr_t data, idx_t size) {
+    uint64_t h = 1469598103934665603ULL;
+    for (idx_t i = 0; i < size; i++) {
+        h ^= static_cast<uint64_t>(data[i]);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t HashCoverageRowId(row_t row_id) {
+    return MixCoverage64(static_cast<uint64_t>(row_id));
+}
+
+static uint64_t HashCoverageRowVector(row_t row_id, const float *vec, idx_t dim) {
+    auto bytes = const_data_ptr_cast(reinterpret_cast<const char *>(vec));
+    uint64_t h = HashCoverageRowId(row_id);
+    h ^= HashCoverageBytes(bytes, dim * sizeof(float)) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    return MixCoverage64(h);
+}
+
+static void NormalizeCoverageVectorInPlace(float *vec, idx_t dim) {
+    float norm2 = 0.0f;
+    for (idx_t i = 0; i < dim; i++) {
+        norm2 += vec[i] * vec[i];
+    }
+    if (norm2 > 0.0f) {
+        float inv = 1.0f / std::sqrt(norm2);
+        for (idx_t i = 0; i < dim; i++) {
+            vec[i] *= inv;
+        }
+    }
 }
 
 static bool DistanceFunctionMatchesMetric(const string &name, VexMetric metric) {
@@ -319,6 +362,115 @@ static bool TryFindMatchingIndex(ClientContext &context, DataTable &storage, con
     return false;
 }
 
+struct TableRowIdCoverage {
+    idx_t live_count = 0;
+    idx_t rowid_upper_bound = 0;
+    uint64_t rowid_checksum = 0;
+    uint64_t vector_checksum = 0;
+    bool has_vector_checksum = false;
+};
+
+static TableRowIdCoverage ScanTableRowIdCoverage(ClientContext &context, DataTable &storage,
+                                                  DuckTransaction &transaction, column_t vector_column_id,
+                                                  GraphIndex &graph_idx) {
+    TableRowIdCoverage coverage;
+    auto dimension = graph_idx.GetDimension();
+    auto metric = graph_idx.GetMetric();
+    auto use_pq_checksum = graph_idx.UsesPQCoverageChecksum();
+
+    vector<StorageIndex> scan_column_ids;
+    scan_column_ids.emplace_back(vector_column_id);
+    scan_column_ids.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
+    TableScanState scan_state;
+    storage.InitializeScan(context, transaction, scan_state, scan_column_ids);
+
+    auto table_types = storage.GetTypes();
+    if (vector_column_id >= table_types.size()) {
+        return coverage;
+    }
+    DataChunk chunk;
+    chunk.Initialize(Allocator::Get(context), {table_types[vector_column_id], LogicalType::ROW_TYPE});
+    vector<float> normalized;
+    if (metric == VexMetric::COSINE) {
+        normalized.resize(dimension);
+    }
+    while (true) {
+        chunk.Reset();
+        storage.Scan(transaction, chunk, scan_state);
+        if (chunk.size() == 0) {
+            break;
+        }
+        auto &vec_vector = chunk.data[0];
+        auto &rowid_vec = chunk.data[1];
+        vec_vector.Flatten(chunk.size());
+        rowid_vec.Flatten(chunk.size());
+        auto &vec_validity = FlatVector::Validity(vec_vector);
+        auto &child_vec = ArrayVector::GetEntry(vec_vector);
+        child_vec.Flatten(chunk.size() * dimension);
+        auto vec_data = FlatVector::GetData<float>(child_vec);
+        auto row_ids = FlatVector::GetData<row_t>(rowid_vec);
+        auto &validity = FlatVector::Validity(rowid_vec);
+        for (idx_t i = 0; i < chunk.size(); i++) {
+            if (!validity.RowIsValid(i) || !vec_validity.RowIsValid(i)) {
+                continue;
+            }
+            auto rid = row_ids[i];
+            if (rid < 0 || rid >= MAX_ROW_ID) {
+                continue;
+            }
+            const float *vec = vec_data + i * dimension;
+            coverage.live_count++;
+            coverage.rowid_upper_bound =
+                std::max<idx_t>(coverage.rowid_upper_bound, static_cast<idx_t>(rid) + 1);
+            coverage.rowid_checksum += HashCoverageRowId(rid);
+            if (metric == VexMetric::COSINE) {
+                std::copy(vec, vec + dimension, normalized.data());
+                NormalizeCoverageVectorInPlace(normalized.data(), dimension);
+                vec = normalized.data();
+            }
+            if (use_pq_checksum) {
+                coverage.vector_checksum += graph_idx.HashPQVectorForCoverage(rid, vec);
+            } else {
+                coverage.vector_checksum += HashCoverageRowVector(rid, vec, dimension);
+            }
+            coverage.has_vector_checksum = true;
+        }
+    }
+    return coverage;
+}
+
+static bool GraphIndexMayBeStaleAfterRecovery(ClientContext &context, DataTable &storage,
+                                              DuckTransaction &transaction, GraphIndex &graph_idx) {
+    if (graph_idx.HasRowIdCoverageCheck()) {
+        return graph_idx.IsRowIdCoverageStale();
+    }
+
+    // DuckDB v1.5.x WAL recovery replays ordinary INSERT/DELETE records into
+    // table storage but does not replay those changes into secondary indexes.
+    // Validate live row-id coverage once after binding a persisted GRAPH_INDEX.
+    // If the table has live row ids or live cardinality the graph does not
+    // cover, keep the original exact plan instead of returning stale ANN rows.
+    auto column_ids = graph_idx.GetColumnIds();
+    if (column_ids.empty()) {
+        graph_idx.MarkRowIdCoverageChecked(true);
+        return true;
+    }
+    auto table_coverage = ScanTableRowIdCoverage(context, storage, transaction, column_ids[0], graph_idx);
+    auto index_coverage = graph_idx.GetRowIdCoverage();
+    bool stale = table_coverage.live_count != index_coverage.live_count ||
+                 table_coverage.rowid_upper_bound > index_coverage.rowid_upper_bound ||
+                 table_coverage.rowid_checksum != index_coverage.rowid_checksum;
+    if (!stale) {
+        if (table_coverage.has_vector_checksum && index_coverage.has_vector_checksum) {
+            stale = table_coverage.vector_checksum != index_coverage.vector_checksum;
+        } else if (table_coverage.has_vector_checksum != index_coverage.has_vector_checksum) {
+            stale = true;
+        }
+    }
+    graph_idx.MarkRowIdCoverageChecked(stale);
+    return stale;
+}
+
 static bool TryOptimizeANN(ClientContext &context, unique_ptr<LogicalOperator> &node,
                            unique_ptr<LogicalOperator> &get_owner, const GetChildInfo &get_info,
                            const DistanceOrderInfo &dist_info, idx_t limit, idx_t offset) {
@@ -369,6 +521,9 @@ static bool TryOptimizeANN(ClientContext &context, unique_ptr<LogicalOperator> &
     IndexMatch match;
     if (!TryFindMatchingIndex(context, storage, column_ids, dist_info.col_index,
                               dist_info.func_expr->function.name, match)) {
+        return false;
+    }
+    if (GraphIndexMayBeStaleAfterRecovery(context, storage, transaction, *match.graph_idx)) {
         return false;
     }
 

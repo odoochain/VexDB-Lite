@@ -14,6 +14,8 @@
 #   ./build_duck.sh data           # convert SIFT HDF5 → fbin (one-time)
 #   ./build_duck.sh smoke          # run smoke_create_index
 #   ./build_duck.sh explain        # run explain_literal_query
+#   ./build_duck.sh crash-recovery # run hard-kill DuckDB graph index recovery checks
+#   ./build_duck.sh crash-recovery-matrix # run crash-recovery for DUCKDB_VERSIONS
 #   ./build_duck.sh bench-10k      # run SIFT 10k benchmark
 #   ./build_duck.sh bench-100k     # run SIFT 100k benchmark
 #   ./build_duck.sh bench          # run both 10k + 100k
@@ -49,6 +51,7 @@ EXTENSION_PATH="$DUCK_BUILD/extension/vexdb_lite/vexdb_lite.duckdb_extension"
 LIBDUCKDB="$DUCK_BUILD/src/libduckdb_static.a"
 LIBLOADER="$DUCK_BUILD/extension/libdummy_static_extension_loader.a"
 LIBCORE="$DUCK_BUILD/extension/core_functions/libcore_functions_extension.a"
+LIBVEX="$DUCK_BUILD/extension/vexdb_lite/libvexdb_lite_extension.a"
 
 ANN_HDF5_SRC="${ANN_HDF5_SRC:-}"  # path to sift-128-euclidean.hdf5 from ann-benchmarks
 
@@ -106,9 +109,9 @@ EOF
 
 cmd_build() {
     [[ -f "$DUCK_BUILD/CMakeCache.txt" ]] || cmd_setup
-    info "building vexdb_lite_loadable_extension + core_functions + duckdb_static + dummy_loader (j=$NCPU)"
+    info "building vexdb_lite_loadable_extension + vexdb_lite_extension + core_functions + duckdb_static + dummy_loader (j=$NCPU)"
     cmake --build "$DUCK_BUILD" \
-        --target vexdb_lite_loadable_extension core_functions_extension duckdb_static dummy_static_extension_loader \
+        --target vexdb_lite_loadable_extension vexdb_lite_extension core_functions_extension duckdb_static dummy_static_extension_loader \
         -j "$NCPU"
     [[ -f "$EXTENSION_PATH" ]] || fail "build finished but extension missing: $EXTENSION_PATH"
     ok "build done: $EXTENSION_PATH ($(du -h "$EXTENSION_PATH" | cut -f1))"
@@ -213,6 +216,7 @@ _compile_one() {
         "$src" \
         -I"$DUCK_SRC/src/include" \
         -I"$DUCK_SRC/extension/core_functions/include" \
+        -I"$VEX_INCLUDE" \
         "$@" \
         "$LIBDUCKDB" \
         "$LIBLOADER" \
@@ -223,6 +227,7 @@ cmd_bin() {
     cmd_build  # ensures static libs exist (incremental, fast if up-to-date)
     _compile_one "$VEX_TEST/smoke_create_index.cpp"        "$DUCK_BIN/smoke_create_index"
     _compile_one "$VEX_TEST/explain_literal_query.cpp"     "$DUCK_BIN/explain_literal_query"        "$LIBCORE"
+    _compile_one "$VEX_TEST/crash_recovery.cpp"            "$DUCK_BIN/crash_recovery"               "$LIBVEX" "$LIBCORE"
     _compile_one "$VEX_TEST/benchmark/vex_sift_sql_benchmark.cpp" "$DUCK_BIN/vex_sift_sql_benchmark" "$LIBCORE"
     ok "binaries built under $DUCK_BIN/"
 }
@@ -248,6 +253,26 @@ cmd_explain() {
     [[ -f "$DUCK_BIN/explain_literal_query" ]] || cmd_bin
     info "running explain_literal_query"
     "$DUCK_BIN/explain_literal_query" "$EXTENSION_PATH"
+}
+
+cmd_crash_recovery() {
+    cmd_bin
+    info "running crash_recovery"
+    "$DUCK_BIN/crash_recovery" "$EXTENSION_PATH"
+}
+
+cmd_crash_recovery_matrix() {
+    local versions="${DUCKDB_VERSIONS:-$DUCKDB_VERSION}"
+    local failed=0
+    for dver in $versions; do
+        info "running crash_recovery for $dver"
+        if DUCKDB_VERSION="$dver" bash "$PROJECT_DIR/build_duck.sh" crash-recovery; then
+            ok "crash_recovery passed for $dver"
+        else
+            failed=1
+        fi
+    done
+    [[ "$failed" -eq 0 ]] || fail "crash_recovery matrix failed"
 }
 
 _bench() {
@@ -310,6 +335,8 @@ case "$CMD" in
     data)        cmd_data ;;
     smoke)       cmd_smoke ;;
     explain)     cmd_explain ;;
+    crash-recovery) cmd_crash_recovery ;;
+    crash-recovery-matrix) cmd_crash_recovery_matrix ;;
     bench-10k)   cmd_bench_10k ;;
     bench-100k)  cmd_bench_100k ;;
     bench)       cmd_bench ;;
