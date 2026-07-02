@@ -125,7 +125,7 @@ Datum vexdb_index_info(PG_FUNCTION_ARGS)
             m_val      = (int32)mp->m;
             efc_val    = (int32)mp->ef_construction;
             metric_str = metric_name(mp->metric);
-            use_pq     = (mp->quantizer_metainfo.get_setting_type() == QuantizerType::PQ);
+            use_pq     = (mp->quantizer_metainfo.get_type() == QuantizerType::PQ);
             if (mp->quantizer_metainfo.get_setting_type() == QuantizerType::PQ) {
                 pq_m_val = (int32)mp->quantizer_metainfo.get_pq_metainfo().m;
             }

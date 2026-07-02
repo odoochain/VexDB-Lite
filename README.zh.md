@@ -131,14 +131,8 @@ WITH (quantizer = 'pq', pq_m = 4);
 **v1 已知限制**：
 
 - `maintenance_work_mem < 1GB` 时 PQ 自动回落 普通图索引（带 NOTICE 提示）
-- **PQ 索引在 build 后是只读的**：`INSERT` / `UPDATE` / `DELETE` 触发的 aminsert 会被拒绝
-  ```
-  ERROR:  DML on a PQ-enabled vexdb_graph index is not yet supported
-  HINT:   Drop and recreate the index after data changes, or use an index
-          without quantizer='pq'.
-  ```
-  推荐工作流：**先批量写数据 → CREATE INDEX → 只读查询**。数据变更后 DROP + CREATE 重建索引。这与 FAISS 等向量库的 "build-once index" 模式一致。
-- parallel build × PQ：走单线程（与 普通图索引 行为一致）
+- PQ 索引支持 build 后的 `INSERT` / `UPDATE` / `DELETE` 路径，新增向量会按已训练 codebook 写入 PQ code
+- parallel build × PQ：PG parallel worker 只在磁盘构建阶段参与，PQ 训练仍在 leader 进程内完成
 
 **核对索引状态**：
 

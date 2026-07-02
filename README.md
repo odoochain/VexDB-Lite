@@ -119,6 +119,33 @@ WITH (
 );
 ```
 
+#### 3.2.1 PQ Quantized Index (v1)
+
+PQ reduces vector storage by encoding indexed vectors with a trained codebook:
+
+```sql
+SET maintenance_work_mem = '2GB';   -- required; low memory falls back to a plain graph index
+
+CREATE INDEX idx_pq
+ON items
+USING vexdb_graph (vec floatvector_l2_ops)
+WITH (quantizer = 'pq', pq_m = 4);
+```
+
+Current v1 behavior:
+
+- If there are fewer than 256 training samples, or the memory build budget is too low, PQ falls back to a plain graph index with a NOTICE.
+- PQ indexes support post-build `INSERT` / `UPDATE` / `DELETE`; new vectors are encoded with the trained codebook.
+- For `parallel_workers > 0`, PQ training still runs in the leader process; PG parallel workers only participate in the disk-build phase.
+
+Check the active index state:
+
+```sql
+SELECT indexname, use_pq, pq_m
+FROM vexdb_index_info()
+WHERE indexname = 'idx_pq';
+```
+
 ### 3.3 ANN Query
 
 ```sql

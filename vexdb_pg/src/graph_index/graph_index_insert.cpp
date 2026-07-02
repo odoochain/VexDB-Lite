@@ -23,19 +23,6 @@ bool graph_index_insert_internal(Relation index, Relation heap, Datum *values, c
     Buffer metabuf = ReadBuffer(index, metablkno);
     GraphIndexMetaPage metap = GRAPH_INDEX_PAGE_GET_META(BufferGetPage(metabuf));
 
-    // PQ indexes are immutable after build in v1 — DML would write raw
-    // float bytes into the code_size slot allocated by DiskStore, silently
-    // corrupting the on-disk codes. Block here and instruct the user to
-    // rebuild the index. Full DML support requires the encode + SDC prune
-    // path tracked in docs/design/2026-05-12_pq-stage-a2-impl.md.
-    if (metap->quantizer_metainfo.get_type() == QuantizerType::PQ) {
-        ReleaseBuffer(metabuf);
-        ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-            errmsg("DML on a PQ-enabled vexdb_graph index is not yet supported"),
-            errhint("Drop and recreate the index after data changes, or use "
-                    "an index without quantizer='pq'.")));
-    }
-
     Pointer vec_p;
     char *v = DatumGetVector(values[0], metap->precision_type, &vec_p);
     char *query = v;

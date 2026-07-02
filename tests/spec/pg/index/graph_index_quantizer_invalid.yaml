@@ -27,3 +27,5 @@ steps:
   - statement: DROP INDEX idx_qz_none;
   - statement: CREATE INDEX idx_qz_pq ON t_qz_invalid USING vexdb_graph (v floatvector_l2_ops) WITH (quantizer='pq', pq_m=4);
   - statement: DROP INDEX idx_qz_pq;
+  - statement: CREATE INDEX idx_qz_bad_pq_m ON t_qz_invalid USING vexdb_graph (v floatvector_l2_ops) WITH (quantizer='pq', pq_m=3);
+    expect_error: 'should be a multiple of pq_m'
