@@ -46,7 +46,7 @@ vexdb_lite_init_guc(void)
 
     /* Register index reloptions */
     add_int_reloption(RELOPT_KIND_GRAPH_INDEX, "m",
-                      "Number of neighbors for each node in the HNSW graph.",
+                      "Number of neighbors for each node in the graph index.",
                       16, 2, 100, AccessExclusiveLock);
     add_int_reloption(RELOPT_KIND_GRAPH_INDEX, "ef_construction",
                       "Size of the dynamic candidate list for graph construction.",
@@ -88,7 +88,7 @@ vexdb_lite_init_guc(void)
 
     /* GUC parameters */
     DefineCustomIntVariable("vexdb.ef_search",
-                            "Search list size for HNSW index search.",
+                            "Search list size for graph index search.",
                             "Controls the size of the dynamic candidate list during search. "
                             "Higher values improve recall at the cost of speed.",
                             &vexdb_lite_ef_search,

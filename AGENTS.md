@@ -1,6 +1,6 @@
 # VexDB — AI Agent Guide
 
-VexDB 是一个高性能向量检索插件库，提供 PostgreSQL（`vexdb_lite`）和 DuckDB（`vexdb_lite`）两种适配形式，共享同一套 HNSW 图索引算法内核。
+VexDB 是一个高性能向量检索插件库，提供 PostgreSQL（`vexdb_lite`）和 DuckDB（`vexdb_lite`）两种适配形式，共享同一套自研图索引算法内核。
 
 ---
 
@@ -10,7 +10,7 @@ VexDB 是一个高性能向量检索插件库，提供 PostgreSQL（`vexdb_lite`
 vexdb_lite/
 ├── common/                    # 两个插件共享的算法内核
 │   ├── include/               # 共享头文件
-│   │   ├── graph_index/       # HNSW 算法：节点结构、MemStore、邻居选择
+│   │   ├── graph_index/       # 自研图索引算法：节点结构、MemStore、邻居选择
 │   │   ├── half.h             # 半精度浮点工具
 │   │   ├── vec_common.h       # 向量操作基础
 │   │   └── macro.h            # 跨平台宏
@@ -121,7 +121,7 @@ bash tests/spec/_lib/docker/run_pg.sh test
 
 DuckDB 侧用 `vexdb_duckdb/include/duck_pg_shim.hpp` 提供 PG 类型的 mock（`MemoryContext`、`palloc` 等），使 `common/` 代码无需修改即可在 DuckDB 上下文中编译。
 
-### HNSW 图索引
+### 自研图索引
 
 - **GraphIndexCore**（`common/include/graph_index/`）：纯算法层，不依赖任何存储后端
 - **MemStore / DiskStore**：存储抽象；DuckDB 端用 `FixedSizeAllocator`（`vexdb_duckdb/include/vex_graph_index_depend_duck.hpp`），PG 端用 palloc + DSM

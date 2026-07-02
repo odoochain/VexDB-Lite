@@ -1,6 +1,6 @@
 # 功能文档
 
-VexDB 提供两种适配形式，共享同一套 HNSW 图索引算法内核：
+VexDB 提供两种适配形式，共享同一套自研图索引算法内核：
 
 - **PostgreSQL 插件**（`vexdb_lite`）：作为 PostgreSQL 扩展提供 `vexdb_graph` 访问方法
 - **DuckDB 扩展**（`vexdb_lite`）：作为 DuckDB out-of-tree extension 提供 `GRAPH_INDEX`
@@ -73,7 +73,7 @@ WITH (
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `m` | `16` | HNSW 每个节点的最大邻居数；越大召回越好，内存消耗越多 |
+| `m` | `16` | 图索引每个节点的最大邻居数；越大召回越好，内存消耗越多 |
 | `ef_construction` | `64` | 建图时搜索宽度；越大图质量越好，建索引越慢 |
 | `parallel_workers` | `0` | 并行构建 worker 数；`0` = 串行 |
 
@@ -161,7 +161,7 @@ ON table_name
 USING GRAPH_INDEX (vec_column)
 WITH (
     metric          = 'l2',    -- 距离指标：'l2' / 'cosine' / 'ip'
-    m               = 16,      -- HNSW M 参数
+    m               = 16,      -- 图索引 M 参数
     ef_construction = 64,      -- 建图搜索宽度
     threads         = 0,       -- 并行构建 worker 数（0 = 自动，用 DuckDB scheduler 线程数）
     quantizer       = 'pq',    -- 可选：启用 Product Quantization
@@ -173,7 +173,7 @@ WITH (
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `metric` | `'l2'` | `'l2'` / `'cosine'` / `'ip'` |
-| `m` | `16` | HNSW 每节点最大邻居数 |
+| `m` | `16` | 图索引每节点最大邻居数 |
 | `ef_construction` | `64` | 建图时搜索宽度 |
 | `threads` | `0`（自动） | `0` = 使用 DuckDB scheduler 线程数；`1` = 串行 |
 | `quantizer` | `none` | `'pq'` 启用 Product Quantization |
@@ -284,7 +284,7 @@ PG 插件和 DuckDB 扩展共享以下核心组件（位于 `common/`）：
 
 | 组件 | 路径 | 说明 |
 |------|------|------|
-| 图索引算法 | `common/include/graph_index/` | HNSW 算法、层级结构、邻居选择 |
+| 图索引算法 | `common/include/graph_index/` | 自研图索引算法、层级结构、邻居选择 |
 | 距离计算 | `common/distance/` | SSE / AVX2 / AVX-512 / NEON 运行时分发 |
 | Product Quantization | `common/quantizer/` | PQ 编码/解码、K-means 训练 |
 | 容器模板 | `common/vtl/` | 内存分配器抽象、FixedSizeAllocator |

@@ -2,7 +2,7 @@
 
 **English** | 中文
 
-VexDB 是一款高性能向量检索插件，提供 PostgreSQL（`vexdb_lite`）和 DuckDB（`vexdb_lite`）两种适配形式，共享同一套 HNSW 图索引算法内核。
+VexDB 是一款高性能向量检索插件，提供 PostgreSQL（`vexdb_lite`）和 DuckDB（`vexdb_lite`）两种适配形式，共享同一套自研图索引算法内核。
 
 ---
 
