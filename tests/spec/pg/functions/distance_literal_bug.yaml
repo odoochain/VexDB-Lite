@@ -22,9 +22,9 @@ steps:
 - query: SELECT c1, l2_distance(c2, '[0, 0, 0]'::floatvector) AS dist FROM t_vec ORDER BY dist LIMIT 1;
   expect:
   - - 1
-  - - 3.7416573867739413
+    - 3.7416573867739413
 - query: SELECT c1, cosine_distance(c2, '[1, 0, 0]'::floatvector) AS dist FROM t_vec ORDER BY dist LIMIT 1;
   expect:
   - - 1
-  - - 0.732738733291626
+    - 0.732738733291626
 - statement: DROP TABLE t_vec;

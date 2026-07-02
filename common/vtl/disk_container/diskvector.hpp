@@ -494,7 +494,7 @@ public:
     {
         _blkmgr.logical_lock_page_data_exclusive(_meta_pd);
         size_t cur_size;
-        _log_mgr.apply(_meta_pd, _need_wal, false, [&](auto page) {
+        apply_meta_update([&](auto page) {
             auto meta = reinterpret_cast<DiskVectorMetaPage>(page);
             cur_size = meta->nitem;
             ++meta->nitem;
@@ -510,7 +510,7 @@ public:
         Assert(n > 0);
         _blkmgr.logical_lock_page_data_exclusive(_meta_pd);
         size_t cur_size;
-        _log_mgr.apply(_meta_pd, _need_wal, false, [&](auto page) {
+        apply_meta_update([&](auto page) {
             auto meta = reinterpret_cast<DiskVectorMetaPage>(page);
             cur_size = meta->nitem;
             meta->nitem += n;
@@ -526,7 +526,7 @@ public:
         Assert(elem && n > 0);
         _blkmgr.logical_lock_page_data_exclusive(_meta_pd);
         size_t cur_size;
-        _log_mgr.apply(_meta_pd, _need_wal, false, [&](auto page) {
+        apply_meta_update([&](auto page) {
             auto meta = reinterpret_cast<DiskVectorMetaPage>(page);
             cur_size = meta->nitem;
             meta->nitem += n;
@@ -545,7 +545,7 @@ public:
             _blkmgr.logical_unlock_page_data_exclusive(_meta_pd);
             return false;
         }
-        _log_mgr.apply(_meta_pd, _need_wal, false, [&](auto page) {
+        apply_meta_update([&](auto page) {
             auto meta = reinterpret_cast<DiskVectorMetaPage>(page);
             meta->nitem = cur_size - 1ul;
             return true;
@@ -585,7 +585,7 @@ public:
             if (_need_wal) {
                 _log_mgr.xl_extend_newpages(start_blkno, start_blkno + n_new_page);
             }
-            _log_mgr.apply(_meta_pd, _need_wal, false, [&](auto page) {
+            apply_meta_update([&](auto page) {
                 auto meta = reinterpret_cast<DiskVectorMetaPage>(page);
                 meta->item_start_pages[meta->npage] = start_blkno;
                 ++meta->npage;
@@ -600,7 +600,7 @@ public:
             reserve(size);
             _blkmgr.logical_lock_page_data_exclusive(_meta_pd);
             if (size > _meta->nitem) {
-                _log_mgr.apply(_meta_pd, _need_wal, false, [&](auto page) {
+                apply_meta_update([&](auto page) {
                     auto meta = reinterpret_cast<DiskVectorMetaPage>(page);
                     meta->nitem = size;
                     return true;
@@ -613,7 +613,7 @@ public:
     {
         _blkmgr.logical_lock_page_data_exclusive(_meta_pd);
         size_t size;
-        _log_mgr.apply(_meta_pd, _need_wal, false, [&](auto page) {
+        apply_meta_update([&](auto page) {
             auto meta = reinterpret_cast<DiskVectorMetaPage>(page);
             size = meta->nitem++;
             return true;
@@ -639,6 +639,14 @@ private:
     BlockMgr _blkmgr;
     DiskContainerLogMgr _log_mgr;
     bool _need_wal;
+
+    template <typename Func>
+    void apply_meta_update(Func &&func)
+    {
+        _blkmgr.lock_page_data_exclusive(_meta_pd);
+        _log_mgr.apply(_meta_pd, _need_wal, false, std::forward<Func>(func));
+        _blkmgr.unlock_page_data(_meta_pd);
+    }
 
     void get_meta_page(BlockNumber meta_blkno)
     {
