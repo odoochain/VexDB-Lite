@@ -26,6 +26,15 @@ static inline int64_t GetBruteForceThreshold(ClientContext &context) {
     return bft;
 }
 
+// Byte budget for MemStore's in-memory raw-vector mirror (vectors[]). 0 = unlimited.
+static inline idx_t GetGraphMemoryLimitBytes(ClientContext &context) {
+    Value v;
+    if (!context.TryGetCurrentSetting("vexdb_graph_memory_limit", v)) {
+        return 0;
+    }
+    return v.GetValue<idx_t>();
+}
+
 static inline vector<LogicalType> BuildOutputTypes(const vector<ColumnIndex> &column_ids,
                                                    const vector<LogicalType> &returned_types) {
     vector<LogicalType> output_types;
