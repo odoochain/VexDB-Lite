@@ -1,0 +1,69 @@
+name: sqlite__vtab_metadata_cols
+tags: [vex, sqlite]
+description: M6' metadata 列（建表/写入/SCAN 回吐/KNN+WHERE 后过滤/restart 恢复/meta-only UPDATE）
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], category TEXT, year INTEGER, metric=l2);
+- statement: |
+    INSERT INTO idx(rowid, embedding, category, year) VALUES
+      (1, '[0,0]', 'a', 2020),
+      (2, '[1,0]', 'b', 2021),
+      (3, '[2,0]', 'a', 2022),
+      (4, '[3,0]', 'b', 2023),
+      (5, '[4,0]', NULL, NULL);
+# SCAN 回吐 meta
+- query: SELECT rowid, category, year FROM idx ORDER BY rowid;
+  expect:
+  - - 1
+    - a
+    - 2020
+  - - 2
+    - b
+    - 2021
+  - - 3
+    - a
+    - 2022
+  - - 4
+    - b
+    - 2023
+  - - 5
+    - (null)
+    - (null)
+# KNN + meta 谓词（M6'：SQLite 引擎层后过滤，xColumn KNN meta 点查路径）
+- query: SELECT rowid, category FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND category = 'a' ORDER BY distance;
+  expect:
+  - - 1
+    - a
+  - - 3
+    - a
+# distance 列与 meta 共存
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND year >= 2022 ORDER BY distance;
+  expect:
+  - - 3
+    - 2.0
+  - - 4
+    - 3.0
+# meta-only UPDATE（向量未触及：图不作废）
+- statement: UPDATE idx SET category = 'c' WHERE rowid = 1;
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND category = 'c';
+  expect:
+  - - 1
+# meta 进 shadow 表（用户可自建索引）
+- query: SELECT category FROM idx_vectors WHERE rowid = 1;
+  expect:
+  - - c
+- raw_directive: restart
+# 重开：meta 定义从 config 恢复，全链可用
+- query: SELECT rowid, category, year FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND category = 'b' ORDER BY distance;
+  expect:
+  - - 2
+    - b
+    - 2021
+  - - 4
+    - b
+    - 2023
+# 向量列必须先于 meta 列声明
+- statement: CREATE VIRTUAL TABLE bad1 USING GRAPH_INDEX(category TEXT, embedding FLOAT[2]);
+  expect_error: vector column
+# 不支持的 meta 类型
+- statement: CREATE VIRTUAL TABLE bad2 USING GRAPH_INDEX(embedding FLOAT[2], payload BLOB);
+  expect_error: FLOAT[N] or TEXT/INTEGER/REAL

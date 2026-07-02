@@ -1559,14 +1559,12 @@ Datum vectorbuffer_inspect(PG_FUNCTION_ARGS)
         funcctx = SRF_FIRSTCALL_INIT();
         MemoryContext oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
         Vector<VectorBufferInspect> inspect_results = get_inspect();
-        TupleDesc tupdesc = CreateTemplateTupleDesc(6);
-        TupleDescInitEntry(tupdesc, (AttrNumber)1, "used_space", TEXTOID, -1, 0);
-        TupleDescInitEntry(tupdesc, (AttrNumber)2, "elem_size", TEXTOID, -1, 0);
-        TupleDescInitEntry(tupdesc, (AttrNumber)3, "elem_nums", INT8OID, -1, 0);
-        TupleDescInitEntry(tupdesc, (AttrNumber)4, "hit", INT8OID, -1, 0);
-        TupleDescInitEntry(tupdesc, (AttrNumber)5, "miss", INT8OID, -1, 0);
-        TupleDescInitEntry(tupdesc, (AttrNumber)6, "eviction_rate", FLOAT8OID, -1, 0);
-        TupleDescFinalize(tupdesc);
+        TupleDesc tupdesc;
+        if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE) {
+            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                errmsg("vectorbuffer_inspect() must be called in a context that "
+                       "expects a record type")));
+        }
         funcctx->tuple_desc = BlessTupleDesc(tupdesc);
         funcctx->max_calls = inspect_results.size();
         

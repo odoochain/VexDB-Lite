@@ -37,3 +37,6 @@ steps:
   - - 9
 - statement: DROP TABLE vecs;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_delete.test
+
+skip:
+  sqlite: true

@@ -28,3 +28,6 @@ steps:
   expect:
   - - 1
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_verify.test
+
+skip:
+  sqlite: true

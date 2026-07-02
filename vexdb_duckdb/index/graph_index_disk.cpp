@@ -107,6 +107,14 @@ std::string GraphIndex::BuildDiskImage() const {
         auto &vec = store.vectors[i];
         if (!vec.empty()) {
             AppendRaw(vec_blob, vec.data(), vec.size());
+        } else {
+            // graph_memory_limit: over-budget nodes keep no mirror copy — their raw
+            // vector lives only in vector_alloc_. Read it authoritatively so the dense
+            // blob (load reads exactly vector_count entries) stays aligned and complete.
+            const char *raw = store.get_data_unlocked(i);
+            if (raw) {
+                AppendRaw(vec_blob, raw, store.vec_size);
+            }
         }
     }
 
@@ -172,7 +180,7 @@ void GraphIndex::LoadFromDiskImage(const std::string &blob) {
     m_ = int(meta.m);
     ef_construction_ = int(meta.ef_construction);
     metric_ = VexMetric(meta.metric);
-    runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_);
+    runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_, Allocator::Get(db));
     auto &store = runtime_->store;
     store.entry_info.set(meta.entry_id, meta.entry_cur_layer_idx, meta.entry_level);
 
@@ -205,7 +213,7 @@ void GraphIndex::LoadFromDiskImage(const std::string &blob) {
     }
 
     for (idx_t i = 0; i < idx_t(meta.vector_count); i++) {
-        store.vectors[i].resize(dimension_ * sizeof(float));
+        store.AllocateMirrorSlot(store.vectors[i], dimension_ * sizeof(float));
         ReadRaw(blob, offset, store.vectors[i].data(), store.vectors[i].size());
     }
 
@@ -336,6 +344,18 @@ IndexStorageInfo GraphIndex::ExportStorageInfo() const {
             order_blob.append(reinterpret_cast<const char *>(&v), sizeof(v));
         }
         info.options["pq_row_order"] = Value::BLOB(const_data_ptr_cast(order_blob.data()), order_blob.size());
+
+        if (pq_vector_coverage_hashes_.size() == pq_row_id_order_.size()) {
+            string checksum_blob;
+            uint64_t checksum_n = pq_vector_coverage_hashes_.size();
+            checksum_blob.append(reinterpret_cast<const char *>(&checksum_n), sizeof(checksum_n));
+            if (checksum_n) {
+                checksum_blob.append(reinterpret_cast<const char *>(pq_vector_coverage_hashes_.data()),
+                                     checksum_n * sizeof(uint64_t));
+            }
+            info.options["pq_vector_coverage_hashes"] =
+                Value::BLOB(const_data_ptr_cast(checksum_blob.data()), checksum_blob.size());
+        }
     }
 
     if (compact_mode_) {

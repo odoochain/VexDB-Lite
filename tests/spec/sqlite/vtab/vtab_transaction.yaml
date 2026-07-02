@@ -1,0 +1,24 @@
+name: sqlite__vtab_transaction
+tags: [vex, sqlite]
+description: shadow 表随宿主事务（ROLLBACK 撤销写入，COMMIT 保留）
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], metric=l2);
+- statement: INSERT INTO idx(rowid, embedding) VALUES (1, '[1,1]');
+- statement: BEGIN;
+- statement: INSERT INTO idx(rowid, embedding) VALUES (2, '[2,2]');
+- query: SELECT count(*) FROM idx;
+  expect:
+  - - 2
+- statement: ROLLBACK;
+- query: SELECT count(*) FROM idx;
+  expect:
+  - - 1
+- statement: BEGIN;
+- statement: INSERT INTO idx(rowid, embedding) VALUES (3, '[3,3]');
+- statement: COMMIT;
+- query: SELECT count(*) FROM idx;
+  expect:
+  - - 2
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[3,3]' AND k = 1;
+  expect:
+  - - 3

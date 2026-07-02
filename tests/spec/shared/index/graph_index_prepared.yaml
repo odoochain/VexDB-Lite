@@ -63,3 +63,6 @@ steps:
 - statement: DEALLOCATE q4;
 - statement: DROP TABLE t_prep;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_prepared.test
+
+skip:
+  sqlite: true

@@ -13,6 +13,7 @@
 
 #include "vex/vex_disk_block_store.hpp"
 #include "vex_distance.hpp"
+#include "vex_fetch_utils.hpp"
 
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "vex_hnsw_node.hpp"
@@ -61,6 +62,39 @@ static auto RunWithDuckAlgo(VexMetric metric, idx_t dim, int ef_construction, in
         });
 }
 
+static uint64_t MixCoverage64(uint64_t x) {
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+static uint64_t HashCoverageBytes(const_data_ptr_t data, idx_t size) {
+    uint64_t h = 1469598103934665603ULL;
+    for (idx_t i = 0; i < size; i++) {
+        h ^= static_cast<uint64_t>(data[i]);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static uint64_t HashCoverageRowId(row_t row_id) {
+    return MixCoverage64(static_cast<uint64_t>(row_id));
+}
+
+static uint64_t HashCoverageRowBytes(row_t row_id, const_data_ptr_t bytes, idx_t size) {
+    uint64_t h = HashCoverageRowId(row_id);
+    h ^= HashCoverageBytes(bytes, size) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+    return MixCoverage64(h);
+}
+
+static uint64_t HashCoverageRowVector(row_t row_id, const float *vec, idx_t dim) {
+    auto bytes = const_data_ptr_cast(reinterpret_cast<const char *>(vec));
+    return HashCoverageRowBytes(row_id, bytes, dim * sizeof(float));
+}
+
 } // namespace
 
 VexMetric ParseMetric(const string &metric_name) {
@@ -85,9 +119,29 @@ GraphIndex::GraphIndex(const string &name, IndexConstraintType constraint_type, 
       dimension_(dimension), m_(m), ef_construction_(ef_construction),
       build_threads_(build_threads), metric_(metric),
       vec_column_index_(vec_column_index), pq_m_(pq_m),
-      runtime_(make_uniq<GraphIndexRuntimeState>(dimension, m)),
+      runtime_(make_uniq<GraphIndexRuntimeState>(dimension, m, Allocator::Get(db))),
       compact_mode_(compact_mode) {
     runtime_->store.normalize_vectors_ = (metric_ == VexMetric::COSINE);
+}
+
+void GraphIndex::ApplyMirrorBudget() {
+    auto &store = runtime_->store;
+    // Only tighten when the buffer-manager-backed copy exists: over-budget nodes skip
+    // the vectors[] mirror and rely on vector_alloc_ as their sole home. Without it
+    // they'd have nowhere to live, so fall back to the unlimited (full-mirror) path.
+    // (The disk-image load path never InitAllocators → vector_alloc_ is null → it stays
+    // full-mirror and outside the global pool by construction.)
+    if (graph_memory_limit_bytes_ == 0 || !store.vector_alloc_ || store.vec_size == 0) {
+        store.mirror_limit_bytes_ = 0;
+        store.mirror_max_nodes_ = SIZE_MAX;
+        return;
+    }
+    // vexdb_graph_memory_limit is a GLOBAL budget shared by all indexes' mirrors. Record
+    // the limit here; the actual byte claim against the shared pool happens lazily in
+    // ReserveCapacity / DeserializeFromStorage once this store's node count is known.
+    // Until claimed, nothing is mirrored (mirror_max_nodes_ = 0).
+    store.mirror_limit_bytes_ = static_cast<size_t>(graph_memory_limit_bytes_);
+    store.mirror_max_nodes_ = 0;
 }
 
 unique_ptr<BoundIndex> GraphIndex::Create(CreateIndexInput &input) {
@@ -233,17 +287,25 @@ unique_ptr<BoundIndex> GraphIndex::Create(CreateIndexInput &input) {
                                              input.unbound_expressions, input.db, dimension, m, ef_construction,
                                              metric, 0, pq_m, compact_mode, build_threads);
 
+    // Capture the mirror budget once here (ClientContext available). It persists on the
+    // GraphIndex member across Create → PhysicalVexCreateIndex::Finalize → BuildBulk
+    // (which builds a fresh store but reuses this object), and is applied to whichever
+    // store is live after each InitAllocators via ApplyMirrorBudget().
+    graph_index->graph_memory_limit_bytes_ = GetGraphMemoryLimitBytes(input.context);
+
     if (input.storage_info.allocator_infos.size() >= 3) {
         // Reload path: create allocators WITHOUT slot-0 reservation. The serialized
         // bitmask already has slot 0 reserved from the original InitAllocators().
         // Reserving it again would corrupt buffers_with_free_space tracking.
         graph_index->runtime_->store.CreateAllocators(input.table_io_manager.GetIndexBlockManager());
+        graph_index->ApplyMirrorBudget();
         graph_index->DeserializeFromStorage(input.storage_info);
         graph_index->runtime_->store.normalize_vectors_ = (graph_index->metric_ == VexMetric::COSINE);
         return std::move(graph_index);
     }
 
     graph_index->runtime_->store.InitAllocators(input.table_io_manager.GetIndexBlockManager());
+    graph_index->ApplyMirrorBudget();
 
     auto manifest_it = input.storage_info.options.find("vex_graph_manifest");
     if (manifest_it != input.storage_info.options.end()) {
@@ -254,6 +316,7 @@ unique_ptr<BoundIndex> GraphIndex::Create(CreateIndexInput &input) {
             auto disk_blob = vex_disk::ReadBlobFromBlocks(input.table_io_manager.GetIndexBlockManager(),
                                                           QueryContext(input.context), seg.blocks, seg.size);
             graph_index->LoadFromDiskImage(disk_blob);
+            graph_index->DeserializePQAndModeFromStorage(input.storage_info);
             graph_index->runtime_->store.normalize_vectors_ = (graph_index->metric_ == VexMetric::COSINE);
             return std::move(graph_index);
         }
@@ -262,6 +325,7 @@ unique_ptr<BoundIndex> GraphIndex::Create(CreateIndexInput &input) {
     if (blob_it != input.storage_info.options.end()) {
         auto blob = StringValue::Get(blob_it->second.DefaultCastAs(LogicalType::BLOB));
         graph_index->LoadFromDiskImage(blob);
+        graph_index->DeserializePQAndModeFromStorage(input.storage_info);
     }
     graph_index->runtime_->store.normalize_vectors_ = (graph_index->metric_ == VexMetric::COSINE);
     return std::move(graph_index);
@@ -311,8 +375,10 @@ static void NormalizeInPlace(float *vec, idx_t dim) {
 }
 
 void GraphIndex::BuildBulk(const std::vector<float> &vectors, const std::vector<row_t> &row_ids) {
-    runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_);
+    runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_, Allocator::Get(db));
     runtime_->store.InitAllocators(table_io_manager.GetIndexBlockManager());
+    // Fresh store for the bulk build — re-apply the budget captured in Create().
+    ApplyMirrorBudget();
 
     // For cosine: normalize once at the adapter, then tell store NOT to normalize
     // again. Double-normalizing causes float-precision drift in the rounding of
@@ -347,11 +413,26 @@ void GraphIndex::BuildBulk(const std::vector<float> &vectors, const std::vector<
     // Enable build-only locking in get_data for the parallel build span: workers mutate
     // MemStore concurrently without graph_rwlock_. RAII restores false on all paths
     // (including exceptions) — and only after all workers have joined inside RunWithDuckAlgo.
+    // Also force search_lock_free_ off for the build: the per-node stripe locks
+    // (lock_point) that synchronize concurrent worker reads against add_upperpoint's
+    // exclusive publish are skipped when search_lock_free_ is set. A prior SearchANN
+    // latches that flag true and never resets it, so a rebuild on the same store
+    // would otherwise let build-time readers skip the lock → the upper-point publish
+    // race resurfaces. Save/restore so search keeps its lock-free fast path afterward.
     struct BuildActiveGuard {
         std::atomic<bool> &flag;
-        explicit BuildActiveGuard(std::atomic<bool> &f) : flag(f) { flag.store(true, std::memory_order_release); }
-        ~BuildActiveGuard() { flag.store(false, std::memory_order_release); }
-    } _build_active_guard(runtime_->store.parallel_build_active_);
+        bool &lock_free;
+        bool saved_lock_free;
+        BuildActiveGuard(std::atomic<bool> &f, bool &lf)
+            : flag(f), lock_free(lf), saved_lock_free(lf) {
+            lock_free = false;
+            flag.store(true, std::memory_order_release);
+        }
+        ~BuildActiveGuard() {
+            flag.store(false, std::memory_order_release);
+            lock_free = saved_lock_free;
+        }
+    } _build_active_guard(runtime_->store.parallel_build_active_, runtime_->store.search_lock_free_);
 
     RunWithDuckAlgo(metric_, dimension_, ef_construction_, m_, runtime_->store, [&](auto &algo) {
         using AlgoT = std::decay_t<decltype(algo)>;
@@ -424,6 +505,7 @@ void GraphIndex::BuildBulk(const std::vector<float> &vectors, const std::vector<
             }
         }
     });
+    runtime_->store.normalize_vectors_ = (metric_ == VexMetric::COSINE);
 
     // When samples ≤ ksub (256 for nbits=8) the shared AnnKmeans takes the
     // QuickCenters fast-path (every sample becomes a centroid), so PQ works
@@ -445,8 +527,8 @@ void GraphIndex::ReleaseRawVectors() {
     if (store.vector_alloc_) {
         store.vector_alloc_->Reset();
     }
-    store.vectors.clear();
-    store.vectors.shrink_to_fit();
+    store.ClearMirrorVectors(/*shrink=*/true);
+    store.ReleaseMirrorClaim();
     store.compact_mode_ = true;
 }
 
@@ -564,9 +646,13 @@ void GraphIndex::TrainAndEncodePQ(const float *vec_data, const std::vector<row_t
 
     auto code_size = pq_quantizer_.code_size;
     pq_codes_.assign(pq_row_id_order_.size() * code_size, 0);
+    pq_vector_coverage_hashes_.assign(pq_row_id_order_.size(), 0);
     for (idx_t i = 0; i < pq_row_id_order_.size(); i++) {
         auto src_idx = rid_to_idx[pq_row_id_order_[i]];
-        pq_quantizer_.compute_code(vec_data + src_idx * dimension_, pq_codes_.data() + i * code_size);
+        auto rid = pq_row_id_order_[i];
+        const auto *vec = vec_data + src_idx * dimension_;
+        pq_quantizer_.compute_code(vec, pq_codes_.data() + i * code_size);
+        pq_vector_coverage_hashes_[i] = HashCoverageRowVector(rid, vec, dimension_);
     }
 }
 
@@ -848,11 +934,12 @@ ErrorData GraphIndex::Append(IndexLock &l, DataChunk &chunk, Vector &row_ids) {
     vex_duck::ExclusiveLockGuard _wg(graph_rwlock_);
 
     if (!runtime_) {
-        runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_);
+        runtime_ = make_uniq<GraphIndexRuntimeState>(dimension_, m_, Allocator::Get(db));
         runtime_->store.normalize_vectors_ = (metric_ == VexMetric::COSINE);
     }
     if (!runtime_->store.node_alloc_ || !runtime_->store.vector_alloc_ || !runtime_->store.upper_alloc_) {
         runtime_->store.InitAllocators(table_io_manager.GetIndexBlockManager());
+        ApplyMirrorBudget();
     }
 
     if (column_ids.empty()) {
@@ -896,6 +983,7 @@ ErrorData GraphIndex::Append(IndexLock &l, DataChunk &chunk, Vector &row_ids) {
     const bool pq_active = pq_use_;
     const bool pq_normalize = pq_active && metric_ == VexMetric::COSINE;
     const auto pq_code_size = pq_active ? pq_quantizer_.code_size : 0;
+    const bool track_pq_vector_hashes = pq_active && pq_vector_coverage_hashes_.size() == pq_row_id_order_.size();
     // Compact mode released the raw vector tier; HNSW navigation has no
     // anchors so skip algo.insert. New rows reach search via pq_codes_ only.
     const bool skip_hnsw = compact_mode_ && pq_active;
@@ -907,6 +995,9 @@ ErrorData GraphIndex::Append(IndexLock &l, DataChunk &chunk, Vector &row_ids) {
     if (pq_active) {
         pq_codes_.reserve(pq_codes_.size() + count * pq_code_size);
         pq_row_id_order_.reserve(pq_row_id_order_.size() + count);
+        if (track_pq_vector_hashes) {
+            pq_vector_coverage_hashes_.reserve(pq_vector_coverage_hashes_.size() + count);
+        }
     }
 
     RunWithDuckAlgo(metric_, dim, ef_construction_, m_, runtime_->store, [&](auto &algo) {
@@ -942,6 +1033,9 @@ ErrorData GraphIndex::Append(IndexLock &l, DataChunk &chunk, Vector &row_ids) {
                 pq_codes_.resize(off + pq_code_size);
                 pq_quantizer_.compute_code(encode_src, pq_codes_.data() + off);
                 pq_row_id_order_.push_back(tid.row_id);
+                if (track_pq_vector_hashes) {
+                    pq_vector_coverage_hashes_.push_back(HashCoverageRowVector(tid.row_id, encode_src, dim));
+                }
             }
         }
     });
@@ -1000,6 +1094,8 @@ void GraphIndex::CommitDrop(IndexLock &index_lock) {
         }
     }
     runtime_.reset();
+    rowid_coverage_checked_ = false;
+    rowid_coverage_stale_ = false;
 }
 
 ErrorData GraphIndex::Insert(IndexLock &l, DataChunk &chunk, Vector &row_ids) {
@@ -1086,6 +1182,88 @@ idx_t GraphIndex::GetRowIdCount() const {
     return total;
 }
 
+GraphIndexRowIdCoverage GraphIndex::GetRowIdCoverage() const {
+    GraphIndexRowIdCoverage coverage;
+    if (!runtime_) {
+        return coverage;
+    }
+
+    vex_duck::SharedLockGuard _rg(graph_rwlock_);
+    const bool pq_coverage_layout = compact_mode_ && pq_use_ && pq_quantizer_.trained &&
+                                    pq_quantizer_.code_size > 0 && !pq_codes_.empty() &&
+                                    pq_codes_.size() == pq_row_id_order_.size() * pq_quantizer_.code_size;
+    if (pq_coverage_layout) {
+        const auto code_size = static_cast<idx_t>(pq_quantizer_.code_size);
+        const bool has_vector_hashes = HasVectorCoverageChecksum();
+        for (idx_t i = 0; i < pq_row_id_order_.size(); i++) {
+            auto rid = pq_row_id_order_[i];
+            if (rid < 0 || rid >= MAX_ROW_ID || deleted_rids_.find(rid) != deleted_rids_.end()) {
+                continue;
+            }
+            coverage.live_count++;
+            coverage.rowid_upper_bound =
+                std::max<idx_t>(coverage.rowid_upper_bound, static_cast<idx_t>(rid) + 1);
+            coverage.rowid_checksum += HashCoverageRowId(rid);
+            if (has_vector_hashes) {
+                coverage.vector_checksum += pq_vector_coverage_hashes_[i];
+            } else {
+                coverage.vector_checksum += HashCoverageRowBytes(
+                    rid, const_data_ptr_cast(reinterpret_cast<const char *>(pq_codes_.data() + i * code_size)),
+                    code_size);
+            }
+            coverage.has_vector_checksum = true;
+        }
+        return coverage;
+    }
+
+    auto &store = runtime_->store;
+    LWLockAcquire(&store.elems_veclock, LW_SHARED);
+    {
+        std::shared_lock<std::shared_mutex> _tl(GraphIndexPoint::tid_lock());
+        for (idx_t id = 0; id < store.elems.size(); id++) {
+            const char *raw = store.get_data_unlocked(static_cast<uint32>(id));
+            const auto *vec = reinterpret_cast<const float *>(raw);
+            for (auto &tid : store.elems[id].tids) {
+                auto rid = tid.row_id;
+                if (rid < 0 || rid >= MAX_ROW_ID || deleted_rids_.find(rid) != deleted_rids_.end()) {
+                    continue;
+                }
+                coverage.live_count++;
+                coverage.rowid_upper_bound =
+                    std::max<idx_t>(coverage.rowid_upper_bound, static_cast<idx_t>(rid) + 1);
+                coverage.rowid_checksum += HashCoverageRowId(rid);
+                if (vec) {
+                    coverage.vector_checksum += HashCoverageRowVector(rid, vec, dimension_);
+                    coverage.has_vector_checksum = true;
+                }
+            }
+        }
+    }
+    LWLockRelease(&store.elems_veclock);
+    return coverage;
+}
+
+bool GraphIndex::HasVectorCoverageChecksum() const {
+    return !pq_vector_coverage_hashes_.empty() &&
+           pq_vector_coverage_hashes_.size() == pq_row_id_order_.size();
+}
+
+bool GraphIndex::UsesPQCoverageChecksum() const {
+    return compact_mode_ && pq_use_ && pq_quantizer_.trained && pq_quantizer_.code_size > 0 &&
+           !pq_codes_.empty() && pq_codes_.size() == pq_row_id_order_.size() * pq_quantizer_.code_size &&
+           !HasVectorCoverageChecksum();
+}
+
+uint64_t GraphIndex::HashPQVectorForCoverage(row_t row_id, const float *vec) const {
+    if (!UsesPQCoverageChecksum()) {
+        return 0;
+    }
+    std::vector<uint8_t> code(pq_quantizer_.code_size);
+    pq_quantizer_.compute_code(vec, code.data());
+    return HashCoverageRowBytes(row_id, const_data_ptr_cast(reinterpret_cast<const char *>(code.data())),
+                                static_cast<idx_t>(code.size()));
+}
+
 idx_t GraphIndex::GetInMemorySize(IndexLock &state) {
     (void)state;
     if (!runtime_) {
@@ -1131,6 +1309,88 @@ string GraphIndex::GetConstraintViolationMessage(VerifyExistenceType verify_type
     (void)failed_index;
     (void)input;
     return "GRAPH_INDEX does not enforce constraints";
+}
+
+void GraphIndex::DeserializePQAndModeFromStorage(const IndexStorageInfo &info) {
+    auto pq_m_it = info.options.find("pq_m");
+    auto pq_dim_it = info.options.find("pq_dim");
+    auto pq_codebook_it = info.options.find("pq_codebook");
+    auto pq_codes_it = info.options.find("pq_codes");
+    auto pq_order_it = info.options.find("pq_row_order");
+    if (pq_m_it != info.options.end() && pq_dim_it != info.options.end() &&
+        pq_codebook_it != info.options.end() && pq_codes_it != info.options.end() &&
+        pq_order_it != info.options.end()) {
+        pq_m_ = pq_m_it->second.GetValue<uint32_t>();
+        ::vex::quantizer::PQContext ctx;
+        pq_quantizer_.set_basic_values(pq_dim_it->second.GetValue<uint32_t>(), pq_m_, /*nbits*/8);
+        pq_quantizer_.set_derived_values(ctx);
+        pq_quantizer_.set_fvec_L2sqr_ny_nearest_func();
+        pq_quantizer_.set_fvec_ny_distance_func(Metric::L2);
+        pq_quantizer_.set_dist_code_func();
+
+        auto cb_blob = StringValue::Get(pq_codebook_it->second.DefaultCastAs(LogicalType::BLOB));
+        const char *p = cb_blob.data();
+        const char *end = p + cb_blob.size();
+        if (p + sizeof(uint64_t) <= end) {
+            uint64_t cn;
+            std::memcpy(&cn, p, sizeof(cn)); p += sizeof(cn);
+            if (cn == pq_quantizer_.get_centroids_size() && p + cn * sizeof(float) <= end) {
+                std::memcpy(pq_quantizer_.centroids, p, cn * sizeof(float));
+                pq_quantizer_.trained = true;
+            }
+        }
+
+        auto codes_blob = StringValue::Get(pq_codes_it->second.DefaultCastAs(LogicalType::BLOB));
+        p = codes_blob.data(); end = p + codes_blob.size();
+        if (p + sizeof(uint64_t) <= end) {
+            uint64_t n;
+            std::memcpy(&n, p, sizeof(n)); p += sizeof(n);
+            if (p + n <= end) {
+                pq_codes_.assign(p, p + n);
+            }
+        }
+
+        auto order_blob = StringValue::Get(pq_order_it->second.DefaultCastAs(LogicalType::BLOB));
+        p = order_blob.data(); end = p + order_blob.size();
+        if (p + sizeof(uint64_t) <= end) {
+            uint64_t n;
+            std::memcpy(&n, p, sizeof(n)); p += sizeof(n);
+            pq_row_id_order_.clear();
+            pq_row_id_order_.reserve(n);
+            for (uint64_t i = 0; i < n && p + sizeof(int64_t) <= end; i++) {
+                int64_t v;
+                std::memcpy(&v, p, sizeof(v)); p += sizeof(v);
+                pq_row_id_order_.push_back(static_cast<row_t>(v));
+            }
+        }
+
+        pq_vector_coverage_hashes_.clear();
+        auto checksum_it = info.options.find("pq_vector_coverage_hashes");
+        if (checksum_it != info.options.end()) {
+            auto checksum_blob = StringValue::Get(checksum_it->second.DefaultCastAs(LogicalType::BLOB));
+            p = checksum_blob.data(); end = p + checksum_blob.size();
+            if (p + sizeof(uint64_t) <= end) {
+                uint64_t n;
+                std::memcpy(&n, p, sizeof(n)); p += sizeof(n);
+                if (n == pq_row_id_order_.size() && p + n * sizeof(uint64_t) <= end) {
+                    pq_vector_coverage_hashes_.resize(n);
+                    std::memcpy(pq_vector_coverage_hashes_.data(), p, n * sizeof(uint64_t));
+                }
+            }
+        }
+
+        pq_use_ = pq_quantizer_.trained && !pq_codes_.empty();
+    }
+
+    bool compact_mode_flag = false;
+    auto compact_it = info.options.find("compact_mode");
+    if (compact_it != info.options.end()) {
+        compact_mode_flag = compact_it->second.GetValue<bool>();
+    }
+    compact_mode_ = compact_mode_flag;
+    if (compact_mode_) {
+        ReleaseRawVectors();
+    }
 }
 
 void GraphIndex::DeserializeFromStorage(const IndexStorageInfo &info) {
@@ -1239,6 +1499,13 @@ void GraphIndex::DeserializeFromStorage(const IndexStorageInfo &info) {
     // restoring their tids would resurrect rows the table no longer has.
     const int m_local = static_cast<int>(store.m);
     const uint_fast16_t nbr_slots = static_cast<uint_fast16_t>(m_local * 2);
+    // Standard reload participates in the global mirror pool too: vectors live in
+    // vector_alloc_, so over-budget nodes simply keep no mirror copy (rebuilt below
+    // only for i < mirror_max_nodes_) and are served from the buffer manager.
+    if (store.mirror_limit_bytes_ != 0) {
+        store.mirror_max_nodes_ =
+            store.ClaimMirrorNodes(std::min(store.id_to_node_ptr_.size(), store.elems.size()));
+    }
     for (size_t i = 0; i < store.id_to_node_ptr_.size() && i < store.elems.size(); i++) {
         auto ptr = store.id_to_node_ptr_[i];
         if (!ptr.Get() || !store.node_alloc_) {
@@ -1283,11 +1550,12 @@ void GraphIndex::DeserializeFromStorage(const IndexStorageInfo &info) {
         // vectors[i] mirror (get_data fallback path)
         // compact_mode 下原始向量已被 ReleaseRawVectors 清空，header->vector_ptr 是
         // 失效的 buffer_id；跳过避免对空 allocator 调 Get() 解引用 nullptr。
+        // 超出 mirror_max_nodes_ 预算的节点不重建镜像，留 get_data 走 vector_alloc_。
         if (!compact_mode_flag && store.vector_alloc_ && header->vector_ptr.Get() &&
-            i < store.vectors.size()) {
+            i < store.vectors.size() && i < store.mirror_max_nodes_) {
             auto *vec_data = reinterpret_cast<const char *>(store.vector_alloc_->Get(header->vector_ptr));
             if (vec_data) {
-                store.vectors[i].assign(vec_data, vec_data + store.vec_size);
+                store.AssignMirrorSlot(store.vectors[i], vec_data, store.vec_size);
             }
         }
     }
@@ -1348,67 +1616,7 @@ void GraphIndex::DeserializeFromStorage(const IndexStorageInfo &info) {
         }
     }
 
-    auto pq_m_it = info.options.find("pq_m");
-    auto pq_dim_it = info.options.find("pq_dim");
-    auto pq_codebook_it = info.options.find("pq_codebook");
-    auto pq_codes_it = info.options.find("pq_codes");
-    auto pq_order_it = info.options.find("pq_row_order");
-    if (pq_m_it != info.options.end() && pq_dim_it != info.options.end() &&
-        pq_codebook_it != info.options.end() && pq_codes_it != info.options.end() &&
-        pq_order_it != info.options.end()) {
-        pq_m_ = pq_m_it->second.GetValue<uint32_t>();
-        ::vex::quantizer::PQContext ctx;  // default allocator/random
-        pq_quantizer_.set_basic_values(pq_dim_it->second.GetValue<uint32_t>(), pq_m_, /*nbits*/8);
-        pq_quantizer_.set_derived_values(ctx);
-        pq_quantizer_.set_fvec_L2sqr_ny_nearest_func();
-        pq_quantizer_.set_fvec_ny_distance_func(Metric::L2);
-        pq_quantizer_.set_dist_code_func();
-
-        auto cb_blob = StringValue::Get(pq_codebook_it->second.DefaultCastAs(LogicalType::BLOB));
-        const char *p = cb_blob.data();
-        const char *end = p + cb_blob.size();
-        if (p + sizeof(uint64_t) <= end) {
-            uint64_t cn;
-            std::memcpy(&cn, p, sizeof(cn)); p += sizeof(cn);
-            if (cn == pq_quantizer_.get_centroids_size() && p + cn * sizeof(float) <= end) {
-                std::memcpy(pq_quantizer_.centroids, p, cn * sizeof(float));
-                pq_quantizer_.trained = true;
-            }
-        }
-
-        auto codes_blob = StringValue::Get(pq_codes_it->second.DefaultCastAs(LogicalType::BLOB));
-        p = codes_blob.data(); end = p + codes_blob.size();
-        if (p + sizeof(uint64_t) <= end) {
-            uint64_t n;
-            std::memcpy(&n, p, sizeof(n)); p += sizeof(n);
-            if (p + n <= end) {
-                pq_codes_.assign(p, p + n);
-            }
-        }
-
-        auto order_blob = StringValue::Get(pq_order_it->second.DefaultCastAs(LogicalType::BLOB));
-        p = order_blob.data(); end = p + order_blob.size();
-        if (p + sizeof(uint64_t) <= end) {
-            uint64_t n;
-            std::memcpy(&n, p, sizeof(n)); p += sizeof(n);
-            pq_row_id_order_.clear();
-            pq_row_id_order_.reserve(n);
-            for (uint64_t i = 0; i < n && p + sizeof(int64_t) <= end; i++) {
-                int64_t v;
-                std::memcpy(&v, p, sizeof(v)); p += sizeof(v);
-                pq_row_id_order_.push_back(static_cast<row_t>(v));
-            }
-        }
-
-        pq_use_ = pq_quantizer_.trained && !pq_codes_.empty();
-    }
-
-    // compact_mode_ 已在函数顶部解析为 compact_mode_flag；这里只做一次同步与
-    // ReleaseRawVectors（其内部会同步 store.compact_mode_ = true）。
-    compact_mode_ = compact_mode_flag;
-    if (compact_mode_) {
-        ReleaseRawVectors();
-    }
+    DeserializePQAndModeFromStorage(info);
 }
 
 } // namespace duckdb

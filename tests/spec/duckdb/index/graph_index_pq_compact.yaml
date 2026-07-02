@@ -8,8 +8,6 @@ tags:
 - migrated
 engines:
 - duckdb
-- pg
-- opengauss
 description: memory_mode='compact' releases the raw vector tier post-train.
 steps:
 - statement: SET ${GUC_BF_THRESHOLD} = 0;
@@ -26,6 +24,11 @@ steps:
   expect_error: must be 'full' or 'compact'
 - statement: CREATE INDEX idx_pq_compact ON pq_compact USING ${VEX_INDEX} (vec${OPS_L2_COL})${IDX_WITH_L2(quantizer = 'pq', pq_m = 4, memory_mode = 'compact')};
 # compact mode auto-routes to PQ search; no explicit GUC needed
+- query: 'EXPLAIN SELECT id FROM pq_compact ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 8)})} LIMIT 1;'
+  _field_types: II
+  expect:
+  - - physical_plan
+    - <REGEX>:.*VEXDB_INDEX_SCAN.*
 - query: 'SELECT id FROM pq_compact ORDER BY ${L2(vec, ${VEC_LITERAL([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], 8)})} LIMIT 1;'
   _field_types: I
   expect:

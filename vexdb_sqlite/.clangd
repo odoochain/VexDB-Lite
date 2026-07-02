@@ -1,0 +1,13 @@
+# vexdb_sqlite 独立 CMake 适配层，用自己的 compile_commands.json（就近覆盖根 .clangd）。
+# 生成：bash ../build_sqlite.sh build  （CMakeLists 已开 CMAKE_EXPORT_COMPILE_COMMANDS）。
+CompileFlags:
+  CompilationDatabase: build
+
+# 根 .clang-tidy 是 DuckDB 的（WarningsAsErrors:'*'、HeaderFilterRegex 写死 duckdb），
+# 对 SQLite 适配层不适用：关掉惯用法误报与纯风格项，sqlite 代码不飘红。
+Diagnostics:
+  ClangTidy:
+    Remove:
+      # sqlite3_api 全局变量来自强制宏 SQLITE_EXTENSION_INIT1，非真实问题。
+      - cppcoreguidelines-avoid-non-const-global-variables
+      - readability-braces-around-statements

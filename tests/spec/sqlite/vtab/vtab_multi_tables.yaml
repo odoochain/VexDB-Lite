@@ -1,0 +1,21 @@
+name: sqlite__vtab_multi_tables
+tags: [vex, sqlite]
+description: 多个 GRAPH_INDEX 表并存互不干扰（不同维度/metric），DROP 一个另一个完好
+steps:
+- statement: CREATE VIRTUAL TABLE a USING GRAPH_INDEX(embedding FLOAT[2], metric=l2);
+- statement: CREATE VIRTUAL TABLE b USING GRAPH_INDEX(embedding FLOAT[3], metric=cosine);
+- statement: INSERT INTO a(rowid, embedding) VALUES (1, '[1,1]');
+- statement: INSERT INTO b(rowid, embedding) VALUES (7, '[1,0,0]');
+- query: SELECT rowid FROM a WHERE embedding MATCH '[1,1]' AND k = 1;
+  expect:
+  - - 1
+- query: SELECT rowid FROM b WHERE embedding MATCH '[2,0,0]' AND k = 1;
+  expect:
+  - - 7
+- statement: DROP TABLE a;
+- query: SELECT rowid FROM b WHERE embedding MATCH '[1,0,0]' AND k = 1;
+  expect:
+  - - 7
+- query: SELECT count(*) FROM sqlite_master WHERE name LIKE 'a_%';
+  expect:
+  - - 0

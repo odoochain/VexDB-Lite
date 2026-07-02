@@ -1,0 +1,19 @@
+name: sqlite__vtab_cosine_normalize
+tags: [vex, sqlite]
+description: cosine 索引的归一化语义专项——KNN distance 与标量函数数值一致（非仅排序）
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[3], metric=cosine);
+# 不同模长同方向的向量 cosine 距离=0
+- statement: INSERT INTO idx(rowid, embedding) VALUES (1,'[2,0,0]'),(2,'[0,3,0]'),(3,'[1,1,0]');
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[100,0,0]' AND k = 3;
+  expect:
+  - - 1
+    - 0.0
+  - - 3
+    - 0.2928932
+  - - 2
+    - 1.0
+# 与标量函数数值一致（同 query 同向量）
+- query: SELECT vexdb_cosine_distance('[100,0,0]', '[1,1,0]');
+  expect:
+  - - 0.2928932
