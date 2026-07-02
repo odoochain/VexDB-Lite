@@ -351,6 +351,44 @@ def emit_pg(spec: dict, dialect: dict) -> tuple[str, str]:
     return "\n".join(sql_lines) + "\n", "\n".join(exp_lines) + "\n"
 
 
+def emit_sqlite(spec: dict, dialect: dict) -> tuple[str, str]:
+    """返回 (sql_file, expected_out)。输出规范=sqlite3 CLI `.mode list`（'|' 分隔、
+    NULL→空串），与 PG psql -A -F'|' 同构，复用 compare.py 容差对比。
+    runner: tests/spec/_lib/docker/run_sqlite.sh（本地直跑，非 docker）。"""
+    sql_lines = [f"-- spec: {spec['name']}", ""]
+    exp_lines: list[str] = []
+    if spec.get("setup"):
+        sql_lines.append(render_template(spec["setup"], dialect).rstrip() + "\n")
+    for step in spec.get("steps", []):
+        if "raw_directive" in step:
+            d = step["raw_directive"]
+            if d == "restart":
+                sql_lines.append("-- @restart")  # runner 关库重开（持久化验证）
+            else:
+                sql_lines.append(f"-- raw: {d}")
+            continue
+        if "statement" in step and "expect_error" not in step:
+            for stmt in split_sql(render_template(step["statement"], dialect)):
+                sql_lines.append(stmt + ";")
+        elif "expect_error" in step:
+            q = step.get("query") or step.get("statement", "")
+            # runner 对 @expect-error 的下一条语句宽松匹配（报错文本各引擎不同）
+            sql_lines.append("-- @expect-error")
+            sql_lines.append(render_template(q, dialect).rstrip(";") + ";")
+        elif "query" in step:
+            if step.get("_sort"):
+                # expected 已按 _sort_rows 排序；runner 对该 query 的 actual 行
+                # 做相同的字符串排序（ANN 顺序不稳定时避免假 fail）
+                sql_lines.append("-- @sort")
+            sql_lines.append(render_template(step["query"], dialect).rstrip(";") + ";")
+            rows = _sort_rows(step.get("expect", []), step.get("_sort", ""))
+            for row in rows:
+                exp_lines.append("|".join(_pg_format_value(v) for v in row))
+    if spec.get("teardown"):
+        sql_lines.append(render_template(spec["teardown"], dialect).rstrip() + "\n")
+    return "\n".join(sql_lines) + "\n", "\n".join(exp_lines) + "\n"
+
+
 def emit_python(spec: dict, dialect: dict) -> str:
     """pytest 文件 - DuckDB Python binding 用."""
     name = spec["name"].replace("-", "_")
@@ -425,6 +463,7 @@ EMITTERS = {
     "duckdb": emit_duckdb,
     "pg": emit_pg,
     "opengauss": emit_pg,
+    "sqlite": emit_sqlite,
     "python": emit_python,
 }
 
@@ -466,8 +505,8 @@ def render_one(spec_path: Path, engine: str, out_root: Path, dialects: dict) -> 
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(emit_duckdb(spec, dialect))
         written.append(out)
-    elif engine in ("pg", "opengauss"):
-        sql, exp = emit_pg(spec, dialect)
+    elif engine in ("pg", "opengauss", "sqlite"):
+        sql, exp = (emit_sqlite if engine == "sqlite" else emit_pg)(spec, dialect)
         sql_out = out_root / "sql" / f"{name}.sql"
         exp_out = out_root / "expected" / f"{name}.out"
         sql_out.parent.mkdir(parents=True, exist_ok=True)

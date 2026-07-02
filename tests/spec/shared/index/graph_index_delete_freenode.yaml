@@ -55,3 +55,6 @@ steps:
   - - 3
 - statement: DROP TABLE t3;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_delete_freenode.test
+
+skip:
+  sqlite: true

@@ -37,3 +37,6 @@ steps:
   - - 4
     - 'NULL'
 _migrated_from: vexdb_duckdb/test/sql/vex/types/float_array_basic.test
+
+skip:
+  sqlite: true

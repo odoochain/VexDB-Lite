@@ -7,7 +7,7 @@
 
 #include <vtl/allocator>
 #include <vtl/internal/expr.hpp>
-#if !defined(PG_VEXDB_TARGET_DUCK)
+#if !(defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #include "utils/palloc.h"
 #endif
 

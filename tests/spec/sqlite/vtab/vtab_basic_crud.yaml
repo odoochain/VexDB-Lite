@@ -1,0 +1,31 @@
+name: sqlite__vtab_basic_crud
+tags: [vex, sqlite]
+description: GRAPH_INDEX 虚拟表基本 CRUD（建表/插入 JSON+BLOB/查询/更新/删除/DROP）
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[3], metric=l2);
+- statement: INSERT INTO idx(rowid, embedding) VALUES (1, '[0,0,0]');
+- statement: INSERT INTO idx(rowid, embedding) VALUES (2, vexdb_f32('[3,4,0]'));
+- statement: INSERT INTO idx(embedding) VALUES ('[1,1,1]');
+- query: SELECT count(*) FROM idx;
+  expect:
+  - - 3
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0,0]' AND k = 2;
+  expect:
+  - - 1
+    - 0.0
+  - - 3
+    - 1.7320508
+- statement: UPDATE idx SET embedding = '[0,0,9]' WHERE rowid = 3;
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0,8]' AND k = 1;
+  expect:
+  - - 3
+- statement: DELETE FROM idx WHERE rowid = 1;
+- query: SELECT count(*) FROM idx;
+  expect:
+  - - 2
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0,0]' AND k = 5;
+  _sort: rowsort
+  expect:
+  - - 2
+  - - 3
+- statement: DROP TABLE idx;

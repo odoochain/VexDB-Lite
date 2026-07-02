@@ -17,7 +17,7 @@ using Vector = std::vector<T, Allocator>;
 #include <algorithm>    /* min, max */
 #include <initializer_list>
 #include <vtl/internal/expr.hpp>
-#if !defined(PG_VEXDB_TARGET_DUCK)
+#if !(defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #include "utils/palloc.h"
 #include "utils/memutils.h"
 #endif

@@ -1,0 +1,28 @@
+name: sqlite__vtab_graph_chunked
+tags: [vex, sqlite]
+description: 图多行落盘（v2 段式天然多行=5 种 kind；graph_chunk_size 参数保留解析兼容旧建表 SQL；重开还原正确）
+steps:
+# graph_chunk_size 自 v2 起不再生效（段式天然分块），此处验证参数兼容不报错
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[4], metric=l2, ef_search=80, graph_chunk_size=4096);
+- statement: |
+    WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 100)
+    INSERT INTO idx(rowid, embedding)
+    SELECT i, vexdb_f32('[' || i || ',' || i || ',' || i || ',' || i || ']') FROM c;
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[42,42,42,42]' AND k = 1;
+  expect:
+  - - 42
+# special insert 触发写事务 → xSync 把 dirty 内存图分块落盘
+- statement: INSERT INTO idx(idx) VALUES ('ef_search=80');
+# 落盘必须是多块
+- query: SELECT count(*) > 1 FROM idx_graph;
+  expect:
+  - - 1
+- raw_directive: restart
+# 重开走多块拼接 load，结果一致
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[42,42,42,42]' AND k = 1;
+  expect:
+  - - 42
+    - 0.0
+- query: SELECT count(*) FROM idx;
+  expect:
+  - - 100

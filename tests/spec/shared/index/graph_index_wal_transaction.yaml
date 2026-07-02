@@ -155,3 +155,6 @@ steps:
   - - 2
 - statement: DROP TABLE t7;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_wal_transaction.test
+
+skip:
+  sqlite: true

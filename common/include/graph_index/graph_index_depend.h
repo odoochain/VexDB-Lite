@@ -3,6 +3,9 @@
 
 #if defined(PG_VEXDB_TARGET_DUCK)
 #include "vex_graph_index_depend_duck.hpp"
+#elif defined(PG_VEXDB_TARGET_SQLITE)
+// SQLite 宿主依赖（vexdb_sqlite/include/store/，由 vexdb_sqlite CMake 提供 include path）
+#include "vex_graph_index_depend_sqlite.hpp"
 #elif defined(PG_VEXDB_TARGET_PG)
 #include "postgres.h"
 #include "global_instance.h"

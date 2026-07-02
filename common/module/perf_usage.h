@@ -70,7 +70,7 @@
 #include <vtl/expr_helper>
 #endif
 
-#if !defined(PG_VEXDB_TARGET_DUCK)
+#if !(defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #include "c.h"
 #else
 #ifndef FORCE_INLINE

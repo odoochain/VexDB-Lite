@@ -74,3 +74,6 @@ steps:
 - statement: DROP TABLE t_meta;
 - statement: DROP TABLE t_opt;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_optimizer_edge.test
+
+skip:
+  sqlite: true

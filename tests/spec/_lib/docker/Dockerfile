@@ -49,11 +49,9 @@ ENV PG_CONFIG=/opt/pg19/bin/pg_config
 COPY vexdb_lite_src /src/vexdb_lite
 
 WORKDIR /src/vexdb_lite
-# - 替换硬编码 PG_CONFIG
-# - ARM64 注入 -DFLT16_SUPPORT (用 (float)__fp16 cast 走 std::isnan, 避免 __fp16 直接位运算)
-# - GCC 14 严格化对部分 const 用法报错, 加 -fpermissive 兜底
-# Makefile 已在 host 端 patch (run_pg.sh 准备 build context 时重写)
-RUN make -j${JOBS} && make install
+RUN cmake -S vexdb_pg -B build/pg -DCMAKE_BUILD_TYPE=Release \
+    && cmake --build build/pg -j${JOBS} \
+    && cmake --install build/pg
 
 # ─────────────────────────── stage 3: runtime ────────────────────────────────────
 FROM debian:trixie-slim AS runtime

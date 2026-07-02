@@ -1,0 +1,17 @@
+name: sqlite__vtab_null_and_empty
+tags: [vex, sqlite]
+description: NULL 查询向量报错；空表 KNN 返回 0 行；空表 count/DELETE 无害
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], metric=l2);
+- query: SELECT count(*) FROM idx;
+  expect:
+  - - 0
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[1,1]' AND k = 5;
+  expect: []
+- statement: DELETE FROM idx WHERE rowid = 99;
+- query: SELECT rowid FROM idx WHERE embedding MATCH NULL AND k = 1;
+  expect_error: vector
+- statement: INSERT INTO idx(rowid, embedding) VALUES (1, '[1,1]');
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[1,1]' AND k = 1;
+  expect:
+  - - 1

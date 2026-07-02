@@ -646,6 +646,27 @@ private:
             return;
         }
 
+        if (build.parallel_workers > 0 && build.estimated_limit > 0 &&
+            tuples_done >= build.estimated_limit) {
+            ereport(WARNING,
+                (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+                 errmsg("graph_index graph no longer fits into maintenance_work_mem after "
+                        "%lu tuples", (unsigned long)tuples_done),
+                 errdetail("Building will take significantly more time."),
+                 errhint("Increase maintenance_work_mem to speed up builds.")));
+            build.flush(index);
+            build.mem_store->destroy();
+            build.build_state = BuildState::DISK;
+            build.launch_parallel_workers();
+            if (build.cached_shared) {
+                pg_atomic_write_u32(&build.cached_shared->tuples_done, (uint32)tuples_done);
+            }
+            prepare_quantizer_disk_build();
+            build.insert_on_disk(data, data.disk_distancer, query, tid);
+            build.free_vec(vec_p, values, query, is_alloc);
+            return;
+        }
+
         build.insert_in_memory(data, data.mem_distancer, query, tid);
         build.free_vec(vec_p, values, query, is_alloc);
     }
@@ -704,19 +725,17 @@ private:
             }
         }
 
-        /* Start thread pool for parallel memory build */
+        /* Do not run std::thread workers inside a PostgreSQL backend. PG keeps
+         * process-global state such as CurrentMemoryContext and CritSectionCount;
+         * using PG allocators from C++ threads can trip casserts or corrupt memory.
+         * Keep the memory phase single-threaded and use PG parallel workers after
+         * the memory budget is flushed to disk. */
         if (parallel_workers > 0 && build_state == BuildState::MEMORY) {
             size_t per_tuple = vector_size
                              + MemStore<>::get_base_point_size(m)
                              + MemStore<>::get_upper_point_size(m) / (m - 1);
             size_t budget = (size_t)maintenance_work_mem_kb * 1024 - 200LL * 1024 * 1024;
             estimated_limit = budget / per_tuple;
-
-            thread_queue = new ThreadWorkQueue();
-            thread_ctx = new PointExtensionContext(index, GRAPH_INDEX_PS_BLKNO, false, true);
-            for (int i = 0; i < parallel_workers; i++) {
-                thread_pool.emplace_back(memory_build_worker, this, i);
-            }
         }
 
         build_single_thread(heap, index, index_info);

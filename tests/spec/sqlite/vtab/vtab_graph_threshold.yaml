@@ -1,0 +1,43 @@
+name: sqlite__vtab_graph_threshold
+tags: [vex, sqlite]
+description: 暴力阈值两侧行为一致（<=64 暴力 / >64 走图，结果同语义）+ 增量插入即查
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], metric=l2, ef_search=80);
+# 64 行：暴力路径
+- statement: |
+    WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 64)
+    INSERT INTO idx(rowid, embedding)
+    SELECT i, '[' || i || ',' || i || ']' FROM c;
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[10,10]' AND k = 1;
+  expect:
+  - - 10
+# 推过阈值：第 65~100 行 → 走图
+- statement: |
+    WITH RECURSIVE c(i) AS (SELECT 65 UNION ALL SELECT i+1 FROM c WHERE i < 100)
+    INSERT INTO idx(rowid, embedding)
+    SELECT i, '[' || i || ',' || i || ']' FROM c;
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[10,10]' AND k = 1;
+  expect:
+  - - 10
+# k=3：79/81 与 [80,80] 等距并列，k=2 时引擎可任选其一，k=3 全收无歧义
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[80,80]' AND k = 3;
+  _sort: rowsort
+  expect:
+  - - 79
+    - 1.4142135
+  - - 80
+    - 0.0
+  - - 81
+    - 1.4142135
+# 增量插入（图已加载）后立即可查
+- statement: INSERT INTO idx(rowid, embedding) VALUES (500, '[500,500]');
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[500,500]' AND k = 1;
+  expect:
+  - - 500
+# DELETE 后被删行不出现（invalidate+rebuild 路径）
+- statement: DELETE FROM idx WHERE rowid = 80;
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[80,80]' AND k = 2;
+  _sort: rowsort
+  expect:
+  - - 79
+  - - 81

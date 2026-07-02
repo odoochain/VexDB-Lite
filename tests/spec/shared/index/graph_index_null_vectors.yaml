@@ -51,3 +51,6 @@ steps:
   - - 5
 - statement: DROP TABLE t_mixnull;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_null_vectors.test
+
+skip:
+  sqlite: true

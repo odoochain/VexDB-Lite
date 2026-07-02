@@ -1,0 +1,35 @@
+name: sqlite__vtab_metrics
+tags: [vex, sqlite]
+description: 三 metric 的 KNN 距离语义（lower=closer，与标量函数数值一致）
+steps:
+- statement: CREATE VIRTUAL TABLE ic USING GRAPH_INDEX(embedding FLOAT[2], metric=cosine);
+- statement: INSERT INTO ic(rowid, embedding) VALUES (1, '[1,0]'), (2, '[0,1]'), (3, '[-1,0]');
+- query: SELECT rowid, distance FROM ic WHERE embedding MATCH '[2,0]' AND k = 3;
+  expect:
+  - - 1
+    - 0.0
+  - - 2
+    - 1.0
+  - - 3
+    - 2.0
+- statement: CREATE VIRTUAL TABLE ii USING GRAPH_INDEX(embedding FLOAT[2], metric=ip);
+- statement: INSERT INTO ii(rowid, embedding) VALUES (1, '[1,1]'), (2, '[2,2]'), (3, '[-1,-1]');
+- query: SELECT rowid, distance FROM ii WHERE embedding MATCH '[1,1]' AND k = 3;
+  expect:
+  - - 2
+    - -4.0
+  - - 1
+    - -2.0
+  - - 3
+    - 2.0
+- statement: CREATE VIRTUAL TABLE il USING GRAPH_INDEX(embedding FLOAT[2], metric=l2);
+- statement: INSERT INTO il(rowid, embedding) VALUES (1, '[0,0]'), (2, '[3,4]');
+- query: SELECT rowid, distance FROM il WHERE embedding MATCH '[0,0]' AND k = 2;
+  expect:
+  - - 1
+    - 0.0
+  - - 2
+    - 5.0
+- query: SELECT vexdb_l2_distance('[0,0]', '[3,4]');
+  expect:
+  - - 5.0

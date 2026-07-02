@@ -6,7 +6,9 @@
 #ifndef DISKANN_UTILS_DISTANCE_H
 #define DISKANN_UTILS_DISTANCE_H
 
+#include <functional>
 #include <random>
+#include <thread>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -32,13 +34,13 @@ extern "C" {
 #include "postgres.h"
 #include "utils/rel.h"
 }
-#elif defined(PG_VEXDB_TARGET_DUCK)
+#elif (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 using Relation = void *;
 #endif
 
 #include "distance/core/architecture_macro.h"
 #include "distance/core/distance_func.h"
-#if !defined(PG_VEXDB_TARGET_DUCK)
+#if !(defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 #include "quantizer.h"
 #endif
 
@@ -48,7 +50,7 @@ enum class Arch : uint16 {
     BOOST_PP_SEQ_ENUM(DISTANCER_ISAS)
 };
 
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 enum class Metric : uint32 {
     L2 = 0,
     COSINE = 1,
@@ -379,7 +381,7 @@ inline void transform_int16_to_int8(const int16 *src, int8 *dst, uint16 dim)
     }
 }
 
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 Metric get_func_metric(uint32 func_id);
 #else
 Metric get_func_metric(Oid func_id);
@@ -419,17 +421,22 @@ uint32 get_aligned_dim(uint32 dim);
 size_t get_aligned_vec_size(size_t vec_size);
 float *alloc_floatvector(uint32 dim, size_t n = 1);
 char *alloc_vector(size_t vec_size, size_t n = 1);
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 inline void free_vector(void *vec) { std::free(vec); }
 #else
 inline void free_vector(void *vec) { pfree(vec); }
 #endif
 bool is_aligned(const void *ptr);
 
-/* Random number generator for level assignment */
+/* Random number generator for level assignment.
+ * thread_local: 并行 build 的多个 worker 并发调用（get_insert_level），共享
+ * mt19937 状态是数据竞争（TSan 坐实，SQLite M3+ 揪出；duck 并行 build 同样
+ * 命中）。每线程独立流对 HNSW level 的几何分布无影响。种子混入线程序号哈希
+ * 避免各线程产生相同 level 序列。*/
 inline double RandomDouble() {
-    static std::mt19937 rng(42);
-    static std::uniform_real_distribution<double> dist(0.0, 1.0);
+    thread_local std::mt19937 rng(42u + static_cast<unsigned>(
+        std::hash<std::thread::id>{}(std::this_thread::get_id())));
+    thread_local std::uniform_real_distribution<double> dist(0.0, 1.0);
     return dist(rng);
 }
 

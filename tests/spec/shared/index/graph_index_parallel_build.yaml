@@ -85,3 +85,6 @@ steps:
 - statement: DROP TABLE pb_over;
 - statement: DROP TABLE pb_bad;
 - statement: DROP TABLE pb_cross_chunk;
+
+skip:
+  sqlite: true

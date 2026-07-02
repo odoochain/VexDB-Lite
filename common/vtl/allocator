@@ -8,7 +8,7 @@
 #include <cstring>
 #include <new>
 
-#if defined(PG_VEXDB_TARGET_DUCK)
+#if (defined(PG_VEXDB_TARGET_DUCK) || defined(PG_VEXDB_TARGET_SQLITE))
 using MemoryContext = void *;
 static constexpr MemoryContext CurrentMemoryContext = nullptr;
 inline MemoryContext MemoryContextSwitchTo(MemoryContext ctx) { return ctx; }

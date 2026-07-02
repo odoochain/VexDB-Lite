@@ -1,0 +1,24 @@
+name: sqlite__vtab_errors
+tags: [vex, sqlite]
+description: 错误路径（维度不匹配/重复 rowid/MATCH 无 k/k=0/写只读列/未知 metric/坏参数）
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[3], metric=l2);
+- statement: INSERT INTO idx(rowid, embedding) VALUES (1, '[1,2,3]');
+- statement: INSERT INTO idx(rowid, embedding) VALUES (2, '[1,2]');
+  expect_error: dimension
+- statement: INSERT INTO idx(rowid, embedding) VALUES (1, '[4,5,6]');
+  expect_error: constraint
+- statement: INSERT INTO idx(rowid, embedding) VALUES (3, NULL);
+  expect_error: NULL
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[1,2,3]';
+  expect_error: k
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[1,2,3]' AND k = 0;
+  expect_error: positive
+- statement: INSERT INTO idx(rowid, embedding, distance) VALUES (4, '[1,2,3]', 1.0);
+  expect_error: read-only
+- statement: CREATE VIRTUAL TABLE bad1 USING GRAPH_INDEX(v FLOAT[3], metric=hamming);
+  expect_error: metric
+- statement: CREATE VIRTUAL TABLE bad2 USING GRAPH_INDEX(v FLOAT[0]);
+  expect_error: dimension
+- statement: CREATE VIRTUAL TABLE bad3 USING GRAPH_INDEX(metric=l2);
+  expect_error: column

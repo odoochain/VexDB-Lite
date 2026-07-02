@@ -15,6 +15,15 @@
 #include "graph_index/graph_index_struct.h"
 #elif defined(PG_VEXDB_TARGET_DUCK)
 #include "vex_graph_index_depend_duck.hpp"
+#elif defined(PG_VEXDB_TARGET_SQLITE)
+// SQLite 端无宿主 store 头；dispatcher 只需 QuantizerType + Assert/Assume。
+#include "quantizer_type.h"
+#ifndef Assert
+#define Assert(cond) ((void)0)
+#endif
+#ifndef Assume
+#define Assume(cond) ((void)0)
+#endif
 #endif
 
 enum class DispatcherMode {
