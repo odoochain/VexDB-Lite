@@ -344,6 +344,18 @@ IndexStorageInfo GraphIndex::ExportStorageInfo() const {
             order_blob.append(reinterpret_cast<const char *>(&v), sizeof(v));
         }
         info.options["pq_row_order"] = Value::BLOB(const_data_ptr_cast(order_blob.data()), order_blob.size());
+
+        if (pq_vector_coverage_hashes_.size() == pq_row_id_order_.size()) {
+            string checksum_blob;
+            uint64_t checksum_n = pq_vector_coverage_hashes_.size();
+            checksum_blob.append(reinterpret_cast<const char *>(&checksum_n), sizeof(checksum_n));
+            if (checksum_n) {
+                checksum_blob.append(reinterpret_cast<const char *>(pq_vector_coverage_hashes_.data()),
+                                     checksum_n * sizeof(uint64_t));
+            }
+            info.options["pq_vector_coverage_hashes"] =
+                Value::BLOB(const_data_ptr_cast(checksum_blob.data()), checksum_blob.size());
+        }
     }
 
     if (compact_mode_) {

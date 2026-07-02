@@ -32,6 +32,14 @@ struct GraphIndexScanState : public IndexScanState {
     idx_t k = 0;
 };
 
+struct GraphIndexRowIdCoverage {
+    idx_t live_count = 0;
+    idx_t rowid_upper_bound = 0;
+    uint64_t rowid_checksum = 0;
+    uint64_t vector_checksum = 0;
+    bool has_vector_checksum = false;
+};
+
 class GraphIndex : public BoundIndex {
 public:
     static constexpr const char *TYPE_NAME = "GRAPH_INDEX";
@@ -74,6 +82,16 @@ public:
 
     idx_t GetNodeCount() const;
     idx_t GetRowIdCount() const;
+    GraphIndexRowIdCoverage GetRowIdCoverage() const;
+    bool HasVectorCoverageChecksum() const;
+    bool UsesPQCoverageChecksum() const;
+    uint64_t HashPQVectorForCoverage(row_t row_id, const float *vec) const;
+    bool HasRowIdCoverageCheck() const { return rowid_coverage_checked_; }
+    bool IsRowIdCoverageStale() const { return rowid_coverage_stale_; }
+    void MarkRowIdCoverageChecked(bool stale) {
+        rowid_coverage_checked_ = true;
+        rowid_coverage_stale_ = stale;
+    }
     // HNSW entry-point level (top layer). -1 when the index has no nodes.
     int GetMaxLevel() const;
     bool UsesPQ() const { return pq_use_; }
@@ -120,6 +138,7 @@ private:
     std::string BuildDiskImage() const;
     void LoadFromDiskImage(const std::string &blob);
     void DeserializeFromStorage(const IndexStorageInfo &info);
+    void DeserializePQAndModeFromStorage(const IndexStorageInfo &info);
     void TrainAndEncodePQ(const float *vec_data, const std::vector<row_t> &row_ids);
 
     idx_t dimension_;
@@ -153,6 +172,7 @@ private:
     ::vex::quantizer::ProductQuantizer pq_quantizer_;
     std::vector<uint8_t> pq_codes_;
     std::vector<row_t> pq_row_id_order_;
+    std::vector<uint64_t> pq_vector_coverage_hashes_;
 
     // memory_mode='compact' (PQ-only). After BuildBulk + TrainAndEncodePQ
     // releases the raw vector tier, SearchANN refuses to run and post-build
@@ -164,6 +184,9 @@ private:
     // refine query, invalidated on Append / Delete / CommitDrop.
     mutable std::unordered_map<row_t, uint32_t> pq_refine_rid_map_;
     mutable bool pq_refine_rid_map_dirty_ = true;
+
+    bool rowid_coverage_checked_ = false;
+    bool rowid_coverage_stale_ = false;
 
     // Free the raw vector tier and clear the in-memory copy. Idempotent.
     void ReleaseRawVectors();
