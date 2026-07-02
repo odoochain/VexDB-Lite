@@ -1,0 +1,33 @@
+name: sqlite__vtab_persist_restart
+tags: [vex, sqlite]
+description: 关库重开后 config/数据/图全恢复（超过暴力阈值走图，验证 %_graph blob 链路）
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[4], metric=l2, m=8, ef_search=80);
+# 100 行 > 暴力阈值 64 → KNN 走 HNSW 图
+- statement: |
+    WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 100)
+    INSERT INTO idx(rowid, embedding)
+    SELECT i, vexdb_f32('[' || i || ',' || i || ',' || i || ',' || i || ']') FROM c;
+- query: SELECT count(*) FROM idx;
+  expect:
+  - - 100
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[42,42,42,42]' AND k = 1;
+  expect:
+  - - 42
+    - 0.0
+- raw_directive: restart
+- query: SELECT count(*) FROM idx;
+  expect:
+  - - 100
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[42,42,42,42]' AND k = 3;
+  expect:
+  - - 42
+    - 0.0
+  - - 41
+    - 2.0
+  - - 43
+    - 2.0
+  _sort: rowsort
+# 重开后维度校验仍生效（config 真恢复了）
+- statement: INSERT INTO idx(rowid, embedding) VALUES (999, '[1,2]');
+  expect_error: dimension

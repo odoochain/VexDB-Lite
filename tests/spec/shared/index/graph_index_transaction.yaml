@@ -259,3 +259,6 @@ steps:
 - statement: COMMIT;
 - statement: DROP TABLE t15;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_transaction.test
+
+skip:
+  sqlite: true

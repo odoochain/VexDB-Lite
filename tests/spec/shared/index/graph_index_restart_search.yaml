@@ -36,3 +36,6 @@ steps:
   - - 4
   - - 6
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_restart_search.test
+
+skip:
+  sqlite: true

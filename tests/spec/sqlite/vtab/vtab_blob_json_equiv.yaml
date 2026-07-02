@@ -1,0 +1,18 @@
+name: sqlite__vtab_blob_json_equiv
+tags: [vex, sqlite]
+description: BLOB 与 JSON 文本插入同一向量完全等价（存储字节与 KNN 距离一致）
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[3], metric=l2);
+- statement: INSERT INTO idx(rowid, embedding) VALUES (1, '[1.5, -2.25, 0]');
+- statement: INSERT INTO idx(rowid, embedding) VALUES (2, vexdb_f32('[1.5, -2.25, 0]'));
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH vexdb_f32('[1.5, -2.25, 0]') AND k = 2;
+  _sort: rowsort
+  expect:
+  - - 1
+    - 0.0
+  - - 2
+    - 0.0
+# 存储字节一致（shadow 表里都是 float32 BLOB）
+- query: SELECT count(DISTINCT hex(vec)) FROM idx_vectors;
+  expect:
+  - - 1

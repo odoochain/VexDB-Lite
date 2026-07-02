@@ -112,3 +112,6 @@ steps:
   - - 0
 - statement: DROP TABLE multi_vec;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_multi.test
+
+skip:
+  sqlite: true

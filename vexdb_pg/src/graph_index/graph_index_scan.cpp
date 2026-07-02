@@ -8,6 +8,7 @@
 #include <vtl/optional>
 #include <vtl/vector>
 #include <vtl/variant>
+#include <type_traits>
 
 #include "graph_index/graph_index_cluster.h"
 #include "graph_index/graph_index_struct.h"
@@ -26,6 +27,7 @@ struct GraphIndexScanOpaqueData {
     uint32 tid_offset;
     uint32 tid_count;
     GraphIndexSearchRes *res;
+    Vector<ItemPointerData> unordered_tids;
     MemoryContext tmp_ctx;
     IndexTuple cached_itup;
 
@@ -78,6 +80,7 @@ void graph_index_rescan_internal(IndexScanDesc scan, ScanKey keys, int nkeys, Sc
     ann_helper::optional_destroy(so->returned);
     so->tid_offset = 0;
     so->tid_count = 0;
+    so->unordered_tids.clear();
     so->cached_itup = nullptr;
     MemoryContextReset(so->tmp_ctx);
 
@@ -99,7 +102,37 @@ bool graph_index_gettuple_internal(IndexScanDesc scan, void *in_so, BlockNumber 
 
     if (so->first) {
         if (scan->orderByData == NULL) {
-            elog(ERROR, "cannot scan hnsw index without order");
+            MemoryContext old_ctx = MemoryContextSwitchTo(so->tmp_ctx);
+            Buffer metabuf = ReadBuffer(index, metablkno);
+            GraphIndexMetaPage metap = GRAPH_INDEX_PAGE_GET_META(BufferGetPage(metabuf));
+
+            DiskStoreVariant disk_store;
+            create_disk_store(disk_store, index, heap, metabuf, false);
+            PointExtensionContext ctx(index, GRAPH_INDEX_PS_BLKNO, false);
+
+            auto collect_tids = [&](auto &store) -> void {
+                using Store = std::remove_reference_t<decltype(store)>;
+                using T = typename Store::T;
+                T num_vectors = (T)metap->num_vectors;
+                for (T id = 0; id < num_vectors; ++id) {
+                    store.get_itempointer(id, [&](const typename Store::point_type *elem) -> void {
+                        elem->apply_on_tids(ctx, [&](const ItemPointerData &tid) -> bool {
+                            so->unordered_tids.push_back(tid);
+                            return false;
+                        });
+                    });
+                }
+            };
+
+            visit(collect_tids, disk_store);
+            ctx.destroy();
+            disk_store.destroy();
+            ReleaseBuffer(metabuf);
+            so->tid_count = so->unordered_tids.size();
+            so->first = false;
+            so->has_more_data = false;
+            MemoryContextSwitchTo(old_ctx);
+            goto retry2;
         }
         if (scan->orderByData->sk_flags & SK_ISNULL) {
             return false;
@@ -200,10 +233,11 @@ retry2:
         goto retry2;
     }
 
-    scan->xs_heaptid = so->res[offset].tid;
+    const bool ordered_scan = scan->numberOfOrderBys > 0;
+    scan->xs_heaptid = ordered_scan ? so->res[offset].tid : so->unordered_tids[offset];
     scan->xs_heap_continue = (so->tid_offset < so->tid_count);
 
-    if (scan->numberOfOrderBys > 0) {
+    if (ordered_scan) {
         scan->xs_orderbyvals[0] = Float4GetDatum(so->res[offset].dist);
         scan->xs_orderbynulls[0] = false;
         scan->xs_recheckorderby = false;
@@ -225,7 +259,7 @@ retry2:
         scan->xs_itupdesc = itupdesc;
     }
 
-    if (dist_out) {
+    if (dist_out && ordered_scan) {
         *dist_out = so->res[offset].dist;
     }
     return true;

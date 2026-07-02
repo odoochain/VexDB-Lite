@@ -1,0 +1,13 @@
+# vendored SQLite amalgamation (重新跑 vendor_sqlite.sh 获取，体积大不入库)
+third_party/sqlite/sqlite3.c
+third_party/sqlite/sqlite3.h
+third_party/sqlite/sqlite3ext.h
+third_party/sqlite/shell.c
+
+# build 产物
+build*/
+*.o
+*.a
+*.so
+*.dylib
+*.wasm

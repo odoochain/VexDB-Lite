@@ -45,15 +45,14 @@ resolve_unittest() {
     if [[ -n "${DUCK_UNITTEST:-}" && -x "$DUCK_UNITTEST" ]]; then
         echo "$DUCK_UNITTEST"; return
     fi
-    # 默认用外层 build_duck.sh 的版本化产物。build_duck.sh now keeps one
-    # DuckDB build tree per target version under build/duck/<version>/.
+    # 默认用外层 build_duck.sh 的 versioned 产物。build_duck.sh 现在按 DuckDB
+    # 版本隔离到 build/duck/<version>/，旧的 build/duck/build 只作为历史兜底，
+    # 否则会误跑旧 unittest 并得到假失败。
     local duckdb_version="${DUCKDB_VERSION:-v1.5.2}"
     local versioned_bin="${ROOT_DIR}/build/duck/${duckdb_version}/build/test/unittest"
     if [[ -x "$versioned_bin" ]]; then
         echo "$versioned_bin"; return
     fi
-    # Backward-compatible fallback for older local worktrees that still have the
-    # pre-version-matrix build layout.
     local legacy_bin="${ROOT_DIR}/build/duck/build/test/unittest"
     if [[ -x "$legacy_bin" ]]; then
         echo "$legacy_bin"; return

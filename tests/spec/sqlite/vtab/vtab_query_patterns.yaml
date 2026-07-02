@@ -1,0 +1,35 @@
+name: sqlite__vtab_query_patterns
+tags: [vex, sqlite]
+description: 查询模式变体——KNN JOIN 原表、子查询包 KNN、CTE 包 KNN（对照 duck graph_index_query_patterns 行为面）
+steps:
+- statement: CREATE TABLE docs (id INTEGER PRIMARY KEY, title TEXT);
+- statement: INSERT INTO docs VALUES (1,'alpha'),(2,'beta'),(3,'gamma');
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], metric=l2);
+- statement: INSERT INTO idx(rowid, embedding) VALUES (1,'[0,0]'),(2,'[5,5]'),(3,'[9,9]');
+# KNN 结果 JOIN 业务表取属性
+- query: |
+    SELECT d.title, k.distance FROM
+      (SELECT rowid, distance FROM idx WHERE embedding MATCH '[5,5]' AND k = 2) k
+      JOIN docs d ON d.id = k.rowid
+    ORDER BY k.distance, d.id;
+  expect:
+  - - beta
+    - 0.0
+  - - gamma
+    - 5.6568542
+- query: SELECT count(*) FROM (SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 2);
+  expect:
+  - - 2
+# CTE 包 KNN
+- query: |
+    WITH nn AS (SELECT rowid FROM idx WHERE embedding MATCH '[9,9]' AND k = 1)
+    SELECT title FROM docs WHERE id IN (SELECT rowid FROM nn);
+  expect:
+  - - gamma
+# KNN + 额外 WHERE 过滤（在 KNN 结果上二次过滤）
+- query: |
+    SELECT rowid FROM (SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0]' AND k = 3)
+    WHERE distance < 8 ORDER BY rowid;
+  expect:
+  - - 1
+  - - 2

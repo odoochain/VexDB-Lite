@@ -27,3 +27,6 @@ steps:
   - - 3
     - '[0.0, 0.0, 1.0]'
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_scan.test
+
+skip:
+  sqlite: true

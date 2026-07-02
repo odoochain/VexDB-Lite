@@ -1,0 +1,12 @@
+name: sqlite__vtab_large_k
+tags: [vex, sqlite]
+description: k 远大于行数返回全部行；k=1 精确返回最近
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], metric=l2);
+- statement: INSERT INTO idx(rowid, embedding) VALUES (1,'[0,0]'),(2,'[1,0]'),(3,'[2,0]');
+- query: SELECT count(*) FROM (SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 1000);
+  expect:
+  - - 3
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[1.9,0]' AND k = 1;
+  expect:
+  - - 3

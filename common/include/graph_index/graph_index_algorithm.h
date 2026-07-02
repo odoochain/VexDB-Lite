@@ -119,7 +119,10 @@ public:
         PERF_DESTROY();
     }
 
-    Vec<Cand> search_internal(const GraphIndexEntryInfo &entry_info, const char *query, uint32 ef_search)
+    /* filter 只作用于 base 层结果集（不通过的点仍参与图遍历导航）；上层纯导航不过滤 */
+    template <typename filter_func>
+    Vec<Cand> search_internal(const GraphIndexEntryInfo &entry_info, const char *query, uint32 ef_search,
+                              filter_func &&filter)
     {
         CONSTEXPR_IF (need_refine) {
             constexpr float refine_factor = 1.25;
@@ -131,10 +134,16 @@ public:
             search_upper_layer(query, ep);
             replace_lower_layer_idx(ep);
         }
-        ep = search_layer<true>(query, std::move(ep), ef_search, dummy_filter);
+        ep = search_layer<true>(query, std::move(ep), ef_search, filter);
         return ep;
     }
-    Vector<GraphIndexSearchRes> search(PointExtensionContext &ctx, const char *query, uint32 ef_search)
+    Vec<Cand> search_internal(const GraphIndexEntryInfo &entry_info, const char *query, uint32 ef_search)
+    {
+        return search_internal(entry_info, query, ef_search, dummy_filter);
+    }
+    template <typename filter_func>
+    Vector<GraphIndexSearchRes> search(PointExtensionContext &ctx, const char *query, uint32 ef_search,
+                                       filter_func &&filter)
     {
         Vector<GraphIndexSearchRes> res;
         const GraphIndexEntryInfo entry_info = store.template get_entry<false>().first;
@@ -142,7 +151,7 @@ public:
             return res;
         }
 
-        Vec<Cand> ep = search_internal(entry_info, query, ef_search);
+        Vec<Cand> ep = search_internal(entry_info, query, ef_search, filter);
         refine(ctx, ep, query);
 
         res.reserve(ep.size());
@@ -159,6 +168,10 @@ public:
         ann_helper::optional_destroy(temp);
         ann_helper::optional_destroy(ep);
         return res;
+    }
+    Vector<GraphIndexSearchRes> search(PointExtensionContext &ctx, const char *query, uint32 ef_search)
+    {
+        return search(ctx, query, ef_search, dummy_filter);
     }
 
     void insert(InsertContext &ctx)
@@ -611,6 +624,7 @@ private:
                 closest.emplace(nbr_id[i], nbr_cur_layer_idx[i], dist);
             }
             if (!filter(cur_point.id)) {
+                store.template unlock_point<is_base_layer, true>(cur_point.cur_layer_idx);
                 continue;
             }
             furthest.emplace(cur_point.id, cur_point.cur_layer_idx, lower_layer_idx, cur_point.dist, nullptr);

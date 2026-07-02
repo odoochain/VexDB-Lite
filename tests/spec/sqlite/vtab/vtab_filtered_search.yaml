@@ -1,0 +1,116 @@
+name: sqlite__vtab_filtered_search
+tags: [vex, sqlite]
+description: M7' 图内过滤（meta EQ 下推：宽选择性走图+ef 补偿、窄选择性集合暴力、无命中短路、LIMIT 组合、混合谓词、restart）
+steps:
+# 200 行超暴力阈值（64）走图；embedding=[i,0] 使 L2 距离恰为整数 i
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], category TEXT, year INTEGER, metric=l2);
+- statement: |
+    WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 200)
+    INSERT INTO idx(rowid, embedding, category, year)
+    SELECT i, vexdb_f32('[' || i || ',0]'),
+           CASE WHEN i % 2 = 0 THEN 'even' ELSE 'odd' END,
+           2000 + (i % 5)
+    FROM c;
+# 宽选择性（even=100 行 > max(k*4, 阈值)）→ 图内过滤：正好 k 条全满足谓词
+# （M6' 后过滤语义只能给 top-k 内满足的 ~k/2 条——这是 M7' 的核心差异）
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[0,0]' AND k = 10 AND category = 'even' ORDER BY distance;
+  expect:
+  - - 2
+    - 2.0
+  - - 4
+    - 4.0
+  - - 6
+    - 6.0
+  - - 8
+    - 8.0
+  - - 10
+    - 10.0
+  - - 12
+    - 12.0
+  - - 14
+    - 14.0
+  - - 16
+    - 16.0
+  - - 18
+    - 18.0
+  - - 20
+    - 20.0
+# 窄选择性（odd ∧ year=2001 → i≡1 mod 10，20 行 ≤ 阈值）→ 集合暴力，召回精确
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 3 AND category = 'odd' AND year = 2001 ORDER BY distance;
+  expect:
+  - - 1
+  - - 11
+  - - 21
+# 多列 AND 双下推（even ∧ year=2003 → i 偶且 i%5=3 → i≡8 mod 10）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 3 AND category = 'even' AND year = 2003 ORDER BY distance;
+  expect:
+  - - 8
+  - - 18
+  - - 28
+# 无命中谓词短路：不碰图，结果空
+- query: SELECT count(*) FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND category = 'nope';
+  expect:
+  - - 0
+# 与 LIMIT 下推组合（无显式 k，sqlite-vec 习惯写法）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND category = 'even' ORDER BY distance LIMIT 4;
+  expect:
+  - - 2
+  - - 4
+  - - 6
+  - - 8
+# EQ + 范围混合双下推（范围下推后语义升级：正好 k 条全满足，不再是
+# top-k 内过滤的 <k）。even ∧ year>=2003 → i≡4/8 mod 10，40 行 → 集合暴力
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 10 AND category = 'even' AND year >= 2003 ORDER BY distance;
+  expect:
+  - - 4
+  - - 8
+  - - 14
+  - - 18
+  - - 24
+  - - 28
+  - - 34
+  - - 38
+  - - 44
+  - - 48
+# 纯范围谓词下推（year>=2003 → i%5∈{3,4}，80 行 > 阈值 → 走图+filter）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND year >= 2003 ORDER BY distance;
+  expect:
+  - - 3
+  - - 4
+  - - 8
+  - - 9
+  - - 13
+# 双边范围（同列两约束 AND 叠加：2001 <= year <= 2002 → i%5∈{1,2}）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 4 AND year >= 2001 AND year <= 2002 ORDER BY distance;
+  expect:
+  - - 1
+  - - 2
+  - - 6
+  - - 7
+# 范围无命中短路（year ∈ {2000..2004}，>2004 为空）
+- query: SELECT count(*) FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND year > 2004;
+  expect:
+  - - 0
+# meta-only UPDATE（跳图作废）后图内过滤实时生效
+- statement: UPDATE idx SET category = 'odd' WHERE rowid = 2;
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND category = 'even' ORDER BY distance;
+  expect:
+  - - 4
+  - - 6
+  - - 8
+  - - 10
+  - - 12
+- raw_directive: restart
+# 重开：图从 blob 还原（meta-only UPDATE 未作废图）+ meta 定义恢复，过滤全链可用
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 5 AND category = 'even' ORDER BY distance;
+  expect:
+  - - 4
+  - - 6
+  - - 8
+  - - 10
+  - - 12
+# UPDATE 过的 rowid 2 已进 odd 谓词集合（meta 谓词读 %_vectors 实时数据）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 2 AND category = 'odd' ORDER BY distance;
+  expect:
+  - - 1
+  - - 2

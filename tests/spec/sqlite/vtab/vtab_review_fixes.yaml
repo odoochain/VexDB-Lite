@@ -1,0 +1,61 @@
+name: sqlite__vtab_review_fixes
+tags: [vex, sqlite]
+description: code review 修复回归（OFFSET 下推/KNN 计划 UPDATE/nochange 快路径/savepoint 回滚/OR IGNORE/LIMIT -1/命令形态/rowid 点查）
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], tag TEXT, metric=l2);
+- statement: |
+    WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM c WHERE i < 100)
+    INSERT INTO idx(rowid, embedding, tag) SELECT i, vexdb_f32('[' || i || ',0]'), 'a' FROM c;
+# LIMIT+OFFSET 双下推（修复前：核心对 top-LIMIT 再跳行 → 0 行）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' ORDER BY distance LIMIT 3 OFFSET 2;
+  expect:
+  - - 3
+  - - 4
+  - - 5
+# KNN 计划的 UPDATE（修复前：xColumn 消除 nochange 标记 → 'embedding must not be NULL'）
+- statement: UPDATE idx SET tag = 'seen' WHERE embedding MATCH '[0,0]' AND k = 2;
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 2 AND tag = 'seen' ORDER BY distance;
+  expect:
+  - - 1
+  - - 2
+# meta-only UPDATE（nochange 快路径复活：行为面=标签变更生效、向量不变）
+- statement: UPDATE idx SET tag = 'x' WHERE rowid = 50;
+- query: SELECT rowid, distance FROM idx WHERE embedding MATCH '[50,0]' AND k = 1 AND tag = 'x';
+  expect:
+  - - 50
+    - 0.0
+# savepoint 回滚不留幽灵（修复前：xSavepoint 族 NULL → 图保留已回滚插入并被持久化）
+- statement: BEGIN;
+- statement: SAVEPOINT s1;
+- statement: INSERT INTO idx(rowid, embedding, tag) VALUES (500, vexdb_f32('[0.5,0]'), 'ghost');
+- statement: ROLLBACK TO s1;
+- statement: COMMIT;
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 1;
+  expect:
+  - - 1
+- raw_directive: restart
+# 重开后幽灵仍不存在（持久化图未被污染）
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' AND k = 1;
+  expect:
+  - - 1
+# INSERT OR IGNORE（修复前：未声明 CONSTRAINT_SUPPORT → 任何 OR 子句直接 abort）
+- statement: INSERT OR IGNORE INTO idx(rowid, embedding) VALUES (1, vexdb_f32('[99,99]'));
+- query: SELECT count(*) FROM idx;
+  expect:
+  - - 100
+# LIMIT -1 = 全部行（修复前：当 k 报 'k must be positive'）
+- query: SELECT count(*) FROM (SELECT rowid FROM idx WHERE embedding MATCH '[0,0]' ORDER BY distance LIMIT -1);
+  expect:
+  - - 100
+# rowid 点查计划（行为面：免全表扫的点查结果正确）
+- query: SELECT tag FROM idx WHERE rowid = 50;
+  expect:
+  - - x
+# 配置命令形态收紧：UPDATE 不得改配置；INSERT 不得混数据列
+- statement: UPDATE idx SET idx = 'ef_search=99' WHERE rowid = 1;
+  expect_error: config command must use INSERT
+- statement: INSERT INTO idx(rowid, embedding, idx) VALUES (600, vexdb_f32('[6,0]'), 'ef_search=99');
+  expect_error: cannot be combined
+# meta 列名含序列化分隔符拒绝（修复前：重连解析错位砖死表）
+- statement: CREATE VIRTUAL TABLE bad USING GRAPH_INDEX(embedding FLOAT[2], "a:b" TEXT);
+  expect_error: must not contain

@@ -42,3 +42,6 @@ steps:
   - - 1
 - statement: DROP TABLE t_cast;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_type_safety.test
+
+skip:
+  sqlite: true

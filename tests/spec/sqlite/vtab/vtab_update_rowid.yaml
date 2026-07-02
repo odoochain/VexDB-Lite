@@ -1,0 +1,17 @@
+name: sqlite__vtab_update_rowid
+tags: [vex, sqlite]
+description: UPDATE 变更 rowid 与向量值后 KNN 即时反映
+steps:
+- statement: CREATE VIRTUAL TABLE idx USING GRAPH_INDEX(embedding FLOAT[2], metric=l2);
+- statement: INSERT INTO idx(rowid, embedding) VALUES (1,'[1,1]'),(2,'[5,5]');
+- statement: UPDATE idx SET rowid = 100 WHERE rowid = 1;
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[1,1]' AND k = 1;
+  expect:
+  - - 100
+- statement: UPDATE idx SET embedding = '[9,9]' WHERE rowid = 100;
+- query: SELECT rowid FROM idx WHERE embedding MATCH '[9,9]' AND k = 1;
+  expect:
+  - - 100
+- query: SELECT count(*) FROM idx;
+  expect:
+  - - 2

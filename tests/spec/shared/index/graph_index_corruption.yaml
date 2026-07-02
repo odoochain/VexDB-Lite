@@ -66,3 +66,6 @@ steps:
   - - 4
 - statement: DROP TABLE t_delall;
 _migrated_from: vexdb_duckdb/test/sql/vex/index/graph_index_corruption.test
+
+skip:
+  sqlite: true
