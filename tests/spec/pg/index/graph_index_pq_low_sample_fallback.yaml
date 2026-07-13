@@ -23,10 +23,8 @@ steps:
 - statement: "INSERT INTO pq_low SELECT i, ('[' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ',' || i || ']')::floatvector FROM generate_series(0, 199) AS t(i);"
 - statement: CREATE INDEX idx_pq_low ON pq_low USING vexdb_graph (vec) WITH (quantizer='pq', pq_m=4);
 - query: SELECT use_pq FROM vexdb_index_info() WHERE indexname='idx_pq_low';
-  expect:
-    - "f"
+  expect: [["f"]]
 # Index still works for ANN (plain HNSW path).
 - query: SELECT id FROM pq_low ORDER BY vec <-> '[50,50,50,50,50,50,50,50]'::floatvector LIMIT 1;
-  expect:
-    - "50"
+  expect: [["50"]]
 - statement: DROP TABLE pq_low;

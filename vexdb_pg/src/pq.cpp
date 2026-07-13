@@ -8,9 +8,9 @@
 #include "graph_index/graph_index_struct.h"
 #include "graph_index/graph_index_param.h"
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
-#include <unordered_map>
 
 void ProductQuantizer::set_basic_values(size_t dim, size_t m, size_t nbits_)
 {
@@ -208,11 +208,12 @@ void ProductQuantizer::compute_distance_table(const float *x, float *dist_table)
 }
 
 void PQDistancer::train(Relation index, FloatVectorArray samples, size_t dimension,
-    Metric metric, bool need_norm, int parallel_workers, int maintenance_work_mem)
+    Metric metric, bool need_norm, int parallel_workers, int maintenance_work_mem,
+    uint32 requested_m)
 {
     uint16 m = 0;
     uint16 k = 0;
-    pq_set_param((uint32)dimension, m, k);
+    pq_set_param((uint32)dimension, m, k, requested_m);
     configure_for_metric(dimension, (size_t)m, (size_t)(31 - __builtin_clz((uint32)k)), metric);
 
     AnnKmeansState *kstate = (AnnKmeansState *)palloc0(sizeof(AnnKmeansState));
@@ -224,12 +225,10 @@ void PQDistancer::train(Relation index, FloatVectorArray samples, size_t dimensi
 
     prepared = false;
     dist_table = nullptr;
-    stash_to_cache(index);
 }
 
 // Configure ProductQuantizer state (dims + dispatch funcs + metric-derived
-// flag) without touching centroids data. Shared by load_from_cache (cache
-// hit) and prepare()'s disk-fallback path.
+// flag) without touching centroids data.
 void PQDistancer::configure_for_metric(size_t d, size_t M, size_t nbits_, Metric metric)
 {
     pq.set_basic_values(d, M, nbits_);
@@ -242,26 +241,25 @@ void PQDistancer::configure_for_metric(size_t d, size_t M, size_t nbits_, Metric
 
 void PQDistancer::prepare(Relation index, void *metap)
 {
-    GraphIndexMetaPage mp = (GraphIndexMetaPage)metap;
-    Metric m = mp ? mp->metric : Metric::L2;
-    // PQDistancer can be constructed via Variant / placement new that
-    // bypasses our ctor's memset(&pq), so cache-load is the only safe way
-    // to reach a known-good (M, ksub, centroids) state.
-    if (!load_from_cache(index, m)) {
-        const PQMetaInfo &pqi = mp ? mp->quantizer_metainfo.get_pq_metainfo()
-                                   : PQMetaInfo{};
-        if (mp == nullptr || !BlockNumberIsValid(mp->qtcode_block) ||
-            !pqi.graph_pq || pqi.m == 0 || pqi.k == 0) {
-            ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                errmsg("PQ centroids unavailable (qtcode_block=%u, pq_m=%u, "
-                       "pq_k=%u); rebuild the index",
-                       mp ? mp->qtcode_block : InvalidBlockNumber,
-                       (unsigned)pqi.m, (unsigned)pqi.k)));
-        }
-        configure_for_metric(mp->dimension, pqi.m, pqi.nbits(), m);
-        hnsw_read_pq_center(index, pq, mp->qtcode_block);
-        stash_to_cache(index);
+    if (prepared && dist_table != nullptr) {
+        return;
     }
+    GraphIndexMetaPage mp = (GraphIndexMetaPage)metap;
+    if (mp == nullptr) {
+        ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            errmsg("PQ centroids unavailable; rebuild the index")));
+    }
+    Metric m = mp->metric;
+    const PQMetaInfo &pqi = mp->quantizer_metainfo.get_pq_metainfo();
+    if (!BlockNumberIsValid(mp->qtcode_block) ||
+        !pqi.graph_pq || pqi.m == 0 || pqi.k == 0) {
+        ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+            errmsg("PQ centroids unavailable (qtcode_block=%u, pq_m=%u, "
+                   "pq_k=%u); rebuild the index",
+                   mp->qtcode_block, (unsigned)pqi.m, (unsigned)pqi.k)));
+    }
+    configure_for_metric(mp->dimension, pqi.m, pqi.nbits(), m);
+    hnsw_read_pq_center(index, pq, mp->qtcode_block);
     dist_table = (float *)palloc(pq.M * pq.ksub * sizeof(float));
     prepared = true;
 }
@@ -292,7 +290,6 @@ void PQDistancer::flush(Relation index, BlockNumber qtcode_block, bool enabling)
     }
     const size_t bytes = pq.get_centroids_size() * sizeof(float);
     graph_index_store_qt_centroids(index, qtcode_block, pq.centroids, bytes);
-    stash_to_cache(index);
 }
 
 // Symmetric to graph_index_store_qt_centroids; `target.centroids` must
@@ -330,47 +327,4 @@ void PQDistancer::hnsw_read_pq_center(Relation index, ProductQuantizer &target,
             errmsg("vex PQ: short read on qtcode_block (missing %zu of %zu bytes)",
                    remaining, expected)));
     }
-}
-
-// Process-local cache. Persistence to qtcode_block is a follow-up; until
-// then PQ centroids live only in this process's memory and are lost when
-// PG restarts. Concurrency: this map is shared between sessions of the
-// same backend process; PG's per-backend isolation makes that safe (no
-// cross-session contention) but in pooled connections two SET-up phases
-// could race — current backend usage trains during CREATE INDEX which
-// holds AccessExclusiveLock so the race is excluded by lock granularity.
-namespace {
-struct PQCachedCodebook {
-    size_t d, M, nbits, dsub, ksub;
-    Metric metric;
-    std::vector<float> centroids; // d * ksub floats
-};
-static std::unordered_map<Oid, PQCachedCodebook> g_pq_cache;
-} // namespace
-
-void PQDistancer::stash_to_cache(Relation index)
-{
-    if (index == NULL) return;
-    PQCachedCodebook entry;
-    entry.d      = pq.d;
-    entry.M      = pq.M;
-    entry.nbits  = pq.nbits;
-    entry.dsub   = pq.dsub;
-    entry.ksub   = pq.ksub;
-    entry.metric = (flag < 0) ? Metric::INNER_PRODUCT : Metric::L2;
-    entry.centroids.assign(pq.centroids,
-                           pq.centroids + pq.get_centroids_size());
-    g_pq_cache[RelationGetRelid(index)] = std::move(entry);
-}
-
-bool PQDistancer::load_from_cache(Relation index, Metric metric)
-{
-    if (index == NULL) return false;
-    auto it = g_pq_cache.find(RelationGetRelid(index));
-    if (it == g_pq_cache.end()) return false;
-    const auto &entry = it->second;
-    configure_for_metric(entry.d, entry.M, entry.nbits, metric);
-    std::memcpy(pq.centroids, entry.centroids.data(),
-                entry.centroids.size() * sizeof(float));
-    return true;
 }

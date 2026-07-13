@@ -56,7 +56,7 @@ struct QuantizerMetaInfo {
     uint8 centroids_version;
     uint8 code_version;
 
-    void init(QuantizerType qt_type, uint32 dimension);
+    void init(QuantizerType qt_type, uint32 dimension, uint32 requested_pq_m = 0);
     QuantizerType get_type() const {
         int retry = 0;
         while (centroids_version != code_version) {

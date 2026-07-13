@@ -198,17 +198,23 @@ public:
 
     BlockNumber build_index(Relation heap, Relation index, IndexInfo *index_info)
     {
-        if (qt_type == QuantizerType::PQ) {
-            ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                errmsg("PQ quantizer is not yet supported"),
-                errhint("Remove 'quantizer=pq' from the index options.")));
-        }
         if (qt_type == QuantizerType::RABITQ) {
             ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                 errmsg("RaBitQ quantizer is not yet supported"),
                 errhint("Remove 'quantizer=rabitq' from the index options.")));
         }
         create_metapage(index);
+        if (qt_type == QuantizerType::PQ) {
+            if (init_quantizer(heap, index)) {
+                LockBuffer(metabuf, BUFFER_LOCK_EXCLUSIVE);
+                metap->quantizer_metainfo.set_enable();
+                MarkBufferDirty(metabuf);
+                LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
+                elem_size = metap->quantizer_metainfo.get_pq_metainfo().code_size();
+            } else {
+                qt_type = QuantizerType::NONE;
+            }
+        }
         build_graph(heap, index, index_info);
         if (RelationNeedsWAL(index) || fork_num == INIT_FORKNUM) {
             log_index(index);
@@ -264,7 +270,8 @@ public:
             ReleaseBuffer(qt_buf);
         }
 
-        metap->quantizer_metainfo.init(qt_type, dimension);
+        metap->quantizer_metainfo.init(qt_type, dimension,
+                                       (uint32)graph_index_get_pq_m(index));
 
         metap->entry_level = -1;
         metap->entrypoint_id = INVALID_VECTOR_ID;
@@ -284,6 +291,10 @@ public:
     }
 
     void destroy() {
+        if (quantizer.has_value()) {
+            visit([](auto &q) { q.destroy(); }, quantizer.value());
+            quantizer.destroy();
+        }
         if (BufferIsValid(metabuf)) {
             ReleaseBuffer(metabuf);
         }
@@ -498,15 +509,19 @@ private:
         ann_sample_rows(samples, heap, index, dimension, target,
                         false, DistPrecisionType::FLOAT);
         if (samples->length < ksub) {
+            int sample_len = samples->length;
             FloatVectorArrayFree(samples);
             ereport(NOTICE, (errmsg("vex PQ: only %d sample rows < ksub=%d, "
-                                    "skipping PQ training", samples->length, ksub)));
+                                    "skipping PQ training", sample_len, ksub)));
             return false;
         }
         {
-            PQDistancer tmp;
+            quantizer.emplace();
+            quantizer->template emplace<PQDistancer>();
+            PQDistancer &tmp = quantizer->template get<PQDistancer>();
             tmp.train(index, samples, dimension, metric, false,
-                      parallel_workers, maintenance_work_mem_kb);
+                      parallel_workers, maintenance_work_mem_kb,
+                      (uint32)graph_index_get_pq_m(index));
             tmp.flush(index, qtcode_block, false);
         }
         FloatVectorArrayFree(samples);
@@ -870,27 +885,29 @@ private:
 
         bool pq_on = (qt_type == QuantizerType::PQ);
         if (pq_on) {
-            PQDistancer encoder;
-            if (!encoder.load_from_cache(index, metap->metric)) {
-                ereport(ERROR, (errmsg("PQ codebook not in cache during flush_graph")));
+            if (!quantizer.has_value()) {
+                ereport(ERROR, (errmsg("PQ codebook unavailable during flush_graph")));
             }
-            const size_t code_size = encoder.code_size();
-            char *code_chunk = (char *)palloc(one_chunk_elem_nums * code_size);
-            for (size_t i = 0; i < vec.size(); ++i) {
-                size_t batch_offset = i * one_chunk_elem_nums;
-                size_t actual_copy_num = Min(one_chunk_elem_nums, num_vectors - batch_offset);
-                if (actual_copy_num == 0) break;
-                for (size_t j = 0; j < actual_copy_num; ++j) {
-                    float *raw_vec = (float *)(vec[i].buf + j * vector_size);
-                    char *code_dest = code_chunk + j * code_size;
-                    encoder.compute_code(raw_vec, code_dest);
+            auto write_pq_codes = [&](auto &encoder) {
+                const size_t code_size = encoder.code_size();
+                char *code_chunk = (char *)palloc(one_chunk_elem_nums * code_size);
+                for (size_t i = 0; i < vec.size(); ++i) {
+                    size_t batch_offset = i * one_chunk_elem_nums;
+                    size_t actual_copy_num = Min(one_chunk_elem_nums, num_vectors - batch_offset);
+                    if (actual_copy_num == 0) break;
+                    for (size_t j = 0; j < actual_copy_num; ++j) {
+                        float *raw_vec = (float *)(vec[i].buf + j * vector_size);
+                        char *code_dest = code_chunk + j * code_size;
+                        encoder.compute_code(raw_vec, code_dest);
+                    }
+                    off_t offset = batch_offset * code_size;
+                    size_t nbytes = actual_copy_num * code_size;
+                    vec_write(index->rd_smgr, offset, nbytes, code_chunk, false,
+                              VecStorageType::PureCode);
                 }
-                off_t offset = batch_offset * code_size;
-                size_t nbytes = actual_copy_num * code_size;
-                vec_write(index->rd_smgr, offset, nbytes, code_chunk, false, VecStorageType::PureCode);
-            }
-            pfree(code_chunk);
-            encoder.destroy();
+                pfree(code_chunk);
+            };
+            visit(write_pq_codes, quantizer.value());
         } else {
             for (size_t i = 0; i < vec.size(); ++i) {
                 size_t batch_offset = i * one_chunk_elem_nums;

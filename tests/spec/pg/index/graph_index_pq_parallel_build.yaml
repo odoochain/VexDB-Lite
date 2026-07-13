@@ -27,11 +27,10 @@ steps:
 # flush_graph encodes to PQ codes and flips set_enable.
 - statement: CREATE INDEX idx_pq_par ON pq_par USING vexdb_graph (vec) WITH (quantizer='pq', pq_m=4, parallel_workers=2);
 - query: SELECT use_pq FROM vexdb_index_info() WHERE indexname='idx_pq_par';
-  expect:
-    - "t"
+  expect: [["t"]]
 - query: SELECT id FROM pq_par ORDER BY vec <-> '[100,100,100,100,100,100,100,100]'::floatvector LIMIT 3;
   expect:
-    - "100"
-    - "99"
-    - "101"
+    - ["100"]
+    - ["99"]
+    - ["101"]
 - statement: DROP TABLE pq_par;

@@ -11,8 +11,24 @@
 
 struct AnnKmeansState;
 
-inline void pq_set_param(uint32 dim, uint16 &m, uint16 &k)
+inline void pq_set_param(uint32 dim, uint16 &m, uint16 &k, uint32 requested_m = 0)
 {
+    if (requested_m != 0) {
+        if (requested_m > UINT16_MAX) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                errmsg("Invalid \"pq_m\" value: %u (must be <= %u)",
+                       requested_m, (unsigned)UINT16_MAX)));
+        }
+        if (dim == 0 || dim % requested_m != 0) {
+            ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                errmsg("PQ: dimension %u should be a multiple of pq_m=%u",
+                       dim, requested_m)));
+        }
+        m = (uint16)requested_m;
+        k = 256u;
+        return;
+    }
+
     if (dim % 4u == 0) {
         m = dim / 4u;
     } else if (dim % 3u == 0) {
@@ -106,7 +122,8 @@ struct PQDistancer {
     PQDistancer() : dist_table(NULL), flag(0.0f), prepared(false)
     { std::memset(&pq, 0, sizeof(pq)); }
     void train(Relation index, FloatVectorArray samples, size_t dimension, Metric metric,
-               bool need_norm, int parallel_workers, int maintenance_work_mem);
+               bool need_norm, int parallel_workers, int maintenance_work_mem,
+               uint32 requested_m = 0);
     void prepare(Relation index, void *metap);
     void process(const char *query);
     void destroy();
@@ -142,12 +159,6 @@ struct PQDistancer {
         }
     }
     void hnsw_read_pq_center(Relation index, ProductQuantizer &pq, BlockNumber qtcode_block);
-    // Cache the trained centroids in a process-local map keyed by the index
-    // OID so PQDistancer instances created later (in scan/insert paths) can
-    // reload them without re-training. Persistence to qtcode_block is a
-    // follow-up; for now PQ state is per-process and lost on restart.
-    void stash_to_cache(Relation index);
-    bool load_from_cache(Relation index, Metric metric);
 private:
     void configure_for_metric(size_t d, size_t M, size_t nbits, Metric metric);
     mutable ProductQuantizer pq;

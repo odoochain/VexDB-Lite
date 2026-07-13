@@ -127,7 +127,7 @@ void Timer::set_stage(char*) {}
 
 }
 
-void QuantizerMetaInfo::init(QuantizerType qt_type, uint32 dimension)
+void QuantizerMetaInfo::init(QuantizerType qt_type, uint32 dimension, uint32 requested_pq_m)
 {
     quantizer_type    = qt_type;
     centroids_version = 0;
@@ -139,7 +139,8 @@ void QuantizerMetaInfo::init(QuantizerType qt_type, uint32 dimension)
         // This keeps WITH (quantizer='pq', pq_m=N) DDL accepted without
         // tripping the centroids/code version mismatch warning loop.
         metainfo.pq_metainfo.graph_pq = false;
-        pq_set_param(dimension, metainfo.pq_metainfo.m, metainfo.pq_metainfo.k);
+        pq_set_param(dimension, metainfo.pq_metainfo.m, metainfo.pq_metainfo.k,
+                     requested_pq_m);
     } else if (qt_type == QuantizerType::RABITQ) {
         metainfo.rbq_meta.enabled               = false;
         metainfo.rbq_meta.keep_vecs             = false;
